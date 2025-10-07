@@ -1,23 +1,21 @@
 #[allow(unused_imports)]
-use tool::centralities::hyper_ball::*;
+use sparkx::centralities::hyper_ball::*;
 #[allow(unused_imports)]
-use tool::communities::gve_louvain::AlgoGVELouvain;
+use sparkx::communities::gve_louvain::AlgoGVELouvain;
 #[allow(unused_imports)]
-use tool::communities::{approx_dirichlet_hkpr::*, hk_relax::*};
-use tool::graph;
+use sparkx::communities::{approx_dirichlet_hkpr::*, hk_relax::*};
+use sparkx::graph;
 #[allow(unused_imports)]
-use tool::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
+use sparkx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
 #[allow(unused_imports)]
-use tool::k_core::{batagelj_zaversnik::*, liu_et_al::*};
+use sparkx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
 #[allow(unused_imports)]
-use tool::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
-use tool::shared_slice::SharedSliceMut;
+use sparkx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
+use sparkx::shared_slice::SharedSliceMut;
 #[allow(unused_imports)]
-use tool::trails::hierholzer::*;
+use sparkx::trails::hierholzer::*;
 
 use clap::{ArgAction, Parser};
-#[allow(unused_imports)]
-use hyperloglog_rs::prelude::*;
 use static_assertions::const_assert;
 use std::fmt::Display;
 use std::fs::{OpenOptions, create_dir_all, metadata};
@@ -847,7 +845,7 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
 
-    use tool::{
+    use sparkx::{
         shared_slice::AbstractedProceduralMemory, test_common::get_or_init_dataset_exact_closeness,
         utils,
     };
@@ -897,7 +895,7 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
 
     // for i in 0..100 {
     let time = Instant::now();
-    let mut hyperball = HyperBallInner::<_, _, _, Precision13, 6>::new(&graph_mmaped)?;
+    let mut hyperball = HyperBallInner::<_, _, _, Precision4, 6>::new(&graph_mmaped)?;
     println!("hyperball {:?}", time.elapsed());
     {
         let c = hyperball.compute_closeness_centrality(true)?;

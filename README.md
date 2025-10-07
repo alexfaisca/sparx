@@ -18,8 +18,9 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 - [Installation](#installation)
 - [Data formats](#data-formats)
 - [Quick start](#quick-start)
-  - [Load & inspect](#load--inspect)
-  - [Run algorithms](#run-algorithms)
+  - [Manually Linking *SparkX*](#manual-dependency-import)
+  - [Load & inspect](#loading-inspecting-graph)
+  - [Run algorithms](#running-algorithms)
 - [Reproducibility](#reproducibility)
   - [Memory Benchmarks](#memory-benchmarks)
   - [Wall-Time Benchmarks](#wall-time-benchmarks)
@@ -59,7 +60,7 @@ If the installation was successful, a version number ≥ 1.87 should be printed.
 
 ## Installation
 
-To install the `sparkx` library the following steps must be followed.
+To install the *SparkX* library the following steps must be followed.
 Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `build_datasets.sh` it is advisable you clone `sparkx` to the same directory you have cloned `GGCAT` into if you have previously done so):
 
 ```bash
@@ -111,17 +112,116 @@ my_custom_dataset,123123,123123123
 
 To follow this guide it is advisable you first run the `build_datasets.sh` script. This way you will be able to follow along and use the provided code examples as they come.
 
-## Load & inspect
+## Manualy Linking *SparkX*
+
+As *SparkX* is not yet an indexed crate its usage requires manual linkage.
+
+### Creating a Rust Project
+
+To create a Rust project run:
+
+```bash
+cargo new myapp
+cd myapp
+```
+
+This creates a folder `myapp/` with the usual Rust project layout.
+
+```arduino
+parentdir/
+  myapp/           # new crate
+    src/           # source code
+    Cargo.toml     # cargo configuration
+```
+
+### Linking *SparkX*
+
+ - Installing *SparkX* directly from Git.
+
+  To install *SparkX* directly from Git, simply add it to the `[dependencies]` section in `myapp/Cargo.toml`:
+
+```toml
+ [dependencies]
+  # commit or tag of the version you want to use should be in rev
+  sparkx = { git = "https://github.com/alexfaisca/sparkx.git", rev = "v0.1.0" }
+  # optionally, select features to be enabled:
+  # sparkx = { git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
+```
+
+ - Installing and linking *SparkX* directly inside a Rust project.
+
+  Install *SparkX* as shown in [Installation](#installation) directly inside `myapp/`, after which, your project layout will look something like:
+
+```arduino
+parentdir/
+  myapp/           # new crate
+    sparkx/        # sparkx library
+    src/           # source code
+    Cargo.toml     # cargo configuration
+```
+
+  Define *SparkX* as a member of your workspace and add it to your project's dependencies in `myapp/Cargo.toml`:
+
+```toml
+[workspace]
+  members = [".", "sparkx"]
+
+[dependencies]
+  sparkx = { path = "./sparkx" }
+  # optionally, select features to be enabled:
+  # sparkx = { path = "./sparkx", features = ["mtx","ggcat","rayon"] }
+```
+
+
+ - Installing and linking *SparkX* in a workspace.
+
+  If your library already has a top-level `Cargo.toml` with a `[workspace]`, in similar layout to the one shown bellow:
+
+ ```arduino
+workspace/
+  myapp/           # new crate
+    src/           # source code
+    Cargo.toml     # cargo configuration
+  Cargo.toml       # workspace file
+ ```
+
+  Install *SparkX* as shown in [Installation](#installation) next to `myapp/`, after which, your project layout will look something like:
+
+ ```arduino
+workspace/
+  myapp/           # new crate
+    src/           # source code
+    Cargo.toml     # cargo configuration
+  sparkx/          # sparkx library
+  Cargo.toml       # workspace file
+ ```
+
+  Add *SparkX* to the members of the workspace in `workspace/Cargo.toml`:
+
+```toml
+[workspace]
+  members = ["myapp", "sparkx"]
+```
+
+  And then, add it to your project's dependencies in `myapp/Cargo.toml`:
+
+```toml
+[dependencies]
+  sparkx = { path = "../sparkx" }
+  # optionally, select features to be enabled:
+  # sparkx = { path = "../sparkx", features = ["mtx","ggcat","rayon"] }
+```
+
+## Loading & Inspecting a Graph
 
 ```rust
-use tool::graph::GraphMemoryMap;
+use sparkx::graph::GraphMemoryMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // path to the dataset from which a graph is to be built
     let path = "./datasets/graphs/kmer_V2a.mtx";
-    // build the graph
-    let g: GraphMemoryMap<(), (), usize> =
-        GraphMemoryMap::from_file(path, None, Some(32))?;
+    // build the graph --- graph is mutable so calling drop_cache() becomes possible
+    let mut g: GraphMemoryMap<(), (), usize> = GraphMemoryMap::from_file(path, None, Some(32))?;
     println!("graph built (|V|={:?}, |E|={})", g.size(), g.width());
     println!("metadata:\n{}", g.metadata()?);
     // drop graph's cache entry
@@ -131,23 +231,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```
 
-## Run Algorithms
+## Running Algorithms
 
 ```rust
-use tool::centralities::hyper_ball::*;
-use tool::communities::gve_louvain::*;
-use tool::communities::hk_relax::*;
-use tool::graph;
-use tool::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
-use tool::k_core::{batagelj_zaversnik::*, liu_et_al::*};
-use tool::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
-use tool::trails::hierholzer::*;
+use sparkx::centralities::hyper_ball::*;
+use sparkx::communities::gve_louvain::*;
+use sparkx::communities::hk_relax::*;
+use sparkx::graph;
+use sparkx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
+use sparkx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
+use sparkx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
+use sparkx::trails::hierholzer::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // path to the dataset from which a graph is to be built
     let path = "./datasets/graphs/kmer_V2a.mtx";
     // build the graph
-    let g: GraphMemoryMap<(), (), usize> =
+    let mut g: GraphMemoryMap<(), (), usize> =
         GraphMemoryMap::from_file(path, None, Some(32))?;
 
 
@@ -181,8 +281,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     louvain.drop_cache()?;
     println!();
 
-    let mut hyperball = HyperBallInner::<_, _, _, Precision6, 6>::new(&graph_mmaped)?;
+    // hyperball
+    let mut hyperball = HyperBall4::new(&graph_mmaped)?;
+    // get estimate of total distance from node 0 to all nodes in the graph
+    let g_dist_0 = hyperball.get_geodesic_distance(0);
+    // get estimates of total harmonic distances for all nodes in the graph
+    let hg_dists = hyperball.harmonic_geodesic_distances();
     hyperball.drop_cache()?;
+    // hyperball with manual precision and word-size configuration
+    let mut hyperball_inner = HyperBallInner::<_, _, _, Precision6, 6>::new(&graph_mmaped)?;
+    //get estimates of closeness centrality for all nodes in the graph, normalized by reacheable set
+    let r_closeness = hyperball_inner.get_or_compute_closeness_centrality(true)?;
+    //get estimates of closeness centrality for all nodes in the graph, normalized by graph size
+    let t_harmonic = hyperball_inner.get_or_compute_harmonic_centrality(false)?;
+    hyperball_inner.drop_cache()?;
 
     // drop graph's cache entry
     g.drop_cache()?;

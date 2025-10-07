@@ -3,12 +3,39 @@ use crate::shared_slice::*;
 
 use crossbeam::thread;
 use hyperloglog_rs::prelude::WordType;
-use hyperloglog_rs::prelude::*;
 use hyperloglog_rs::prelude::{HyperLogLog, HyperLogLogTrait};
 use portable_atomic::{AtomicUsize, Ordering};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
+
+// Re-export precision consts from hyperloglog_rs  for UX enhancement and portability
+/// For HyperLogLog++ registers with 2⁴ bits.
+pub use hyperloglog_rs::prelude::Precision4;
+/// For HyperLogLog++ registers with 2⁵ bits.
+pub use hyperloglog_rs::prelude::Precision5;
+/// For HyperLogLog++ registers with 2⁶ bits.
+pub use hyperloglog_rs::prelude::Precision6;
+/// For HyperLogLog++ registers with 2⁷ bits.
+pub use hyperloglog_rs::prelude::Precision7;
+/// For HyperLogLog++ registers with 2⁸ bits.
+pub use hyperloglog_rs::prelude::Precision8;
+/// For HyperLogLog++ registers with 2⁹ bits.
+pub use hyperloglog_rs::prelude::Precision9;
+/// For HyperLogLog++ registers with 2¹⁰ bits.
+pub use hyperloglog_rs::prelude::Precision10;
+/// For HyperLogLog++ registers with 2¹¹ bits.
+pub use hyperloglog_rs::prelude::Precision11;
+/// For HyperLogLog++ registers with 2¹² bits.
+pub use hyperloglog_rs::prelude::Precision12;
+/// For HyperLogLog++ registers with 2¹³ bits.
+pub use hyperloglog_rs::prelude::Precision13;
+/// For HyperLogLog++ registers with 2¹⁴ bits.
+pub use hyperloglog_rs::prelude::Precision14;
+/// For HyperLogLog++ registers with 2¹⁵ bits.
+pub use hyperloglog_rs::prelude::Precision15;
+/// For HyperLogLog++ registers with 2¹⁶ bits.
+pub use hyperloglog_rs::prelude::Precision16;
 
 type ProceduralMemoryHB<P, const B: usize> = (
     AbstractedProceduralMemoryMut<HyperLogLog<P, B>>,
