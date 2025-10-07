@@ -66,7 +66,7 @@ To install the *SparkX* library the following steps must be followed.
 Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `build_datasets.sh` it is advisable you clone `sparkx` to the same directory you have cloned `GGCAT` into if you have previously done so):
 
 ```bash
-git clone git@github.com:alexfaisca/dbg_graph_analysis.git
+git clone git@github.com:alexfaisca/sparkx.git
 ```
 
 In macOS, in the first installation, after cloning the repository, Apple's tool licensing must be accepted. You may do so by running:
@@ -78,7 +78,7 @@ sudo xcodebuild -license
 After this, you may change directory into the repository and build the library (recommended in release mode):
 
 ```bash
-cd dbg_graph_analysis
+cd sparkx
 cargo build --release
 ```
 
