@@ -1,4 +1,6 @@
-High-performance **Rust** library for large-scale **static sparse graphs analytics** built on a memory-mapped core. It includes fast implementations of:
+# Sparkx
+
+High-performance **Rust** library for large-scale **static sparse graphs analytics** on commodity hardware. Built on a memory-mapped core. It includes implementations of:
 
 - **k-core decomposition** (Batagelj–Zaversnik sequential; Liu et al. parallel)
 - **k-truss decomposition** (Burkhardt et al. sequential; PKT parallel)
