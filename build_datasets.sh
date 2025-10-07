@@ -176,6 +176,7 @@ fi
 build_one() {
 	cd "./ggcat"
 
+	local infile="$1"
 	local k="$2"
 	local idx="$3"
 
