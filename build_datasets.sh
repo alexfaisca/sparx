@@ -183,7 +183,7 @@ build_one() {
 	local base
 	base="$(basename "${infile}")"
 	base="${base%.*}" # strip one extension
-	local out="../${MAINDIR}/${WORKDIR}/graphs/graph_${idx}_${k}.lz4"
+	local out="${MAINDIR}/${WORKDIR}/graphs/graph_${idx}_${k}.lz4"
 
 	# # Prepare a temp list file for ggcat
 	# local list="one_input_${base}.txt"
@@ -246,6 +246,8 @@ for f in "${FILES[@]}"; do
 
 	((++idx))
 done
+
+cd "${MAINDIR}"
 
 echo "Building synthetic datasets using \`gen_dgd_mtx.py\`"
 
