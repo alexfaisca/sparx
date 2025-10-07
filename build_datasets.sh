@@ -226,7 +226,7 @@ for f in "${FILES[@]}"; do
 	# fi
 	# ((idx++))
 	printf -- '-> building idx=%d file=%s\n' "$idx" "$f"
-	f_path="${MAINDIR}/${WORKDIR}/graphs/$f"
+	f_path="${MAINDIR}/${WORKDIR}/data/$f"
 
 	set +e
 	build_one "$f_path" 5 "$idx"
