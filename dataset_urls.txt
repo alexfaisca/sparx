@@ -1,0 +1,9 @@
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ951/ERZ9519999/file.fasta.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ951/ERZ9518515/file.fasta.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ110/ERZ1107731/clusters.258.fa.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ951/ERZ9510940/SAMN10221803.contigs.fa.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ951/ERZ951000/749906_gut.metagenome.PRJNA217052.SRR2225847.contigs.fasta.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ110/ERZ1106923/ERR1995252.fasta.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ110/ERZ1106930/ERR1995266.fasta.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ110/ERZ1106915/ERR1995231.fasta.gz
+https://ftp.sra.ebi.ac.uk/vol1/analysis/ERZ110/ERZ1106934/ERR1995250.fasta.gz
