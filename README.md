@@ -82,7 +82,7 @@ cargo build --release
 The library has an assortment of non-default features. As an example, `feature = "rayon"` may be enabled by running the following command:
 
 ```bash
-cargo --features rayon build --release
+cargo build --features rayon --release
 ```
 
 # Data Formats
