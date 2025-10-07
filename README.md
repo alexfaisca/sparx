@@ -97,7 +97,7 @@ A script to build datasets out-of-the-box is provided for reproducibility and sa
 bash build_datasets.sh
 ```
 
-It is possible to benchmark the library with datasets outside of those built with `build_datasets.sh`, for that an entry consisting of `<dataset_name>,<V>,<E>` should be addded to `datasets_size.csv` (`<dataset_name>` should be the dataset's filename without file extension):
+It is possible to benchmark the library with datasets outside of those built with `build_datasets.sh`, to guarantee all benching related tools', e.g. plotting scripts, preconditions entry consisting of `<dataset_name>,<V>,<E>` should be added to `datasets_size.csv` (`<dataset_name>` should be the dataset's filename without file extension):
 
 ```csv
 dataset,V,E
