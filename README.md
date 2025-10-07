@@ -138,7 +138,7 @@ parentdir/
 
 ### Linking *SparkX*
 
- - Installing *SparkX* directly from Git.
+ 1. Installing *SparkX* directly from Git.
 
   To install *SparkX* directly from Git, simply add it to the `[dependencies]` section in `myapp/Cargo.toml`:
 
@@ -150,7 +150,7 @@ parentdir/
   # sparkx = { git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
 ```
 
- - Installing and linking *SparkX* directly inside a Rust project.
+ 2. Installing and linking *SparkX* directly inside a Rust project.
 
   Install *SparkX* as shown in [Installation](#installation) directly inside `myapp/`, after which, your project layout will look something like:
 
@@ -175,7 +175,7 @@ parentdir/
 ```
 
 
- - Installing and linking *SparkX* in a workspace.
+ 3. Installing and linking *SparkX* in a workspace.
 
   If your library already has a top-level `Cargo.toml` with a `[workspace]`, in similar layout to the one shown bellow:
 
