@@ -226,15 +226,16 @@ for f in "${FILES[@]}"; do
 	# fi
 	# ((idx++))
 	printf -- '-> building idx=%d file=%s\n' "$idx" "$f"
+	local f_path = "${MAINDIR}/${WORKDIR}/graphs/$f"
 
 	set +e
-	build_one "$f" 5 "$idx"
+	build_one "$f_path" 5 "$idx"
 	rc5=$?
-	build_one "$f" 10 "$idx"
+	build_one "$f_path" 10 "$idx"
 	rc10=$?
 	rc15=-100000000
 	if ((idx == 8 || idx == 9)); then
-		build_one "$f" 15 "$idx"
+		build_one "$f_path" 15 "$idx"
 		rc15=$?
 	fi
 	set -e
