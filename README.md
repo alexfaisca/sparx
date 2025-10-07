@@ -20,8 +20,8 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 - [Installation](#installation)
 - [Data formats](#data-formats)
 - [Quick start](#quick-start)
-  - [Manually Linking *SparkX*](#manual-dependency-import)
-  - [Load & inspect](#loading-inspecting-graph)
+  - [Manually Linking *SparkX*](#manualyl-linking-sparkx)
+  - [Load & inspect](#loading-&-inspecting-a-graph)
   - [Run algorithms](#running-algorithms)
 - [Reproducibility](#reproducibility)
   - [Memory Benchmarks](#memory-benchmarks)
@@ -114,7 +114,7 @@ my_custom_dataset,123123,123123123
 
 To follow this guide it is advisable you first run the `build_datasets.sh` script. This way you will be able to follow along and use the provided code examples as they come.
 
-## Manualy Linking *SparkX*
+## Manually Linking *SparkX*
 
 As *SparkX* is not yet an indexed crate its usage requires manual linkage.
 
