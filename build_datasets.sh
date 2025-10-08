@@ -147,6 +147,42 @@ fi
 
 # back to workdir
 cd ".."
+
+# directly into graphs dir to curl kmer graphs
+cd "graphs"
+
+fname=kmer_V2a.tar.gz
+curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "https://suitesparse-collection-website.herokuapp.com/MM/GenBank/kmer_V2a.tar.gz"
+echo "Decompressing ${fname}"
+gunzip -f "${fname}"
+tname="${fname%.gz}"
+tar -xvf "${tname}"
+dname="${tname%.tar}"
+mv "./${dname}/kmer_V2a.mtx" .
+rm -r "${tname}" "${dname}"
+
+fname=kmer_A2a.tar.gz
+curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "https://suitesparse-collection-website.herokuapp.com/MM/GenBank/kmer_A2a.tar.gz"
+echo "Decompressing ${fname}"
+gunzip -f "${fname}"
+tname="${fname%.gz}"
+tar -xvf "${tname}"
+dname="${tname%.tar}"
+mv "./${dname}/kmer_A2a.mtx" .
+rm -r "${tname}" "${dname}"
+
+fname=kmer_V1r.tar.gz
+curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "https://suitesparse-collection-website.herokuapp.com/MM/GenBank/kmer_V1r.tar.gz"
+echo "Decompressing ${fname}"
+gunzip -f "${fname}"
+tname="${fname%.gz}"
+tar -xvf "${tname}"
+dname="${tname%.tar}"
+mv "./${dname}/kmer_V1r.mtx" .
+rm -r "${tname}" "${dname}"
+
+# back to workdir
+cd ".."
 # back to maindir
 cd ".."
 # into parentdir
