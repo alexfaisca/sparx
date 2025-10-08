@@ -321,9 +321,9 @@ If your machine runs Linux on an `arm64` CPU, try running the equivalent archite
 RUSTFLAGS="-C target-cpu=armv8-a -C target-feature=-crypto,-sve,-sve2" cargo build --profile bench_cache
 ```
 
-However, the authors did not test the benchmarking tools work on an `arm` CPU and give no guarantees.
+However, the authors did not test the benchmarking tools work on an `arm` CPU and no guarantees are given.
 
-The authors also cannot guarantee reproducibility outside of Linux machines, as we cannot make guarantees about Valgrind on other platforms.
+The authors also cannot guarantee reproducibility outside of Linux machines, as Valgrind might not work on other platforms.
 
 To bench the heap memory usage of a given dataset `graph.mtx`, in directory `datasets/graphs/` at the library's base directory, run:
 
