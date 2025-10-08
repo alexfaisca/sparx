@@ -271,28 +271,42 @@ fn sandbox_parse<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>
     );
     println!("metadata:\n{}", graph_mmaped.metadata()?);
 
+    let time = Instant::now();
+    let mut _burkhardt_et_al = AlgoBurkhardtEtAl::new(&graph_mmaped)?;
+    println!("k-truss burkhardt et al {:?}", time.elapsed());
+    println!();
+    _burkhardt_et_al.drop_cache()?;
+
     // let time = Instant::now();
     // let mut _pkt = AlgoPKT::new(&graph_mmaped)?;
     // println!("k-truss pkt {:?}", time.elapsed());
     // println!();
     // _pkt.drop_cache()?;
-    //
-    // let time = Instant::now();
-    // let mut _burkhardt_et_al = AlgoBurkhardtEtAl::new(&graph_mmaped)?;
-    // println!("k-truss burkhardt et al {:?}", time.elapsed());
-    // println!();
-    // _burkhardt_et_al.drop_cache()?;
+
+    // for i in 0..1 {
+    //     let time = Instant::now();
+    //     let mut _pkt = AlgoPKT::new(&graph_mmaped)?;
+    //     for (idx, t) in _pkt.k_trusses().iter().enumerate() {
+    //         if *t != b[idx] {
+    //             println!("{idx} should be {} but is {t}", b[idx]);
+    //         }
+    //     }
+    //     println!("k-truss pkt {:?}", time.elapsed());
+    //     println!();
+    //     _pkt.drop_cache()?;
+    // }
+
     //
     // let time = Instant::now();
     // let mut _bz = AlgoBatageljZaversnik::new(&graph_mmaped)?;
     // println!("k-core batagelj zaversnik {:?}", time.elapsed());
     // _bz.drop_cache()?;
 
-    let time = Instant::now();
-    let mut _liu_et_al = AlgoLiuEtAl::new(&graph_mmaped)?;
-    println!("k-core liu et al {:?}", time.elapsed());
-    println!();
-    _liu_et_al.drop_cache()?;
+    // let time = Instant::now();
+    // let mut _liu_et_al = AlgoLiuEtAl::new(&graph_mmaped)?;
+    // println!("k-core liu et al {:?}", time.elapsed());
+    // println!();
+    // _liu_et_al.drop_cache()?;
 
     // let time = Instant::now();
     // let mut _louvain = AlgoGVELouvain::new(&graph_mmaped)?;

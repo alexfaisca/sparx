@@ -17,17 +17,15 @@ use crate::{
 
 use crossbeam::thread;
 use dashmap::DashMap;
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
-};
+use once_cell::sync::OnceCell;
+use std::path::{Path, PathBuf};
 
-type CacheRecord = OnceLock<GraphCache<VoidLabel, VoidLabel, usize>>;
+type CacheRecord = OnceCell<GraphCache<VoidLabel, VoidLabel, usize>>;
 type TestCache = DashMap<String, CacheRecord>;
-type ExactValueCache = DashMap<String, OnceLock<String>>;
+type ExactValueCache = DashMap<String, OnceCell<String>>;
 
-static TEST_CACHE: OnceLock<TestCache> = OnceLock::new();
-static EXACT_VALUE_CACHE: OnceLock<ExactValueCache> = OnceLock::new();
+static TEST_CACHE: OnceCell<TestCache> = OnceCell::new();
+static EXACT_VALUE_CACHE: OnceCell<ExactValueCache> = OnceCell::new();
 
 pub(crate) fn mem_cache() -> &'static TestCache {
     TEST_CACHE.get_or_init(DashMap::new)
@@ -94,10 +92,10 @@ pub(crate) fn get_or_init_dataset_cache_entry(
 ) -> Result<GraphCache<VoidLabel, VoidLabel, usize>, Box<dyn std::error::Error>> {
     let cache_id = graph_id_from_dataset_file_name(graph_path)?;
 
-    // Get or create the per-key OnceLock
+    // Get or create the per-key OnceCell
     let test_entry = mem_cache().entry(cache_id).or_try_insert_with(
         || -> Result<CacheRecord, Box<dyn std::error::Error>> {
-            let lock = OnceLock::new();
+            let lock = OnceCell::new();
             Ok(lock)
         },
     )?;
@@ -177,11 +175,11 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
     let cache_id = graph_id_from_dataset_file_name(graph_path)?;
     let e_fn = pers_cache_file_name(&graph.cache_fst_filename(), &value_type, None)?;
 
-    // Get or create the per-key OnceLock
+    // Get or create the per-key OnceCell
     let test_entry = exact_value_cache()
         .entry(cache_id.clone())
-        .or_try_insert_with(|| -> Result<OnceLock<String>, Box<dyn std::error::Error>> {
-            let lock = OnceLock::new();
+        .or_try_insert_with(|| -> Result<OnceCell<String>, Box<dyn std::error::Error>> {
+            let lock = OnceCell::new();
             Ok(lock)
         })?;
     test_entry

@@ -92,21 +92,21 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             )?
         };
 
-        let mut deg = vec![0; 128];
+        // let mut deg = vec![0; 512];
         for u in 0..offset_size {
             let deg_u = *offsets_s.get(u);
             if deg_u > max_degree {
                 max_degree = deg_u;
             }
-            deg[deg_u] += 1;
+            // deg[deg_u] += 1;
             *offsets_s.get_mut(u) = sum;
             sum += deg_u;
         }
 
-        println!("{:?} max deg {max_degree}", deg);
-        if max_degree >= u8::MAX as usize {
-            return Err(format!("Error graph has a max_degree of {max_degree} which, unforturnately, is bigger than {}, our current maximum supported size. If you feel a mistake has been made or really need this feature, please contact the developer team. We sincerely apologize.", u8::MAX).into());
-        }
+        // println!("{:?} max deg {max_degree}", deg);
+        // if max_degree >= u8::MAX as usize {
+        //     return Err(format!("Error graph has a max_degree of {max_degree} which, unforturnately, is bigger than {}, our current maximum supported size. If you feel a mistake has been made or really need this feature, please contact the developer team. We sincerely apologize.", u8::MAX).into());
+        // }
 
         cache.graph_bytes = sum;
         let neighbors =
