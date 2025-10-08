@@ -339,33 +339,31 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                             }
                             synchronize.wait();
 
-                            let mut to_process = curr.slice(0, curr.len()).ok_or_else(
-                                || -> Box<dyn std::error::Error + Send + Sync> {
-                                    "error reading curr in pkt".into()
-                                },
-                            )?;
                             // println!("new cicle initialized {} {:?}", todo, curr.ptr);
-                            while !to_process.is_empty() {
-                                todo = match todo.overflowing_sub(to_process.len()) {
+                            while !curr.is_empty() {
+                                todo = match todo.overflowing_sub(curr.len()) {
                                     (r, false) => r,
                                     _ => {
                                         return Err(format!(
                                             "error overflow when decrementing todo ({todo} - {})",
-                                            to_process.len()
+                                            curr.len()
                                         )
                                         .into());
                                     }
                                 };
+                                let to_process = curr.slice(0, curr.len()).ok_or_else(
+                                    || -> Box<dyn std::error::Error + Send + Sync> {
+                                        "error reading curr in pkt".into()
+                                    },
+                                )?;
                                 synchronize.wait();
 
                                 // ProcessSubLevel
                                 let thread_load = curr.len().div_ceil(threads);
-                                let begin = tid * thread_load;
+                                let begin = std::cmp::min(tid * thread_load, curr.len());
                                 let end = std::cmp::min(begin + thread_load, curr.len());
 
-                                for e_idx in begin..end {
-                                    let u_v = *to_process.get(e_idx);
-
+                                while let Some(u_v) = curr.pop() {
                                     let u = *neighbours_ptr.get(*er.get(u_v));
                                     let v = *neighbours_ptr.get(u_v);
 
@@ -445,8 +443,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                                     s.get(w_u).store(l, Ordering::Relaxed);
                                                 }
                                             } else if s.get(v_w).load(Ordering::Relaxed) > l
-                                                && ((u_v < w_u && *in_curr.get(w_u))
-                                                    || !*in_curr.get(w_u))
+                                                && (u_v < w_u || !*in_curr.get(w_u))
                                             {
                                                 let prev_l_v_w =
                                                     s.get(v_w).fetch_sub(1, Ordering::Relaxed);
@@ -463,8 +460,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                                     s.get(v_w).store(l, Ordering::Relaxed);
                                                 }
                                             } else if s.get(w_u).load(Ordering::Relaxed) > l
-                                                && ((u_v < v_w && *in_curr.get(v_w))
-                                                    || !*in_curr.get(v_w))
+                                                && (u_v < v_w || !*in_curr.get(v_w))
                                             {
                                                 let prev_l_w_u =
                                                     s.get(w_u).fetch_sub(1, Ordering::Relaxed);
@@ -493,22 +489,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                 for e_idx in begin..end {
                                     let edge = *to_process.get(e_idx);
                                     *processed.get_mut(edge) = true;
-                                }
-                                // println
-                                for _e in begin..end {
+                                    *in_curr.get_mut(e_idx) = false;
+                                    // println
                                     res[l as usize] += 1;
                                 }
 
                                 synchronize.wait();
-                                next = std::mem::replace(&mut curr, next).clear();
+
+                                if tid == 0 {
+                                    curr.clone().clear();
+                                }
+                                next = std::mem::replace(&mut curr, next);
                                 in_next = std::mem::replace(&mut in_curr, in_next);
 
                                 synchronize.wait();
-                                to_process = curr.slice(0, curr.len()).ok_or_else(
-                                    || -> Box<dyn std::error::Error + Send + Sync> {
-                                        "error reading curr in pkt".into()
-                                    },
-                                )?;
                                 synchronize.wait();
                             }
                             l = match l.overflowing_add(1) {
