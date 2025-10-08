@@ -218,7 +218,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                 let mut ceil = *index_ptr.get(v + 1);
                                 let reciprocal =  loop {
                                     if floor > ceil {
-                                        return Err(format!("error couldn't find reciprocal for unique (for now) edge {edge_offset}, u: ({u}) -> v: ({v})").into());
+                                        return Err(format!("error couldn't find reciprocal for edge {edge_offset}, u: ({u}) -> v: ({v})").into());
                                     }
 
                                     let m = floor + (ceil - floor) / 2;

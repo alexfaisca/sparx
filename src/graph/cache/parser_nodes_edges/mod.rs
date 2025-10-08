@@ -85,7 +85,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         }
 
         // make cache readonly (for now only serves to allow clone() on instances)
-        cache.make_readonly(nodes_path.as_ref())?;
+        cache.finish(nodes_path.as_ref())?;
 
         Ok(cache)
     }
@@ -293,9 +293,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                             let mut node = node.iter().peekable();
 
                             let id: usize = node.next().unwrap().parse()?;
-                            if id == 37931 {
-                                println!("{tid} -> {id} {line_str}");
-                            }
                             offsets.get(id).add(1, Ordering::Relaxed);
                         }
                         Ok(())
@@ -318,14 +315,20 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
+        let mut offsets_s = unsafe {
+            offsets.shared_slice().cast::<usize>().ok_or_else(
+                || -> Box<dyn std::error::Error> { "error getting non atomic slice".into() },
+            )?
+        };
+
         // prefix sum degrees to get offsets
         let mut sum: usize = 0;
         for u in 0..node_count {
-            let degree: usize = offsets.get(u).load(Ordering::Relaxed);
-            offsets.get(u).store(sum, Ordering::Relaxed);
+            let degree: usize = *offsets_s.get(u);
+            *offsets_s.get_mut(u) = sum;
             sum += degree;
         }
-        offsets.get_mut(node_count).store(sum, Ordering::Relaxed);
+        *offsets_s.get_mut(node_count) = sum;
         offsets.flush()?;
 
         let neighbors =
@@ -336,12 +339,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let counters_fn =
             cache_file_name(&self.offsets_filename, &FileType::Helper(H::H), Some(0))?;
         let counters = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&counters_fn, node_count, true)?;
-
-        let offsets_s = unsafe {
-            offsets.shared_slice().cast::<usize>().ok_or_else(
-                || -> Box<dyn std::error::Error> { "error getting non atomic slice".into() },
-            )?
-        };
         // write edges
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::with_capacity(threads);
@@ -462,7 +459,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // for batch_file in batches {
         //     let _ = std::fs::remove_file(batch_file);
         // }
-
         self.graph_bytes = sum;
         self.index_bytes = offsets_size;
 
