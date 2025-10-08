@@ -309,14 +309,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Memory Benchmarks
 
-To obtain our memory benchmarking results we made use of a custom `cargo` target which launches the process and records the memory usage frame by frame using `valgrind --tool=massif`. To reproduce our results, on a linux machine, with an x86 archtecture CPU, run:
+To obtain our memory benchmarking results we made use of a custom `cargo` target which launches the process and records the memory usage frame by frame using `valgrind --tool=massif`. To reproduce our results, on a Linux machine, with an `x86` architecture CPU, first build the `cargo` profile by running:
 
 ```bash
 RUSTFLAGS="-C target-cpu=x86-64 -C target-feature=-sha" cargo build --profile bench_cache
 ```
 
-We cannot guarantee reproducibility outside of linux machines, as we cannot make guarantees about Valgrind on other platforms.
-Then, to bench the heap memory usage of a given dataset `graph.mtx`, in directory `datasets/graphs/` at the library's base directory, run:
+If your machine runs Linux on an `arm64` CPU, try running the equivalent architecture command:
+
+```bash
+RUSTFLAGS="-C target-cpu=armv8-a -C target-feature=-crypto,-sve,-sve2" cargo build --profile bench_cache
+```
+
+However, the authors did not test the benchmarking tools work on an `arm` CPU and give no guarantees.
+
+The authors also cannot guarantee reproducibility outside of Linux machines, as we cannot make guarantees about Valgrind on other platforms.
+
+To bench the heap memory usage of a given dataset `graph.mtx`, in directory `datasets/graphs/` at the library's base directory, run:
 
 ```bash
 cargo cache --tool=massif --dataset=./datasets/graphs/graph.mtx -t target_profile
