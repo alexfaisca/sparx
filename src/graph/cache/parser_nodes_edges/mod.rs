@@ -265,7 +265,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (r, false) => r,
         };
 
-        let mut offsets = AbstractedProceduralMemoryMut::<AtomicUsize>::from_file(
+        let offsets = AbstractedProceduralMemoryMut::<AtomicUsize>::from_file(
             &self.offsets_file,
             offsets_size,
         )?;
