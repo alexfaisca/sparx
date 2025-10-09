@@ -63,7 +63,7 @@ def plot_mean_ci_vs_t(df: pd.DataFrame, value_col: str, title: str, ylabel: str,
         sub = sub.sort_values('t')
         ax.plot(sub['t'], sub['mean'], marker='o', label=f"eps={eps}")
         ax.fill_between(sub['t'], sub['mean'] - sub['ci'], sub['mean'] + sub['ci'], alpha=0.2)
-    ax.set_xlabel("t")
+    ax.set_xlabel("Temperature")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.grid(True, linestyle='--', alpha=0.5)
@@ -94,8 +94,8 @@ def plot_boxplots_conductance(df: pd.DataFrame, outdir: str, dataset: str):
         t_vals = sorted(sub['t'].unique())
         data = [sub[sub['t'] == t]['conductance'].values for t in t_vals]
         ax.boxplot(data, tick_labels=[str(t) for t in t_vals], showfliers=False)
-        ax.set_title(f"{dataset} — Conductance by t (eps={eps})")
-        ax.set_xlabel("t")
+        ax.set_title(f"Conductance vs Temperature (ε = {eps}) — {dataset}")
+        ax.set_xlabel("Temperature")
         if c == 0:
             ax.set_ylabel("Conductance")
         ax.grid(True, axis='y', linestyle='--', alpha=0.4)
@@ -136,7 +136,7 @@ def make_plots_for_dataset(df: pd.DataFrame, dataset: str, outdir: str) -> None:
     # Core plots
     plot_mean_ci_vs_t(
         dfd, value_col='conductance',
-        title=f"{dataset} — conductance vs t (mean ± 95% CI)",
+        title=f"Conductance vs Temperature — {dataset}",
         ylabel="conductance",
         outpath=os.path.join(outdir, f"res_hk_relax_{dataset}_conductance_vs_t.png"),
         ylog=True  # often helpful
@@ -146,7 +146,7 @@ def make_plots_for_dataset(df: pd.DataFrame, dataset: str, outdir: str) -> None:
 
     plot_mean_ci_vs_t(
         dfd, value_col='cluster_size',
-        title=f"{dataset} — cluster size vs t (mean ± 95% CI)",
+        title=f"Cluster Size vs Temperature — {dataset}",
         ylabel="cluster size",
         outpath=os.path.join(outdir, f"res_hk_relax_{dataset}_cluster_size_vs_t.png"),
         ylog=False
@@ -154,8 +154,8 @@ def make_plots_for_dataset(df: pd.DataFrame, dataset: str, outdir: str) -> None:
 
     plot_mean_ci_vs_t(
         dfd, value_col='runtime_secs',
-        title=f"{dataset} — runtime vs t (mean ± 95% CI)",
-        ylabel="runtime (μs)",
+        title=f"Runtime vs Temperature — {dataset}",
+        ylabel="Runtime (μs)",
         outpath=os.path.join(outdir, f"res_hk_relax_{dataset}_runtime_vs_t.png"),
         ylog=False
     )
