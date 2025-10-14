@@ -1,4 +1,4 @@
-# Sparkx
+# SparX
 
 High-performance **Rust** library for large-scale **static sparse graphs analytics** on commodity hardware. Built on a memory-mapped core. It includes implementations of:
 
@@ -20,7 +20,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 - [Installation](#installation)
 - [Data formats](#data-formats)
 - [Quick start](#quick-start)
-  - [Manually Linking *SparkX*](#manually-linking-sparkx)
+  - [Manually Linking *SparX*](#manually-linking-sparkx)
   - [Load & inspect](#loading--inspecting-a-graph)
   - [Run algorithms](#running-algorithms)
 - [Reproducibility](#reproducibility)
@@ -62,11 +62,11 @@ If the installation was successful, a version number ≥ 1.87 should be printed.
 
 ## Installation
 
-To install the *SparkX* library the following steps must be followed.
+To install the *SparX* library the following steps must be followed.
 Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `build_datasets.sh` it is advisable you clone `sparkx` to the same directory you have cloned `GGCAT` into if you have previously done so):
 
 ```bash
-git clone git@github.com:alexfaisca/sparkx.git
+git clone git@github.com:alexfaisca/sparx.git
 ```
 
 In macOS, in the first installation, after cloning the repository, Apple's tool licensing must be accepted. You may do so by running:
@@ -78,7 +78,7 @@ sudo xcodebuild -license
 After this, you may change directory into the repository and build the library (recommended in release mode):
 
 ```bash
-cd sparkx
+cd sparx
 cargo build --release
 ```
 
@@ -114,9 +114,9 @@ my_custom_dataset,123123,123123123
 
 To follow this guide it is advisable you first run the `build_datasets.sh` script. This way you will be able to follow along and use the provided code examples as they come.
 
-## Manually Linking *SparkX*
+## Manually Linking *SparX*
 
-As *SparkX* is not yet an indexed crate its usage requires manual linkage.
+As *SparX* is not yet an indexed crate its usage requires manual linkage.
 
 ### Creating a Rust Project
 
@@ -136,11 +136,11 @@ parentdir/
     Cargo.toml     # cargo configuration
 ```
 
-### Linking *SparkX*
+### Linking *SparX*
 
-#### 1. Installing *SparkX* directly from Git.
+#### 1. Installing *SparX* directly from Git.
 
-  To install *SparkX* directly from Git, simply add it to the `[dependencies]` section in `myapp/Cargo.toml`:
+  To install *SparX* directly from Git, simply add it to the `[dependencies]` section in `myapp/Cargo.toml`:
 
 ```toml
  [dependencies]
@@ -150,9 +150,9 @@ parentdir/
   # sparkx = { git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
 ```
 
-#### 2. Installing and linking *SparkX* directly inside a Rust project.
+#### 2. Installing and linking *SparX* directly inside a Rust project.
 
-  Install *SparkX* as shown in [Installation](#installation) directly inside `myapp/`, after which, your project layout will look something like:
+  Install *SparX* as shown in [Installation](#installation) directly inside `myapp/`, after which, your project layout will look something like:
 
 ```arduino
 parentdir/
@@ -162,7 +162,7 @@ parentdir/
     Cargo.toml     # cargo configuration
 ```
 
-  Define *SparkX* as a member of your workspace and add it to your project's dependencies in `myapp/Cargo.toml`:
+  Define *SparX* as a member of your workspace and add it to your project's dependencies in `myapp/Cargo.toml`:
 
 ```toml
 [workspace]
@@ -175,7 +175,7 @@ parentdir/
 ```
 
 
-#### 3. Installing and linking *SparkX* in a workspace.
+#### 3. Installing and linking *SparX* in a workspace.
 
   If your library already has a top-level `Cargo.toml` with a `[workspace]`, in similar layout to the one shown bellow:
 
@@ -187,7 +187,7 @@ workspace/
   Cargo.toml       # workspace file
  ```
 
-  Install *SparkX* as shown in [Installation](#installation) next to `myapp/`, after which, your project layout will look something like:
+  Install *SparX* as shown in [Installation](#installation) next to `myapp/`, after which, your project layout will look something like:
 
  ```arduino
 workspace/
@@ -198,7 +198,7 @@ workspace/
   Cargo.toml       # workspace file
  ```
 
-  Add *SparkX* to the members of the workspace in `workspace/Cargo.toml`:
+  Add *SparX* to the members of the workspace in `workspace/Cargo.toml`:
 
 ```toml
 [workspace]

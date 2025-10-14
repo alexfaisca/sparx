@@ -1,19 +1,19 @@
 #[allow(unused_imports)]
-use sparkx::centralities::hyper_ball::*;
+use sparx::centralities::hyper_ball::*;
 #[allow(unused_imports)]
-use sparkx::communities::gve_louvain::AlgoGVELouvain;
+use sparx::communities::gve_louvain::AlgoGVELouvain;
 #[allow(unused_imports)]
-use sparkx::communities::{approx_dirichlet_hkpr::*, hk_relax::*};
-use sparkx::graph;
+use sparx::communities::{approx_dirichlet_hkpr::*, hk_relax::*};
+use sparx::graph;
 #[allow(unused_imports)]
-use sparkx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
+use sparx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
 #[allow(unused_imports)]
-use sparkx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
+use sparx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
 #[allow(unused_imports)]
-use sparkx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
-use sparkx::shared_slice::SharedSliceMut;
+use sparx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
+use sparx::shared_slice::SharedSliceMut;
 #[allow(unused_imports)]
-use sparkx::trails::hierholzer::*;
+use sparx::trails::hierholzer::*;
 
 use clap::{ArgAction, Parser};
 use static_assertions::const_assert;
@@ -33,7 +33,7 @@ const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
 
 #[derive(Parser)]
 #[command(
-    name = "'SparkX'",
+    name = "'SparX'",
     version = "0.1",
     long_about = "Very pretentious name, for a library so small. I know... ('~')\n The contents of this crate should be a good start for a solid tool though. :)"
 )]
@@ -859,7 +859,7 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
 
-    use sparkx::{
+    use sparx::{
         shared_slice::AbstractedProceduralMemory, test_common::get_or_init_dataset_exact_closeness,
         utils,
     };
