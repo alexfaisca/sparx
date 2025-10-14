@@ -1,11 +1,11 @@
 use core::panic;
 use std::collections::HashSet;
 
-use proc_macro::{Ident, TokenStream};
+use proc_macro::TokenStream;
 use quote::{ToTokens, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Fields, Item, ItemStruct, Meta, MetaList, Path, Token, Type,
-    parse, parse_macro_input, punctuated::Punctuated,
+    Attribute, Data, DeriveInput, Fields, Item, ItemStruct, Meta, MetaList, Token, Type, parse,
+    parse_macro_input, punctuated::Punctuated,
 };
 
 static DEFAULT_FIELD_NAME_FOR_EDGE_DEST: &str = "dest_node";

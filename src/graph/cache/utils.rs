@@ -108,7 +108,7 @@ pub fn graph_id_from_cache_file_name(
 #[allow(dead_code)]
 fn graph_id_and_dir_from_cache_file_name(
     cache_filename: &str,
-    target_type: &FileType,
+    _target_type: &FileType,
 ) -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
     let path = Path::new(cache_filename);
 
@@ -147,11 +147,11 @@ fn graph_id_and_dir_from_cache_file_name(
 
     #[cfg(any(test, feature = "bench"))]
     // check if parent_dir needs tweaking for specific target type
-    if *target_type == FileType::Test(H::H) {
+    if *_target_type == FileType::Test(H::H) {
         return Ok((id, PathBuf::from(CACHE_DIR)));
-    } else if *target_type == FileType::ExactClosenessCentrality(H::H)
-        || *target_type == FileType::ExactHarmonicCentrality(H::H)
-        || *target_type == FileType::ExactLinCentrality(H::H)
+    } else if *_target_type == FileType::ExactClosenessCentrality(H::H)
+        || *_target_type == FileType::ExactHarmonicCentrality(H::H)
+        || *_target_type == FileType::ExactLinCentrality(H::H)
     {
         return Ok((id, PathBuf::from(parent_dir).join(EXACT_VALUE_CACHE_DIR)));
     }

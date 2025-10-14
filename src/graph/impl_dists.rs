@@ -1,15 +1,8 @@
-use crossbeam::thread;
-use num_cpus::get_physical;
-use portable_atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
-
-use crate::shared_slice::SharedSlice;
-
 use super::GraphMemoryMap;
 
 #[allow(dead_code)]
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphMemoryMap<N, E, Ix> {
-    pub(crate) fn degree_dist_impl(&self) -> Result<Box<&[usize]>, Box<dyn std::error::Error>> {
+    pub(crate) fn degree_dist_impl(&self) -> Result<Box<[usize]>, Box<dyn std::error::Error>> {
         unimplemented!();
         // let node_count = self.size();
         // let threads = self.thread_num().max(get_physical() * 2);

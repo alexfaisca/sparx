@@ -11,6 +11,7 @@ use sparx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
 use sparx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
 #[allow(unused_imports)]
 use sparx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
+#[allow(unused_imports)]
 use sparx::shared_slice::SharedSliceMut;
 #[allow(unused_imports)]
 use sparx::trails::hierholzer::*;
@@ -213,7 +214,7 @@ fn main() {
 }
 
 // Experimentar simples, depois rustworkx, depois métodos mais eficientes
-#[expect(dead_code)]
+#[allow(dead_code)]
 fn sandbox_open<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     data_path: String,
     threads: Option<u8>,
@@ -1264,6 +1265,7 @@ pub fn general_profile<P: AsRef<Path>>(
  * Helper Structs & Functions
  * */
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct HkprRecord<'a> {
     dataset: &'a str,
@@ -1343,6 +1345,7 @@ fn csv_escape(field: &str) -> String {
 }
 
 /// Convert a record to a CSV line (no trailing newline).
+#[allow(dead_code)]
 fn record_to_csv_line(rec: &HkprRecord<'_>) -> String {
     // Numeric fields don’t need escaping.
     // For dataset we call csv_escape in case it has commas/spaces/etc.
@@ -1388,6 +1391,7 @@ fn _append_record(csv_path: impl AsRef<Path>, rec: &HkprRecord<'_>) -> io::Resul
 }
 
 /// Append many records efficiently (header once if needed).
+#[allow(dead_code)]
 fn append_records(csv_path: impl AsRef<Path>, recs: &[HkprRecord<'_>]) -> io::Result<()> {
     let path = csv_path.as_ref();
     if let Some(dir) = path.parent() {
@@ -1554,6 +1558,7 @@ pub fn louvain_new_run_id() -> u128 {
 }
 
 // Small helper to get a &str dataset label from a path
+#[allow(dead_code)]
 fn filename_only<P: AsRef<Path>>(p: P) -> Result<&'static str, Box<dyn std::error::Error>> {
     // SAFETY: We return a leaked &'static str to avoid lifetime plumbing.
     // If you prefer no leak, thread the String around instead.
