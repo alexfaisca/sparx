@@ -20,7 +20,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 - [Installation](#installation)
 - [Data formats](#data-formats)
 - [Quick start](#quick-start)
-  - [Manually Linking *SparX*](#manually-linking-sparkx)
+  - [Manually Linking *SparX*](#manually-linking-sparx)
   - [Load & inspect](#loading--inspecting-a-graph)
   - [Run algorithms](#running-algorithms)
 - [Reproducibility](#reproducibility)
@@ -63,7 +63,7 @@ If the installation was successful, a version number ≥ 1.87 should be printed.
 ## Installation
 
 To install the *SparX* library the following steps must be followed.
-Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `build_datasets.sh` it is advisable you clone `sparkx` to the same directory you have cloned `GGCAT` into if you have previously done so):
+Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `build_datasets.sh` it is advisable you clone `sparx` to the same directory you have cloned `GGCAT` into if you have previously done so):
 
 ```bash
 git clone git@github.com:alexfaisca/sparx.git
@@ -145,9 +145,9 @@ parentdir/
 ```toml
  [dependencies]
   # commit or tag of the version you want to use should be in rev
-  sparkx = { git = "https://github.com/alexfaisca/sparkx.git", rev = "v0.1.0" }
+  sparx = { git = "https://github.com/alexfaisca/sparx.git", rev = "v0.1.0" }
   # optionally, select features to be enabled:
-  # sparkx = { git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
+  # sparx = { git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
 ```
 
 #### 2. Installing and linking *SparX* directly inside a Rust project.
@@ -157,7 +157,7 @@ parentdir/
 ```arduino
 parentdir/
   myapp/           # new crate
-    sparkx/        # sparkx library
+    sparx/         # sparx library
     src/           # source code
     Cargo.toml     # cargo configuration
 ```
@@ -166,12 +166,12 @@ parentdir/
 
 ```toml
 [workspace]
-  members = [".", "sparkx"]
+  members = [".", "sparx"]
 
 [dependencies]
-  sparkx = { path = "./sparkx" }
+  sparx = { path = "./sparx" }
   # optionally, select features to be enabled:
-  # sparkx = { path = "./sparkx", features = ["mtx","ggcat","rayon"] }
+  # sparx = { path = "./sparx", features = ["mtx","ggcat","rayon"] }
 ```
 
 
@@ -194,7 +194,7 @@ workspace/
   myapp/           # new crate
     src/           # source code
     Cargo.toml     # cargo configuration
-  sparkx/          # sparkx library
+  sparx/           # sparx library
   Cargo.toml       # workspace file
  ```
 
@@ -202,22 +202,22 @@ workspace/
 
 ```toml
 [workspace]
-  members = ["myapp", "sparkx"]
+  members = ["myapp", "sparx"]
 ```
 
   And then, add it to your project's dependencies in `myapp/Cargo.toml`:
 
 ```toml
 [dependencies]
-  sparkx = { path = "../sparkx" }
+  sparx = { path = "../sparx" }
   # optionally, select features to be enabled:
-  # sparkx = { path = "../sparkx", features = ["mtx","ggcat","rayon"] }
+  # sparx = { path = "../sparx", features = ["mtx","ggcat","rayon"] }
 ```
 
 ## Loading & Inspecting a Graph
 
 ```rust
-use sparkx::graph::GraphMemoryMap;
+use sparx::graph::GraphMemoryMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // path to the dataset from which a graph is to be built
@@ -236,14 +236,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Running Algorithms
 
 ```rust
-use sparkx::centralities::hyper_ball::*;
-use sparkx::communities::gve_louvain::*;
-use sparkx::communities::hk_relax::*;
-use sparkx::graph;
-use sparkx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
-use sparkx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
-use sparkx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
-use sparkx::trails::hierholzer::*;
+use sparx::centralities::hyper_ball::*;
+use sparx::communities::gve_louvain::*;
+use sparx::communities::hk_relax::*;
+use sparx::graph;
+use sparx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
+use sparx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
+use sparx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
+use sparx::trails::hierholzer::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // path to the dataset from which a graph is to be built
