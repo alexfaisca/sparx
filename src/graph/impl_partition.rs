@@ -78,7 +78,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         let threads = self.thread_num().max(get_physical() * 2);
         let node_load = node_count.div_ceil(threads);
 
-        let offsets_ptr = SharedSlice::<usize>::new(self.offsets_ptr(), self.offsets_size());
+        let offsets_ptr = SharedSlice::<Ix>::new(self.offsets_ptr(), self.offsets_size());
         // helper indexer
         let h_fn = self.build_helper_filename(1)?;
         // allocate |V| + 1 usize's to store the beginning and end offsets for each node's edges
@@ -102,7 +102,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 handles.push(scope.spawn(move |_| {
                     // mark isolated nodes
                     for u in begin..end {
-                        if offsets_ptr.get(u + 1) - *offsets_ptr.get(u) == 0 {
+                        if offsets_ptr.get(u + 1).index() - offsets_ptr.get(u).index() == 0 {
                             let comm_u = *communities.get(u);
                             assert!(comm_u <= comm_count);
                             *counter.get_mut(comm_u) = 1;
@@ -127,7 +127,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                     let isolated_nodes_comm = isolated_nodes_comm.load(Ordering::Relaxed);
 
                     for u in begin..end {
-                        if offsets_ptr.get(u + 1) - *offsets_ptr.get(u) == 0 {
+                        if offsets_ptr.get(u + 1).index() - offsets_ptr.get(u).index() == 0 {
                             *communities.get_mut(u) = isolated_nodes_comm;
                         } else {
                             *communities.get_mut(u) -= *counter.get(*communities.get(u));

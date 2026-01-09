@@ -16,30 +16,38 @@ use std::time::Instant;
 type Weight = f64;
 type AtomicWeight = AtomicF64;
 
-type ProceduralMemoryGVELouvain = (
+type ProceduralMemoryGVELouvain<Ix> = (
     // K' --- renamed to k
     AbstractedProceduralMemoryMut<AtomicWeight>,
     // Σ' --- renamed to sigma
     AbstractedProceduralMemoryMut<AtomicWeight>,
     // first CSR
     // G'.index --- renamed to gdi
+    // NB: kept `usize`-width (not `Ix`), rather than `node_count`-bounded, because during
+    // aggregation (`louvain_aggregate`) this array's `next_index` role is unsafely reinterpreted,
+    // in-place, as an `AtomicUsize` array (`next_index.cast::<AtomicUsize>()`) to serve as a
+    // lock-free edge counter --- a trick that requires the element size to match `AtomicUsize`'s.
     AbstractedProceduralMemoryMut<usize>,
     // G'.edges --- renamed to gde
-    AbstractedProceduralMemoryMut<usize>,
+    AbstractedProceduralMemoryMut<Ix>,
     // G'.weights --- renamed to gdw
     AbstractedProceduralMemoryMut<Weight>,
     // second CSR
-    // G''.index --- renamed to gddi
+    // G''.index --- renamed to gddi (see `gdi`'s note: swaps roles with it across passes, so it
+    // is subject to the same `usize`-width constraint)
     AbstractedProceduralMemoryMut<usize>,
     // G''.edges --- renamed to gdde
-    AbstractedProceduralMemoryMut<usize>,
+    AbstractedProceduralMemoryMut<Ix>,
     // G''.weights --- renamed to gddw
     AbstractedProceduralMemoryMut<Weight>,
     // processed --- flags node as processed
     AbstractedProceduralMemoryMut<AtomicBool>,
     // C' --- renamed to coms (C is stored as a member of the struct)
+    // NB: kept `usize`-width for the same reason as `gdi`/`gddi`: reinterpreted, in-place, as an
+    // `f64` array (`coms.cast::<f64>()`) when computing the final partition's modularity.
     AbstractedProceduralMemoryMut<usize>,
     // Helper array for C' renumbering, dendrogram lookup & CSR aggregation
+    // NB: kept `usize`-width for the same reason (reinterpreted as `f64` via `helper.cast::<f64>()`).
     AbstractedProceduralMemoryMut<usize>,
 );
 
@@ -230,7 +238,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryGVELouvain, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryGVELouvain<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -238,7 +246,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryGVELouvain, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryGVELouvain<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -246,7 +254,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryGVELouvain,
+        proc_mem: ProceduralMemoryGVELouvain<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -255,7 +263,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryGVELouvain,
+        proc_mem: ProceduralMemoryGVELouvain<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -294,7 +302,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
     fn init_cache_mem_impl(
         &self,
-    ) -> Result<ProceduralMemoryGVELouvain, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryGVELouvain<Ix>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
@@ -313,10 +321,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         let k = SharedSliceMut::<AtomicWeight>::abst_mem_mut(&k_fn, node_count, true)?;
         let sigma = SharedSliceMut::<AtomicWeight>::abst_mem_mut(&s_fn, node_count, true)?;
         let gdi = SharedSliceMut::<usize>::abst_mem_mut(&gdi_fn, 2 * node_count, true)?;
-        let gde = SharedSliceMut::<usize>::abst_mem_mut(&gde_fn, edge_count, true)?;
+        let gde = SharedSliceMut::<Ix>::abst_mem_mut(&gde_fn, edge_count, true)?;
         let gdw = SharedSliceMut::<Weight>::abst_mem_mut(&gdw_fn, edge_count, true)?;
         let gddi = SharedSliceMut::<usize>::abst_mem_mut(&gddi_fn, 2 * node_count, true)?;
-        let gdde = SharedSliceMut::<usize>::abst_mem_mut(&gdde_fn, edge_count, true)?;
+        let gdde = SharedSliceMut::<Ix>::abst_mem_mut(&gdde_fn, edge_count, true)?;
         let gddw = SharedSliceMut::<Weight>::abst_mem_mut(&gddw_fn, edge_count, true)?;
         let processed = SharedSliceMut::<AtomicBool>::abst_mem_mut(&a_fn, node_count, true)?;
         let coms = SharedSliceMut::<usize>::abst_mem_mut(&c_fn, node_count, true)?;
@@ -324,8 +332,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         // renumbered community memberships (O(|V|) space)
         let help = SharedSliceMut::<usize>::abst_mem_mut(&h_fn, edge_count.max(node_count), true)?;
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // initialize
         thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
@@ -353,8 +361,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let weights: Vec<Weight> = vec![1.; u16::MAX as usize];
                         for u in begin..end {
-                            let u_start = *index_ptr.get(u);
-                            let u_end = *index_ptr.get(u + 1);
+                            let u_start = index_ptr.get(u).index();
+                            let u_end = index_ptr.get(u + 1).index();
                             let out_offset = u * 2;
                             let deg_u = match u_end.overflowing_sub(u_start) {
                                 (r, false) => r,
@@ -381,7 +389,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                             *gdi.get_mut(out_offset) = u_start;
                             *gdi.get_mut(out_offset + 1) = u_end;
 
-                            // copy G onto G'
+                            // copy G onto G' --- no copy/alloc needed: `edges` already borrows the
+                            // `Ix`-width neighbours straight out of the original graph's mmap, and
+                            // `gde` now stores them at the same width, so this is a plain memcpy.
                             gde.write_slice(u_start, edges);
                             gdw.write_slice(u_start, &weights[0..(u_end - u_start)]);
 
@@ -472,14 +482,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         comm_count: usize,
         nmap: &mut HashMap<usize, Weight>,
         index: SharedSliceMut<usize>,
-        edges: SharedSliceMut<usize>,
+        edges: SharedSliceMut<Ix>,
         weights: SharedSliceMut<Weight>,
         coms: SharedSliceMut<usize>,
         u: usize,
         self_allowed: bool,
     ) {
         for e_idx in *index.get(2 * u)..*index.get(2 * u + 1) {
-            let v = *edges.get(e_idx);
+            let v = edges.get(e_idx).index();
             if !self_allowed && v == u {
                 continue;
             }
@@ -565,7 +575,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         processed: SharedSliceMut<AtomicBool>,
         idx: SharedSliceMut<usize>,
         mut next_index: SharedSliceMut<usize>,
-        e: SharedSliceMut<usize>,
+        e: SharedSliceMut<Ix>,
         w: SharedSliceMut<Weight>,
         mut c: SharedSliceMut<usize>,
         mut helper: SharedSliceMut<usize>,
@@ -655,7 +665,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                                         // mark all neighbors of u to be processed in the next iteration
                                         for idx in *idx.get(u * 2)..*idx.get(u * 2 + 1) {
                                             processed
-                                                .get(*e.get(idx))
+                                                .get(e.get(idx).index())
                                                 .store(false, Ordering::Relaxed);
                                         }
                                     } else {
@@ -708,8 +718,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         processed: SharedSliceMut<AtomicBool>,
         index: SharedSliceMut<usize>,
         mut next_index: SharedSliceMut<usize>,
-        edges: SharedSliceMut<usize>,
-        mut next_edges: SharedSliceMut<usize>,
+        edges: SharedSliceMut<Ix>,
+        mut next_edges: SharedSliceMut<Ix>,
         weights: SharedSliceMut<Weight>,
         mut next_weights: SharedSliceMut<Weight>,
         coms: SharedSliceMut<usize>,
@@ -809,7 +819,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                                 }
 
                                 // store edge
-                                *next_edges.get_mut(*next_index.get(c * 2) + total) = d;
+                                *next_edges.get_mut(*next_index.get(c * 2) + total) = Ix::new(d);
                                 *next_weights.get_mut(*next_index.get(c * 2) + total) = w;
 
                                 // increment counts
@@ -854,7 +864,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
     fn compute_with_proc_mem_impl(
         &mut self,
-        proc_mem: ProceduralMemoryGVELouvain,
+        proc_mem: ProceduralMemoryGVELouvain<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();

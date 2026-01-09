@@ -15,8 +15,13 @@ pub trait Graph {
     fn s(&self) -> usize;
     /// |E|
     fn w(&self) -> usize;
+    /// Iterator type returned by [`neigh`](Graph::neigh); borrows no allocation --- implementors
+    /// are expected to walk the graph's adjacency representation directly, in place.
+    type Neigh<'a>: Iterator<Item = usize>
+    where
+        Self: 'a;
     /// neighbour function
-    fn neigh(&self, u: usize) -> Box<[usize]>;
+    fn neigh(&self, u: usize) -> Self::Neigh<'_>;
     fn cache_file_name(
         &self,
         target: CacheFile,
@@ -252,19 +257,20 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
         let (mut visited, mut finished) = proc_mem;
         let mut par = self.parents.shared_slice();
 
-        let mut next = Vec::with_capacity(self.g.s());
+        // explicit DFS stack: pairs each pending node with an in-place, resumable neighbour
+        // iterator (no per-node allocation/copy of its adjacency list).
+        let mut next: Vec<(usize, G::Neigh<'_>)> = Vec::with_capacity(self.g.s());
 
-        next.push((self.source, 0));
+        next.push((self.source, self.g.neigh(self.source)));
         *par.get_mut(self.source) = self.source;
+        // mark the source visited up front --- otherwise a back-edge cycling to the source (a
+        // perfectly normal case in any non-trivial/cyclic graph) would be mistaken for an
+        // undiscovered node and re-processed as a fresh tree edge.
+        *visited.get_mut(self.source) = true;
         let mut time = 1;
 
-        while let Some((u, mut idx)) = next.pop() {
-            let neigh = self.g.neigh(u);
-
-            while idx < neigh.len() {
-                let v = neigh[idx];
-                idx += 1;
-
+        'outer: while let Some((u, mut neigh)) = next.pop() {
+            while let Some(v) = neigh.next() {
                 if let ControlFlow::Break(()) = self.visit.examine_edge(u, v) {
                     return Ok(());
                 }
@@ -278,11 +284,15 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
                         return Ok(());
                     }
                     time += 1;
-                    // resume u later; descend to v now
-                    next.push((u, idx));
-                    next.push((v, 0));
-                    // break to process v immediately (depth-first)
-                    continue;
+                    // resume u later; descend to v now. `u` is only paused, not finished, so we
+                    // must skip straight past the "finish u" block below and let the outer loop
+                    // pop (and process) `v` next --- a plain inner-loop `continue`/`break` cannot
+                    // express this (it would either re-examine u's remaining neighbours before v,
+                    // or wrongly fall through to mark u finished while it still has unexamined
+                    // neighbours).
+                    next.push((u, neigh));
+                    next.push((v, self.g.neigh(v)));
+                    continue 'outer;
                 } else if !finished.get(v) {
                     // back edge; in UNDIRECTED graphs, ignore the edge to parent
                     if *par.get(u) != v {

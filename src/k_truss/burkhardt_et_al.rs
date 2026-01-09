@@ -189,8 +189,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
     ) -> Result<(), Box<dyn std::error::Error>> {
         let edge_count = self.g.width();
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // Shared atomic & simple arrays for counts and trussness
         let (edges, edge_index, e_stack) = proc_mem;
@@ -244,7 +244,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                 let edge_offset = *edge_index.get(idx);
                 let t_count = tris.get(edge_offset).load(Ordering::Relaxed);
                 if t_count == k {
-                    let u = *neighbours_ptr.get(*er.get(edge_offset));
+                    let u = neighbours_ptr.get(er.get(edge_offset).index()).index();
                     stack.push((u, edge_offset));
                     idx = match idx.overflowing_add(1) {
                         (r, false) => r,
@@ -292,11 +292,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                 // by definition any non-trivial subgraph is at least a 2-truss: other
                 // values go up from there.
                 test[k as usize + 2] += 1;
-                let v = *neighbours_ptr.get(offset);
+                let v = neighbours_ptr.get(offset).index();
 
                 // build u's neighour map
-                for u_w in *index_ptr.get(u)..*index_ptr.get(u + 1) {
-                    let w = *neighbours_ptr.get(u_w);
+                for u_w in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                    let w = neighbours_ptr.get(u_w).index();
                     if w != u && w != v {
                         match neighbours.entry(w) {
                             std::collections::hash_map::Entry::Vacant(e) => {
@@ -318,12 +318,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                 }
 
                 // search v for neighbours in u's neighour map
-                for v_w in *index_ptr.get(v)..*index_ptr.get(v + 1) {
-                    let w = *neighbours_ptr.get(v_w);
+                for v_w in index_ptr.get(v).index()..index_ptr.get(v + 1).index() {
+                    let w = neighbours_ptr.get(v_w).index();
                     match neighbours.get(&w) {
                         Some(i) => match i {
                             OneOrMany::One(u_w) => {
-                                let w_u = *er.get(*u_w);
+                                let w_u = er.get(*u_w).index();
                                 if tris.get(v_w).load(Ordering::Relaxed) != 0
                                     && tris.get(w_u).load(Ordering::Relaxed) != 0
                                 {
@@ -337,7 +337,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                             }
                             OneOrMany::Many(u_ws) => {
                                 for u_w in u_ws {
-                                    let w_u = *er.get(*u_w);
+                                    let w_u = er.get(*u_w).index();
                                     if tris.get(v_w).load(Ordering::Relaxed) != 0
                                         && tris.get(w_u).load(Ordering::Relaxed) != 0
                                     {

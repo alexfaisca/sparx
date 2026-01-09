@@ -9,9 +9,11 @@ mod parser_mtx;
 mod parser_ggcat;
 
 use super::{CacheFile, GraphFile, E, N, IndexType};
+use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut};
 use utils::{
     ensure_file_writable, cache_file_name, cache_file_name_from_id, cache_metadata_file_name_from_id, cleanup_cache, edges_to_nodes, graph_id_from_cache_file_name, id_for_subgraph_export, id_from_filename, nodes_to_edges, pers_cache_file_name, toml_cache_file_name, FileType, CACHE_DIR, H
 };
+use portable_atomic::AtomicUsize;
 
 #[cfg(any(test, feature = "bench"))]
 use utils::EXACT_VALUE_CACHE_DIR;
@@ -51,6 +53,38 @@ pub struct CacheMetadata {
 }
 
 const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
+
+/// Verifies that `node_count` distinct node ids and `edge_count` `CSR` offset values can be
+/// represented, losslessly, by the index type `I`, returning an error otherwise.
+///
+/// This guards against silent data corruption: `I::new` performs a truncating numeric cast (e.g.
+/// `x as u8`), so, without this check, building/converting a cache whose node or edge count
+/// exceeds `I`'s range would silently wrap values instead of failing loudly.
+pub(super) fn ensure_fits_in_index_type<I: IndexType>(
+    node_count: usize,
+    edge_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let max = <I as IndexType>::max().index();
+    // node ids range over `0..node_count`, so the largest representable id is `node_count - 1`
+    if node_count > 0 && node_count.saturating_sub(1) > max {
+        return Err(format!(
+            "error graph has {node_count} nodes, but the requested index type `{}` can only represent up to {} distinct node ids (max value {max}); use a wider `Ix` (e.g. `u32` or `usize`), or build with `usize`/`u32` and narrow it afterwards with `GraphCache::convert_index_type`",
+            crate::utils::type_of::<I>(),
+            max.saturating_add(1),
+        )
+        .into());
+    }
+    // offsets store cumulative edge counts up to (and including, as the trailing sentinel)
+    // `edge_count`
+    if edge_count > max {
+        return Err(format!(
+            "error graph has {edge_count} edges, but the requested index type `{}` can only represent offsets up to {max}; use a wider `Ix` (e.g. `u32` or `usize`), or build with `usize`/`u32` and narrow it afterwards with `GraphCache::convert_index_type`",
+            crate::utils::type_of::<I>(),
+        )
+        .into());
+    }
+    Ok(())
+}
 
 #[allow(dead_code, clippy::upper_case_acronyms, non_camel_case_types)]
 enum InputFileType {
@@ -422,6 +456,17 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         println!("Metadata for cache entry is: {}", metadata);
 
         // validate entry open request
+        if metadata.index_size != std::mem::size_of::<Ix>() {
+            return Err(format!(
+                "error cached entry for {:?} was built with index type `{}` (size {}), but was requested to be opened with index type `{}` (size {}); please convert the cache to the requested index width first (see `GraphCache::convert_index_type`)",
+                filename,
+                metadata.index_type,
+                metadata.index_size,
+                crate::utils::type_of::<Ix>(),
+                std::mem::size_of::<Ix>(),
+            ).into());
+        }
+
         if N::is_labeled() {
             if !metadata.node_labeled {
                 return Err(
@@ -538,8 +583,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             }
         };
 
-        let edges = neighbors_file.metadata().unwrap().len() as usize / std::mem::size_of::<usize>();
-        let nodes = offsets_file.metadata().unwrap().len() as usize / std::mem::size_of::<usize>();
+        let edges = neighbors_file.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+        let nodes = offsets_file.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
 
         Ok(Self {
             neighbors_file,
@@ -1089,8 +1134,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         has_fst: bool,
         tool_version: Option<String>,
     ) -> Result<CacheMetadata, Box<dyn std::error::Error>> {
-        let edges = self.neighbors_file.metadata()?.len() as usize / size_of::<usize>();
-        let nodes = self.offsets_file.metadata()?.len() as usize / size_of::<usize>();
+        let edges = self.neighbors_file.metadata()?.len() as usize / size_of::<Ix>();
+        let nodes = self.offsets_file.metadata()?.len() as usize / size_of::<Ix>();
         let dataset_str = dataset.as_ref().to_str().ok_or_else(|| -> Box<dyn std::error::Error> {
             format!("error getting dataset str from {:?}", dataset.as_ref()).into()
         })?;
@@ -1343,6 +1388,163 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
     /// [`FileType`]: ../utils/enum.FileType.html#
     pub(super) fn cleanup_helpers(&self) -> Result<(), Box<dyn std::error::Error>> {
         cleanup_cache(&self.cache_id()?, &FileType::Helper(H::H))
+    }
+
+    /// Verifies that `node_count` distinct node ids and `edge_count` `CSR` offset values can be
+    /// represented, losslessly, by this cache's index type `Ix`, returning an error otherwise.
+    ///
+    /// This guards against silent data corruption: `Ix::new` performs a truncating numeric cast
+    /// (e.g. `x as u8`), so, without this check, building/converting a cache whose node or edge
+    /// count exceeds `Ix`'s range would silently wrap values instead of failing loudly.
+    pub(super) fn ensure_fits_in_ix(
+        node_count: usize,
+        edge_count: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        ensure_fits_in_index_type::<Ix>(node_count, edge_count)
+    }
+
+    /// Given a parallel-populated, `AtomicUsize`-backed, per-node degree scratch buffer[^1] of
+    /// length `offset_size` (`= |V| + 1`), computes the prefix-summed `CSR` offsets and persists
+    /// them into `self.offsets_file` using the cache's `Ix` index width.
+    ///
+    /// Returns the (now prefix-summed) scratch buffer --- both as its owning handle[^2] and as a
+    /// plain (non atomic) `usize`-width view over it --- together with the total number of edges
+    /// (`|E|`); the view is useful for addressing each node's position in the neighbors array
+    /// while it is being populated, irrespective of `Ix`'s width.
+    ///
+    /// [^1]: the scratch buffer is always `usize`-width, regardless of `Ix`, so that it may be
+    /// used for lock-free atomic degree accumulation (`Ix` need not support atomic operations).
+    /// [^2]: the owning handle must be kept alive by the caller for as long as the returned view
+    /// is used, as it backs the view's memory mapping.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn finalize_ix_offsets(
+        &mut self,
+        degrees: AbstractedProceduralMemoryMut<AtomicUsize>,
+        offset_size: usize,
+    ) -> Result<
+        (
+            AbstractedProceduralMemoryMut<AtomicUsize>,
+            SharedSliceMut<usize>,
+            usize,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        // this works because freshly mmapped files are zeroed (so degrees[|V|] = 0)
+        let mut degrees_s = unsafe {
+            degrees.shared_slice().cast::<usize>().ok_or_else(
+                || -> Box<dyn std::error::Error> { "error getting non atomic slice".into() },
+            )?
+        };
+
+        // prefix sum degrees to get offsets
+        let mut sum: usize = 0;
+        for u in 0..offset_size {
+            let deg_u = *degrees_s.get(u);
+            *degrees_s.get_mut(u) = sum;
+            sum += deg_u;
+        }
+
+        Self::ensure_fits_in_ix(offset_size.saturating_sub(1), sum)?;
+
+        self.index_bytes = offset_size;
+        self.graph_bytes = sum;
+
+        let mut offsets =
+            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.offsets_file, offset_size)?;
+        for u in 0..offset_size {
+            *offsets.get_mut(u) = Ix::new(*degrees_s.get(u));
+        }
+        offsets.flush()?;
+
+        Ok((degrees, degrees_s, sum))
+    }
+
+    /// Converts this (readonly) [`GraphCache`] instance into a brand new cache entry that uses a
+    /// different index type, `NewIx`, re-encoding the `CSR` offsets/neighbors arrays at the new
+    /// width. The original cache entry is left untouched.
+    ///
+    /// The new entry's `dataset_name` is the original's with `_<new index size in bytes>`
+    /// appended (e.g. converting a cache built from dataset `"my_graph.mtx"` using `usize`
+    /// indices to `u32` indices yields a new cache whose `dataset_name` is `"my_graph.mtx_4"`).
+    /// Since the cache id is deterministically derived from the dataset name[^1], this naturally
+    /// yields a fresh `cache_id` for the converted entry, distinct from the original's.
+    ///
+    /// Node/edge labels and the metalabel `fst` are copied verbatim, as their on-disk encoding
+    /// does not depend on `Ix`.
+    ///
+    /// [^1]: see [`id_from_filename`].
+    pub fn convert_index_type<NewIx: IndexType>(
+        &self,
+    ) -> Result<GraphCache<N, E, NewIx>, Box<dyn std::error::Error>> {
+        if !self.readonly {
+            return Err("error cache must be readonly to be converted".into());
+        }
+
+        let metadata = self.metadata()?;
+        if metadata.index_size == std::mem::size_of::<NewIx>() {
+            return Err(format!(
+                "error cache is already {}-wide (index type `{}`), nothing to convert",
+                metadata.index_size, metadata.index_type
+            )
+            .into());
+        }
+        let new_dataset_name =
+            format!("{}_{}", metadata.dataset_name, std::mem::size_of::<NewIx>());
+
+        let offset_size = self.index_bytes;
+        let edge_count = self.graph_bytes;
+        ensure_fits_in_index_type::<NewIx>(offset_size.saturating_sub(1), edge_count)?;
+
+        let mut new_cache = GraphCache::<N, E, NewIx>::init_with_id(&new_dataset_name, self.batch)?;
+
+        // re-encode the CSR offsets/neighbors arrays at the new index width
+        let old_offsets = AbstractedProceduralMemory::<Ix>::from_file_name(&self.offsets_filename)?;
+        let old_neighbors =
+            AbstractedProceduralMemory::<Ix>::from_file_name(&self.neighbors_filename)?;
+        let mut new_offsets =
+            AbstractedProceduralMemoryMut::<NewIx>::from_file(&new_cache.offsets_file, offset_size)?;
+        let mut new_neighbors =
+            AbstractedProceduralMemoryMut::<NewIx>::from_file(&new_cache.neighbors_file, edge_count)?;
+
+        for u in 0..offset_size {
+            *new_offsets.get_mut(u) = NewIx::new(old_offsets.get(u).index());
+        }
+        for e in 0..edge_count {
+            *new_neighbors.get_mut(e) = NewIx::new(old_neighbors.get(e).index());
+        }
+        new_offsets.flush()?;
+        new_neighbors.flush()?;
+        new_cache.index_bytes = offset_size;
+        new_cache.graph_bytes = edge_count;
+
+        // node/edge labels are `Ix`-independent and keep a stable (non-tmp) filename: copy
+        // verbatim.
+        for (src, dest) in [
+            (&self.nodelabel_filename, &new_cache.nodelabel_filename),
+            (&self.edgelabel_filename, &new_cache.edgelabel_filename),
+        ] {
+            let mut src_file = OpenOptions::new().read(true).open(src)?;
+            let mut dest_file = OpenOptions::new().write(true).truncate(true).open(dest)?;
+            std::io::copy(&mut src_file, &mut dest_file)?;
+            dest_file.flush()?;
+        }
+
+        // the metalabel fst is also `Ix`-independent (it always maps metalabels to `u64` node
+        // ids), but unlike node/edge labels it is built under a temporary filename and only
+        // promoted to its final, stable filename once finalized (see `merge_fsts`); replicate
+        // that promotion here instead of writing into the (cleaned up on `finish`) tmp file.
+        let final_metalabel_fn =
+            cache_file_name(&new_cache.metalabel_filename, &FileType::MetaLabel(H::H), None)?;
+        std::fs::copy(&self.metalabel_filename, &final_metalabel_fn)?;
+        new_cache.metalabel_filename = final_metalabel_fn;
+        new_cache.metalabel_file = Arc::new(
+            OpenOptions::new()
+                .read(true)
+                .open(&new_cache.metalabel_filename)?,
+        );
+
+        new_cache.finish(&new_dataset_name)?;
+        Ok(new_cache)
     }
 
     /// Remove [`GraphCache`] instance's cached `.tmp` files for a given [`FileType`].

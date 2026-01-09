@@ -265,10 +265,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (r, false) => r,
         };
 
-        let offsets = AbstractedProceduralMemoryMut::<AtomicUsize>::from_file(
-            &self.offsets_file,
-            offsets_size,
-        )?;
+        let d_fn = cache_file_name(&self.offsets_filename, &FileType::Helper(H::H), Some(1))?;
+        let degrees =
+            SharedSliceMut::<AtomicUsize>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
         // get node degrees
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
@@ -276,7 +275,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (0..threads).for_each(|tid| {
                 let thread_bounds = edges_bounds[tid];
                 let input = &input_edges[thread_bounds.0..thread_bounds.1];
-                let offsets = offsets.shared_slice();
+                let degrees = degrees.shared_slice();
 
                 handles.push(s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -293,7 +292,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                             let mut node = node.iter().peekable();
 
                             let id: usize = node.next().unwrap().parse()?;
-                            offsets.get(id).add(1, Ordering::Relaxed);
+                            degrees.get(id).add(1, Ordering::Relaxed);
                         }
                         Ok(())
                     },
@@ -315,24 +314,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
-        let mut offsets_s = unsafe {
-            offsets.shared_slice().cast::<usize>().ok_or_else(
-                || -> Box<dyn std::error::Error> { "error getting non atomic slice".into() },
-            )?
-        };
-
-        // prefix sum degrees to get offsets
-        let mut sum: usize = 0;
-        for u in 0..node_count {
-            let degree: usize = *offsets_s.get(u);
-            *offsets_s.get_mut(u) = sum;
-            sum += degree;
-        }
-        *offsets_s.get_mut(node_count) = sum;
-        offsets.flush()?;
+        // prefix sum degrees to get offsets, persisting them, Ix-width, into `self.offsets_file`
+        let (_degrees_owner, offsets_s, sum) = self.finalize_ix_offsets(degrees, offsets_size)?;
 
         let neighbors =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.neighbors_file, sum)?;
+            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let _batch_num = Arc::new(AtomicUsize::new(0));
         let _batch_size = self.batch.map_or(Self::DEFAULT_BATCHING_SIZE, |s| s);
 
@@ -385,7 +371,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                                     *neighbors.get_mut(
                                         *offsets.get(orig_id)
                                             + counters.get(orig_id).fetch_add(1, Ordering::Relaxed),
-                                    ) = dest_id;
+                                    ) = Ix::new(dest_id);
                                     break;
                                 }
                             } else {
@@ -399,7 +385,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                             for (offset, (dest, _dir)) in (_begin..*offsets.get(id + 1)).zip(queue)
                             {
                                 // *edges.get_mut(offset) = Edge::new(dest as u64, dir);
-                                *neighbors.get_mut(offset) = dest;
+                                *neighbors.get_mut(offset) = Ix::new(dest);
                             }
                         }
                         // parse rest of the thread's edges
@@ -421,7 +407,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                             *neighbors.get_mut(
                                 *offsets.get(orig_id)
                                     + counters.get(orig_id).fetch_add(1, Ordering::Relaxed),
-                            ) = dest_id;
+                            ) = Ix::new(dest_id);
 
                             continue;
                         }
@@ -448,10 +434,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
         Self::sort_edges(offsets_s, neighbors.shared_slice(), threads)?;
         neighbors.flush_async()?;
-        drop(offsets);
         drop(neighbors);
 
+        drop(_degrees_owner);
         std::fs::remove_file(&counters_fn)?;
+        std::fs::remove_file(&d_fn)?;
 
         self.merge_fsts(&[])?;
 
@@ -459,9 +446,88 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // for batch_file in batches {
         //     let _ = std::fs::remove_file(batch_file);
         // }
-        self.graph_bytes = sum;
-        self.index_bytes = offsets_size;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::GraphCache;
+    use crate::graph::{GraphMemoryMap, label::VoidLabel};
+    use std::io::Write;
+
+    fn write_tiny_nodes_edges(dir: &std::path::Path) -> std::path::PathBuf {
+        let nodes_path = dir.join("unitig_annotated_tiny.nodes");
+        let edges_path = dir.join("unitig_tiny.edges");
+
+        let mut nodes_f = std::fs::File::create(&nodes_path).expect("error creating nodes fixture");
+        for id in 0..4 {
+            writeln!(nodes_f, "{id} 0 0").unwrap();
+        }
+        nodes_f.flush().unwrap();
+
+        let mut edges_f = std::fs::File::create(&edges_path).expect("error creating edges fixture");
+        for (orig, dest) in [(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 0)] {
+            writeln!(edges_f, "{orig} {dest} ff").unwrap();
+        }
+        edges_f.flush().unwrap();
+
+        nodes_path
+    }
+
+    /// Regression test for the `Ix`-generic cache pipeline: parsing the same `.nodes`/`.edges`
+    /// input with both `usize` and `u32` as the index type must produce identical graphs (same
+    /// node/edge counts and neighbour lists), and the resulting cache's metadata must faithfully
+    /// reflect the narrower index width.
+    #[test]
+    fn nodes_edges_parser_round_trips_for_usize_and_u32_ix() {
+        let dir = std::env::temp_dir().join(format!(
+            "sparx_nodes_edges_ix_test_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let nodes_path = write_tiny_nodes_edges(&dir);
+
+        let cache_usize = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(
+            &nodes_path,
+            Some("nodes_edges_ix_test_usize".to_string()),
+            None,
+            None,
+        )
+        .expect("usize nodes/edges parse should succeed");
+        let graph_usize =
+            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
+                .expect("usize graph init should succeed");
+
+        let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
+            &nodes_path,
+            Some("nodes_edges_ix_test_u32".to_string()),
+            None,
+            None,
+        )
+        .expect("u32 nodes/edges parse should succeed");
+        let graph_u32 =
+            GraphMemoryMap::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
+                .expect("u32 graph init should succeed");
+
+        assert_eq!(graph_usize.size(), graph_u32.size());
+        assert_eq!(graph_usize.width(), graph_u32.width());
+        for u in 0..graph_usize.size() {
+            let mut n_usize: Vec<usize> = graph_usize.neighbours(u).unwrap().collect();
+            let mut n_u32: Vec<usize> = graph_u32.neighbours(u).unwrap().collect();
+            n_usize.sort();
+            n_u32.sort();
+            assert_eq!(
+                n_usize, n_u32,
+                "node {u} neighbours differ between usize and u32 Ix"
+            );
+        }
+
+        let meta_u32 = graph_u32.metadata().expect("error reading u32 metadata");
+        assert_eq!(meta_u32.index_size, std::mem::size_of::<u32>());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -3,6 +3,9 @@ pub mod shared_slice;
 #[cfg(any(test, feature = "bench"))]
 pub mod test_common;
 
+#[cfg(test)]
+mod cross_ix_sweep_test;
+
 pub mod centralities;
 pub mod communities;
 pub mod graph;

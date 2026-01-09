@@ -187,8 +187,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         let (degree, mut node, mut pos) = proc_mem;
         let mut core = self.k_cores.shared_slice();
         // compute out-degrees in parallel
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let graph_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let graph_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // initialize degree and bins count vecs
         let mut bins: Vec<usize> = thread::scope(
@@ -210,7 +210,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
                         move |_| -> Result<Vec<usize>, Box<dyn std::error::Error + Send + Sync>> {
                             let mut bins: Vec<usize> = vec![0; u8::MAX as usize];
                             for v in start..end {
-                                let deg = index_ptr.get(v + 1) - index_ptr.get(v);
+                                let deg = index_ptr.get(v + 1).index() - index_ptr.get(v).index();
                                 if deg > u8::MAX as usize {
                                     return Err(format!(
                                         "error degree[{v}] == {deg} but max suported is {}",
@@ -286,8 +286,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
             *core.get_mut(v) = deg_v; // coreness of v
 
             // iterate outgoing neighbors of v
-            for e in *index_ptr.get(v)..*index_ptr.get(v + 1) {
-                let u = *graph_ptr.get(e);
+            for e in index_ptr.get(v).index()..index_ptr.get(v + 1).index() {
+                let u = graph_ptr.get(e).index();
                 let deg_u = *degree.get(u);
                 if deg_u > deg_v {
                     // swap u's position node array to maintain order

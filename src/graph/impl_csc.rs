@@ -17,21 +17,21 @@ use std::{
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphMemoryMap<N, E, Ix> {
     pub(super) fn get_edge_reciprocal_impl(
         &self,
-    ) -> Result<AbstractedProceduralMemory<usize>, Box<dyn std::error::Error>> {
+    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
         let er_fn = self.build_cache_filename(CacheFile::EdgeReciprocal, None)?;
         let dud = Vec::new();
         match OpenOptions::new().read(true).open(er_fn.as_str()) {
             Ok(i) => {
-                let len = i.metadata().unwrap().len() as usize / std::mem::size_of::<usize>();
-                SharedSlice::<usize>::abstract_mem(&er_fn, dud, len, true)
+                let len = i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+                SharedSlice::<Ix>::abstract_mem(&er_fn, dud, len, true)
             }
             Err(_) => {
                 self.build_reciprocal_edge_index()?;
                 match OpenOptions::new().read(true).open(er_fn.as_str()) {
                     Ok(i) => {
                         let len =
-                            i.metadata().unwrap().len() as usize / std::mem::size_of::<usize>();
-                        SharedSlice::<usize>::abstract_mem(&er_fn, dud, len, true)
+                            i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+                        SharedSlice::<Ix>::abstract_mem(&er_fn, dud, len, true)
                     }
                     Err(e) => Err(format!("error can't abst mem for edge_reciprocal {e}").into()),
                 }
@@ -41,21 +41,21 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
     pub(super) fn get_edge_over_impl(
         &self,
-    ) -> Result<AbstractedProceduralMemory<usize>, Box<dyn std::error::Error>> {
+    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
         let eo_fn = self.build_cache_filename(CacheFile::EdgeOver, None)?;
         let dud = Vec::new();
         match OpenOptions::new().read(true).open(eo_fn.as_str()) {
             Ok(i) => {
-                let len = i.metadata().unwrap().len() as usize / std::mem::size_of::<usize>();
-                SharedSlice::<usize>::abstract_mem(&eo_fn, dud, len, true)
+                let len = i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+                SharedSlice::<Ix>::abstract_mem(&eo_fn, dud, len, true)
             }
             Err(_) => {
                 self.build_reciprocal_edge_index()?;
                 match OpenOptions::new().read(true).open(eo_fn.as_str()) {
                     Ok(i) => {
                         let len =
-                            i.metadata().unwrap().len() as usize / std::mem::size_of::<usize>();
-                        SharedSlice::<usize>::abstract_mem(&eo_fn, dud, len, true)
+                            i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+                        SharedSlice::<Ix>::abstract_mem(&eo_fn, dud, len, true)
                     }
                     Err(e) => Err(format!("error can't abst mem for edge_over {e}").into()),
                 }
@@ -67,8 +67,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         &self,
     ) -> Result<
         (
-            AbstractedProceduralMemoryMut<usize>,
-            AbstractedProceduralMemoryMut<usize>,
+            AbstractedProceduralMemoryMut<Ix>,
+            AbstractedProceduralMemoryMut<Ix>,
         ),
         Box<dyn std::error::Error>,
     > {
@@ -78,8 +78,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         let er_fn = self.build_cache_filename(CacheFile::EdgeReciprocal, None)?;
         let eo_fn = self.build_cache_filename(CacheFile::EdgeOver, None)?;
 
-        let edge_reciprocal = SharedSliceMut::<usize>::abst_mem_mut(&er_fn, edge_count, true)?;
-        let edge_out = SharedSliceMut::<usize>::abst_mem_mut(&eo_fn, node_count, true)?;
+        let edge_reciprocal = SharedSliceMut::<Ix>::abst_mem_mut(&er_fn, edge_count, true)?;
+        let edge_out = SharedSliceMut::<Ix>::abst_mem_mut(&eo_fn, node_count, true)?;
 
         Ok((edge_reciprocal, edge_out))
     }
@@ -88,8 +88,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         &self,
     ) -> Result<
         (
-            AbstractedProceduralMemoryMut<usize>,
-            AbstractedProceduralMemoryMut<usize>,
+            AbstractedProceduralMemoryMut<Ix>,
+            AbstractedProceduralMemoryMut<Ix>,
         ),
         Box<dyn std::error::Error>,
     > {
@@ -99,8 +99,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         let threads = self.thread_count.max(1) as usize;
         let thread_load = node_count.div_ceil(threads);
 
-        let index_ptr = SharedSlice::<usize>::new(self.offsets_ptr(), self.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.offsets_ptr(), self.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.neighbours_ptr(), edge_count);
 
         let (er, eo) = self.init_procedural_memory_build_reciprocal()?;
 
@@ -119,21 +119,21 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
                 threads_res.push(scope.spawn(move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
-                    let mut edges_start = *index_ptr.get(begin);
+                    let mut edges_start = index_ptr.get(begin).index();
 
                     for u in begin..end {
                         let mut eo_at_end = true;
-                        let edges_stop = *index_ptr.get(u + 1);
+                        let edges_stop = index_ptr.get(u + 1).index();
                         for edge_offset in edges_start..edges_stop {
-                            let v = *neighbours_ptr.get(edge_offset);
+                            let v = neighbours_ptr.get(edge_offset).index();
                             if v > u {
                                 eo_at_end = false;
-                                *eo.get_mut(u) = edge_offset;
+                                *eo.get_mut(u) = Ix::new(edge_offset);
                                 break;
                             }
                         }
                         if eo_at_end {
-                            *eo.get_mut(u) = edges_stop;
+                            *eo.get_mut(u) = Ix::new(edges_stop);
                         }
                         edges_start = edges_stop;
                     }
@@ -142,12 +142,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
                     let mut prev = OneOrMany::<(usize, usize)>::One((node_count, 0usize));
                     for u in begin..end {
-                        for edge_offset in *index_ptr.get(u)..*eo.get(u) {
-                            let v = *neighbours_ptr.get(edge_offset);
+                        for edge_offset in index_ptr.get(u).index()..eo.get(u).index() {
+                            let v = neighbours_ptr.get(edge_offset).index();
                             // binary search on neighbours w, where w < v
                             if u == v {
                                 // self loops are their own reciprocals
-                                *er.get_mut(edge_offset) = edge_offset;
+                                *er.get_mut(edge_offset) = Ix::new(edge_offset);
                                 // reset
                                 prev = OneOrMany::One((v, edge_offset));
                                 continue;
@@ -155,13 +155,13 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                 if prev_v == v {
                                     // find reciprocal, dest is the same, offset is different
                                     // make entry into list and record (never actually loops)
-                                    let reciprocal = if prev_offset < edge_count - 1 && *neighbours_ptr.get(prev_offset + 1) == u {
+                                    let reciprocal = if prev_offset < edge_count - 1 && neighbours_ptr.get(prev_offset + 1).index() == u {
                                         prev_offset + 1
                                     } /*else if prev_offset < edge_count - 1 {
                                             println!("after {prev_offset}->{u} comes {}", graph_ptr.get(prev_offset + 1).dest());
                                         }*/
                                         // search backwards
-                                    else if prev_offset > 0 && *neighbours_ptr.get(prev_offset - 1) == u {
+                                    else if prev_offset > 0 && neighbours_ptr.get(prev_offset - 1).index() == u {
                                         prev_offset - 1
                                     } /*else if prev_offset > 0 {
                                             println!("before {prev_offset}->{u} comes {}", graph_ptr.get(prev_offset - 1).dest());
@@ -173,8 +173,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                     vs.push((prev_v, prev_offset));
                                     vs.push((v, reciprocal));
                                     prev = OneOrMany::Many(vs);
-                                    *er.get_mut(edge_offset) = reciprocal;
-                                    *er.get_mut(reciprocal) = edge_offset;
+                                    *er.get_mut(edge_offset) = Ix::new(reciprocal);
+                                    *er.get_mut(reciprocal) = Ix::new(edge_offset);
                                     continue;
                                 }
                             } else if let OneOrMany::Many(ref mut vs) = prev {
@@ -184,7 +184,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                     let reciprocal = 'search_adjacents: {
                                         // search forwards
                                         let mut res = vs[0].1;
-                                        while res < edge_count - 1 && *neighbours_ptr.get(res + 1) == u {
+                                        while res < edge_count - 1 && neighbours_ptr.get(res + 1).index() == u {
                                             res += 1;
                                             if vs.iter().any(|&(_, b)| b == res) {
                                                 continue;
@@ -194,7 +194,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                         }
                                         // reset and search backwards
                                         res = vs[0].1;
-                                        while res > 0 && *neighbours_ptr.get(res - 1) == u {
+                                        while res > 0 && neighbours_ptr.get(res - 1).index() == u {
                                             res -= 1;
                                             if vs.iter().any(|&(_, b)| b == res) {
                                                 continue;
@@ -208,21 +208,21 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
                                     // extend entry's list
                                     vs.push((v, reciprocal));
-                                    *er.get_mut(edge_offset) = reciprocal;
-                                    *er.get_mut(reciprocal) = edge_offset;
+                                    *er.get_mut(edge_offset) = Ix::new(reciprocal);
+                                    *er.get_mut(reciprocal) = Ix::new(edge_offset);
                                     continue;
                                 }
                             }
 
-                                let mut floor = *eo.get(v);
-                                let mut ceil = *index_ptr.get(v + 1);
+                                let mut floor = eo.get(v).index();
+                                let mut ceil = index_ptr.get(v + 1).index();
                                 let reciprocal =  loop {
                                     if floor > ceil {
                                         return Err(format!("error couldn't find reciprocal for edge {edge_offset}, u: ({u}) -> v: ({v})").into());
                                     }
 
                                     let m = floor + (ceil - floor) / 2;
-                                    let dest = *neighbours_ptr.get(m);
+                                    let dest = neighbours_ptr.get(m).index();
 
                                     match dest.cmp(&u) {
                                         std::cmp::Ordering::Equal => break m,
@@ -231,8 +231,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                     }
                                 };
 
-                                *er.get_mut(edge_offset) = reciprocal;
-                                *er.get_mut(reciprocal) = edge_offset;
+                                *er.get_mut(edge_offset) = Ix::new(reciprocal);
+                                *er.get_mut(reciprocal) = Ix::new(edge_offset);
                                 // reset
                                 prev = OneOrMany::One((v, reciprocal));
                         }

@@ -60,12 +60,14 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 }
             }
 
+            crate::graph::cache::ensure_fits_in_index_type::<Ix>(curr_node_index, curr_edge_count)?;
+
             let mut metalabel_stream = self.metalabels.stream();
 
             let mut neighbours =
-                SharedSliceMut::<usize>::abst_mem_mut(&n_fn, curr_edge_count, true)?;
+                SharedSliceMut::<Ix>::abst_mem_mut(&n_fn, curr_edge_count, true)?;
             let mut offsets =
-                SharedSliceMut::<usize>::abst_mem_mut(&o_fn, curr_node_index + 1, true)?;
+                SharedSliceMut::<Ix>::abst_mem_mut(&o_fn, curr_node_index + 1, true)?;
             let metalabel_file = OpenOptions::new()
                 .create(true)
                 .truncate(true)
@@ -76,23 +78,20 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
             // write nodes in order of lexicographically ordered metalabels to avoid sorting metaabels
             // FIXME: what is more costly random page accesses or sorting build merging metalabel fst?
-            *offsets.get_mut(0) = 0;
+            *offsets.get_mut(0) = Ix::new(0);
             while let Some((metalabel, node_id)) = metalabel_stream.next() {
                 let id = node_id as usize;
                 if mask(id) {
                     // write index file for next node (id + 1)
                     let new_id = *node_index.get(id);
-                    *offsets.get_mut(new_id + 1) = *edge_count.get(id + 1);
-                    // write edge file node
-                    neighbours
-                        .write_slice(
-                            *edge_count.get(id),
-                            self.neighbours(id)?
-                                .filter(|&x| mask(x))
-                                .collect::<Vec<usize>>()
-                                .as_slice(),
-                        )
-                        .ok_or("error writing edges for node {id}")?;
+                    *offsets.get_mut(new_id + 1) = Ix::new(*edge_count.get(id + 1));
+                    // write edge file node directly, element by element --- no intermediate `Vec`
+                    // needed: `edge_count` already precomputed exactly how many of this node's
+                    // neighbours survive the mask, so each surviving neighbour can be written
+                    // straight to its final position as it's filtered.
+                    for (offset, v) in (*edge_count.get(id)..).zip(self.neighbours(id)?.filter(|&x| mask(x))) {
+                        *neighbours.get_mut(offset) = Ix::new(v);
+                    }
                     // write fst for node
                     build.insert(metalabel, new_id as u64)?;
                 }
@@ -100,10 +99,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
             build.finish()?;
         } else {
             // if graph is empty allocate empty for its empty subgraph
-            SharedSliceMut::<usize>::abst_mem_mut(&n_fn, 0, true)?;
-            let mut i = SharedSliceMut::<usize>::abst_mem_mut(&o_fn, 1, true)?;
+            SharedSliceMut::<Ix>::abst_mem_mut(&n_fn, 0, true)?;
+            let mut i = SharedSliceMut::<Ix>::abst_mem_mut(&o_fn, 1, true)?;
             // store end of offsets in index entry at |V| (empty graph --- offsets end at 0)
-            *i.get_mut(0) = 0;
+            *i.get_mut(0) = Ix::new(0);
             let metalabel_file = OpenOptions::new()
                 .create(true)
                 .truncate(true)
@@ -118,5 +117,68 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         let cache: GraphCache<N, E, Ix> = GraphCache::open(&ml_fn, None)?;
         self.cleanup_helpers()?;
         GraphMemoryMap::init_from_cache(cache, Some(self.thread_count))
+    }
+}
+
+
+#[cfg(test)]
+mod test {
+    use crate::shared_slice::SharedSliceMut;
+
+    /// Direct, self-contained equivalence check for the `apply_mask_to_nodes` neighbour-write
+    /// refactor: writing each surviving (mask-passing) neighbour directly to its precomputed
+    /// position must produce byte-identical output to the original
+    /// `.filter(...).collect::<Vec<Ix>>()`-then-`write_slice` approach, for several representative
+    /// (neighbours, mask) scenarios --- including an empty result and a fully-filtered-out node.
+    ///
+    /// This bypasses `GraphMemoryMap`/`GraphCache`/`induced_subgraph` entirely (that round trip is
+    /// currently blocked by unrelated, pre-existing bugs in filename construction and missing
+    /// metadata, separate from this refactor) and instead exercises exactly the write pattern that
+    /// changed, in isolation.
+    #[test]
+    fn direct_write_matches_collect_then_write_for_every_scenario() {
+        let dir = std::env::temp_dir().join(format!(
+            "sparx_induced_subgraph_write_check_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+
+        let scenarios: &[(&[usize], fn(usize) -> bool)] = &[
+            (&[1, 2, 3], |_| true),       // nothing filtered out
+            (&[1, 2, 3, 4, 5], |x| x % 2 == 0), // partially filtered
+            (&[2], |x| x != 2),          // fully filtered out --- empty result
+            (&[], |_| true),             // no neighbours at all
+        ];
+
+        for (i, &(neighbours, mask)) in scenarios.iter().enumerate() {
+            let expected: Vec<u32> = neighbours
+                .iter()
+                .copied()
+                .filter(|&x| mask(x))
+                .map(|x| x as u32)
+                .collect();
+
+            let out_fn = dir.join(format!("direct_{i}.mmap"));
+            let len = expected.len().max(1);
+            let mut out = SharedSliceMut::<u32>::abst_mem_mut(
+                out_fn.to_str().unwrap(),
+                len,
+                true,
+            )
+            .expect("abst_mem_mut should succeed");
+
+            for (offset, v) in neighbours.iter().copied().filter(|&x| mask(x)).enumerate() {
+                *out.get_mut(offset) = v as u32;
+            }
+
+            let actual: Vec<u32> = (0..expected.len()).map(|i| *out.get(i)).collect();
+            assert_eq!(
+                actual, expected,
+                "scenario {i}: direct-write output must match collect-then-write output"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

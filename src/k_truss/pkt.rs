@@ -223,8 +223,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         let threads = self.threads;
         let edge_load = edge_count.div_ceil(threads);
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // Shared arrays
         let (curr, next, processed, in_curr, in_next) = proc_mem;
@@ -364,15 +364,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                 let end = std::cmp::min(begin + thread_load, curr.len());
 
                                 while let Some(u_v) = curr.pop() {
-                                    let u = *neighbours_ptr.get(*er.get(u_v));
-                                    let v = *neighbours_ptr.get(u_v);
+                                    let u = neighbours_ptr.get(er.get(u_v).index()).index();
+                                    let v = neighbours_ptr.get(u_v).index();
 
-                                    let edges_start = *index_ptr.get(u);
-                                    let edges_stop = *index_ptr.get(u + 1);
+                                    let edges_start = index_ptr.get(u).index();
+                                    let edges_stop = index_ptr.get(u + 1).index();
 
                                     // mark u neighbours
                                     for u_w in edges_start..edges_stop {
-                                        let w = *neighbours_ptr.get(u_w);
+                                        let w = neighbours_ptr.get(u_w).index();
                                         if w != u && w != v {
                                             match neighbours.entry(w) {
                                                 std::collections::hash_map::Entry::Vacant(e) => {
@@ -394,8 +394,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                         }
                                     }
 
-                                    for v_w in *index_ptr.get(v)..*index_ptr.get(v + 1) {
-                                        let w = *neighbours_ptr.get(v_w);
+                                    for v_w in index_ptr.get(v).index()..index_ptr.get(v + 1).index() {
+                                        let w = neighbours_ptr.get(v_w).index();
                                         let u_ws = match neighbours.get(&w) {
                                             Some(i) => match i {
                                                 OneOrMany::One(u_w) => Box::new([*u_w]),
@@ -406,7 +406,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                             None => Box::new([]),
                                         };
                                         for u_w in u_ws {
-                                            let w_u = *er.get(u_w);
+                                            let w_u = er.get(u_w).index();
                                             if *processed.get(v_w) || *processed.get(w_u) {
                                                 continue;
                                             }

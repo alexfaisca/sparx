@@ -7,7 +7,7 @@ use crossbeam::thread;
 #[allow(dead_code)]
 impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     #[inline(always)]
-    pub(super) fn sort_edges(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<usize>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn sort_edges(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<Ix>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = offsets.len().saturating_sub(1);
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();
@@ -51,7 +51,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     }
 
     #[inline(always)]
-    pub(super) fn sort_edges_with_labels(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<usize>, edge_labels: SharedSliceMut<E>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn sort_edges_with_labels(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<Ix>, edge_labels: SharedSliceMut<E>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = offsets.len().saturating_sub(1);
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();

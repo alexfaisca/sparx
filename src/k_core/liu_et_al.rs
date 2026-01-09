@@ -234,8 +234,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         let threads = self.threads;
         let thread_load = node_count.div_ceil(threads);
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbour_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let neighbour_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         let (degree, _node_index, alive, frontier, swap) = proc_mem;
         let mut coreness = self.k_cores.shared_slice();
@@ -254,7 +254,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                     let mut dead_nodes = 0;
 
                     for u in start..end {
-                        let deg_u = index_ptr.get(u + 1) - index_ptr.get(u);
+                        let deg_u = index_ptr.get(u + 1).index() - index_ptr.get(u).index();
                         *degree.get_mut(u) = AtomicU8::new(deg_u as u8);
 
                         if deg_u == 0 {
@@ -361,8 +361,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                                         *coreness.get_mut(u) = k;
 
                                         // for each neighbor v of u:
-                                        for idx in *index_ptr.get(u)..*index_ptr.get(u + 1) {
-                                            let v = *neighbour_ptr.get(idx);
+                                        for idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                                            let v = neighbour_ptr.get(idx).index();
                                             if let Ok(old) = degree.get(v).fetch_update(
                                                 Ordering::Relaxed,
                                                 Ordering::Relaxed,
@@ -398,8 +398,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                                             read_in_stack += 1;
                                             *coreness.get_mut(u) = k;
 
-                                            for idx in *index_ptr.get(u)..*index_ptr.get(u + 1) {
-                                                let v = *neighbour_ptr.get(idx);
+                                            for idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                                                let v = neighbour_ptr.get(idx).index();
                                                 if let Ok(old) = degree.get(v).fetch_update(
                                                     Ordering::Relaxed,
                                                     Ordering::Relaxed,

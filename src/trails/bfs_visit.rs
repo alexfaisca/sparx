@@ -13,7 +13,12 @@ type ProceduralMemoryBFSParents = (
 pub trait Graph {
     fn s(&self) -> usize;
     fn w(&self) -> usize;
-    fn neigh(&self, u: usize) -> Box<[usize]>;
+    /// Iterator type returned by [`neigh`](Graph::neigh); borrows no allocation --- implementors
+    /// are expected to walk the graph's adjacency representation directly, in place.
+    type Neigh<'a>: Iterator<Item = usize>
+    where
+        Self: 'a;
+    fn neigh(&self, u: usize) -> Self::Neigh<'_>;
     fn cache_file_name(
         &self,
         target: CacheFile,
@@ -252,6 +257,10 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
             return Ok(());
         }
         next.push(self.source);
+        // mark the source visited up front --- otherwise a back-edge cycling to the source (a
+        // perfectly normal case in any non-trivial/cyclic graph) would be mistaken for an
+        // undiscovered node and re-processed as a fresh tree edge.
+        *visited.get_mut(self.source) = true;
 
         while let Some(u) = next.pop() {
             let dist_u = *self.distances.get(u);

@@ -4,7 +4,7 @@ use super::{
     GraphCache,
     utils::{FileType, H},
 };
-use crate::shared_slice::AbstractedProceduralMemoryMut;
+use crate::shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut};
 
 use num_cpus::get_physical;
 use portable_atomic::{AtomicUsize, Ordering};
@@ -215,33 +215,30 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (r, false) => r,
         };
 
-        let mut offsets =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.offsets_file, offsets_size)?;
+        let d_fn = Self::init_cache_file_from_id_or_random(
+            &self.cache_id()?,
+            FileType::Helper(H::H),
+            Some(1),
+        )?;
+        let degrees = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
         // parse node degrees
         Self::parallel_edge_counter_parse_ggcat_bytes_mmap_with(
             input,
             {
-                let mut offsets = offsets.shared_slice();
+                let degrees = degrees.shared_slice();
                 move |id, edge_count| {
-                    *offsets.get_mut(id) = edge_count;
+                    degrees.get(id).store(edge_count, Ordering::Relaxed);
                 }
             },
             threads,
         )?;
 
-        // prefix sum degrees to get node offsets
-        let mut sum = 0;
-        for u in 0..node_count {
-            let degree = *offsets.get(u);
-            *offsets.get_mut(u) = sum;
-            sum += degree;
-        }
-        *offsets.get_mut(node_count) = sum;
-        offsets.flush()?;
+        // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
+        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size)?;
 
         let neighbors =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.neighbors_file, sum)?;
+            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&self.edgelabel_file, sum)?;
         let nodelabels =
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
@@ -250,7 +247,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_no_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     move |node_id, neighbors_slice| {
                         neighbors
@@ -264,7 +260,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_node_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     move |node_id, neighbors_slice, node_label| {
@@ -281,7 +276,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_edge_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, edgelabels_slice| {
@@ -300,7 +294,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_node_edge_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
@@ -321,8 +314,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         }
 
         neighbors.flush_async()?;
-        drop(offsets);
         drop(neighbors);
+        drop(_degrees_owner);
+        std::fs::remove_file(&d_fn)?;
 
         std::fs::remove_file(&self.metalabel_filename)?;
 
@@ -333,9 +327,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // for batch_file in batches {
         //     let _ = std::fs::remove_file(batch_file);
         // }
-
-        self.graph_bytes = sum;
-        self.index_bytes = offsets_size;
 
         Ok(())
     }
@@ -397,33 +388,30 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (r, false) => r,
         };
 
-        let mut offsets =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.offsets_file, offsets_size)?;
+        let d_fn = Self::init_cache_file_from_id_or_random(
+            &self.cache_id()?,
+            FileType::Helper(H::H),
+            Some(1),
+        )?;
+        let degrees = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
         // parse node degrees
         Self::parallel_edge_counter_parse_ggcat_bytes_mmap_with(
             input,
             {
-                let mut offsets = offsets.shared_slice();
+                let degrees = degrees.shared_slice();
                 move |id, edge_count| {
-                    *offsets.get_mut(id) = edge_count;
+                    degrees.get(id).store(edge_count, Ordering::Relaxed);
                 }
             },
             threads,
         )?;
 
-        // prefix sum degrees to get node offsets
-        let mut sum = 0;
-        for u in 0..node_count {
-            let degree = *offsets.get(u);
-            *offsets.get_mut(u) = sum;
-            sum += degree;
-        }
-        *offsets.get_mut(node_count) = sum;
-        offsets.flush()?;
+        // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
+        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size)?;
 
         let neighbors =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.neighbors_file, sum)?;
+            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&self.edgelabel_file, sum)?;
         let nodelabels =
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
@@ -450,7 +438,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_meta_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     move |node_id, neighbors_slice| {
                         neighbors
@@ -486,7 +473,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_node_meta_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     move |node_id, neighbors_slice, node_label| {
@@ -525,7 +511,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_edge_meta_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, edgelabels_slice| {
@@ -566,7 +551,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_full_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
@@ -608,6 +592,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             edgelabels.flush_async()?;
         }
 
+        drop(_degrees_owner);
+        std::fs::remove_file(&d_fn)?;
+
         // if graph cache was used to build a graph then the graph's fst holds meatlabel_filename
         // open, hence, it must be removed so that the new fst may be built
         std::fs::remove_file(&self.metalabel_filename)?;
@@ -633,8 +620,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // Cleanup temp batch filenames file
         std::fs::remove_file(&h_fn)?;
 
-        self.graph_bytes = sum;
-        self.index_bytes = offsets_size;
         Ok(())
     }
 
@@ -719,5 +704,77 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         std::fs::remove_file(&h_fn)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::GraphCache;
+    use crate::graph::{GraphMemoryMap, label::VoidLabel};
+    use std::io::Write;
+
+    fn write_tiny_ggcat(path: &std::path::Path) {
+        let mut f = std::fs::File::create(path).expect("error creating ggcat fixture");
+        for (id, dest) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
+            writeln!(f, ">{id} 31 1 x:x:{dest}").unwrap();
+            writeln!(f, "ACGT").unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// Regression test for the `Ix`-generic cache pipeline: parsing the same GGCAT-format input
+    /// with both `usize` and `u32` as the index type must produce identical graphs (same
+    /// node/edge counts and neighbour lists), and the resulting cache's metadata must faithfully
+    /// reflect the narrower index width.
+    #[test]
+    fn ggcat_parser_round_trips_for_usize_and_u32_ix() {
+        let dir = std::env::temp_dir().join(format!(
+            "sparx_ggcat_ix_test_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let path = dir.join("tiny.txt");
+        write_tiny_ggcat(&path);
+
+        let cache_usize = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(
+            &path,
+            Some("ggcat_ix_test_usize".to_string()),
+            None,
+            None,
+        )
+        .expect("usize ggcat parse should succeed");
+        let graph_usize =
+            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
+                .expect("usize graph init should succeed");
+
+        let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
+            &path,
+            Some("ggcat_ix_test_u32".to_string()),
+            None,
+            None,
+        )
+        .expect("u32 ggcat parse should succeed");
+        let graph_u32 =
+            GraphMemoryMap::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
+                .expect("u32 graph init should succeed");
+
+        assert_eq!(graph_usize.size(), graph_u32.size());
+        assert_eq!(graph_usize.width(), graph_u32.width());
+        for u in 0..graph_usize.size() {
+            let mut n_usize: Vec<usize> = graph_usize.neighbours(u).unwrap().collect();
+            let mut n_u32: Vec<usize> = graph_u32.neighbours(u).unwrap().collect();
+            n_usize.sort();
+            n_u32.sort();
+            assert_eq!(
+                n_usize, n_u32,
+                "node {u} neighbours differ between usize and u32 Ix"
+            );
+        }
+
+        let meta_u32 = graph_u32.metadata().expect("error reading u32 metadata");
+        assert_eq!(meta_u32.index_size, std::mem::size_of::<u32>());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

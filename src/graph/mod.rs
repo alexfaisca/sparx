@@ -401,7 +401,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
             let metalabels = Arc::new(fst::Map::new(unsafe {
                 memmap2::MmapOptions::new().map(&File::open(&graph_cache.metalabel_filename)?)?
             })?);
-            let edge_size = std::mem::size_of::<usize>();
+            let edge_size = std::mem::size_of::<Ix>();
             let thread_count = thread_count.unwrap_or(1).max(1);
             let exports = 0u8;
 
@@ -479,13 +479,13 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     }
 
     #[inline(always)]
-    pub(crate) fn offsets_ptr(&self) -> *const usize {
-        self.index.as_ptr() as *const usize
+    pub(crate) fn offsets_ptr(&self) -> *const Ix {
+        self.index.as_ptr() as *const Ix
     }
 
     #[inline(always)]
-    pub(crate) fn neighbours_ptr(&self) -> *const usize {
-        self.graph.as_ptr() as *const usize
+    pub(crate) fn neighbours_ptr(&self) -> *const Ix {
+        self.graph.as_ptr() as *const Ix
     }
 
     /// Returns the (suggested) number of threads being used for computations on the graph.
@@ -502,6 +502,25 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
     pub fn metadata(&self) -> Result<CacheMetadata, Box<dyn std::error::Error>> {
         self.graph_cache.metadata()
+    }
+
+    /// Converts this [`GraphMemoryMap`] instance's underlying cache entry into a brand new cache
+    /// entry that uses a different index type, `NewIx`, re-encoding the `CSR` offsets/neighbors
+    /// arrays at the new width, and opens it as a new [`GraphMemoryMap`] instance.
+    ///
+    /// The original cache entry (and this instance) is left untouched; the new entry's
+    /// `dataset_name` is the original's with `_<new index size in bytes>` appended, and it is
+    /// assigned its own, freshly derived, `cache_id`.
+    ///
+    /// This is required whenever a cache is to be opened with an `Ix` that does not match the
+    /// one it was built with (opening with a mismatched `Ix` is rejected, see [`GraphMemoryMap::open`]).
+    ///
+    /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
+    pub fn convert_index_type<NewIx: crate::graph::IndexType>(
+        &self,
+    ) -> Result<GraphMemoryMap<N, E, NewIx>, Box<dyn std::error::Error>> {
+        let new_cache = self.graph_cache.convert_index_type::<NewIx>()?;
+        GraphMemoryMap::<N, E, NewIx>::init_from_cache(new_cache, Some(self.thread_count))
     }
 
     /// Returns the graph's cache entry metadata filename.
@@ -545,9 +564,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     pub fn node_degree(&self, node_id: usize) -> usize {
         assert!(node_id < self.size());
         unsafe {
-            let ptr = (self.index.as_ptr() as *const usize).add(node_id);
-            let begin = ptr.read_unaligned();
-            ptr.add(1).read_unaligned() - begin
+            let ptr = (self.index.as_ptr() as *const Ix).add(node_id);
+            let begin = ptr.read_unaligned().index();
+            ptr.add(1).read_unaligned().index() - begin
         }
     }
 
@@ -569,8 +588,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     pub fn index_node(&self, node_id: usize) -> std::ops::Range<usize> {
         assert!(node_id < self.size());
         unsafe {
-            let ptr = (self.index.as_ptr() as *const usize).add(node_id);
-            ptr.read_unaligned()..ptr.add(1).read_unaligned()
+            let ptr = (self.index.as_ptr() as *const Ix).add(node_id);
+            ptr.read_unaligned().index()..ptr.add(1).read_unaligned().index()
         }
     }
 
@@ -588,8 +607,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         }
 
         Ok(NeighbourIter::<N, E, Ix>::new(
-            self.graph.as_ptr() as *const usize,
-            self.index.as_ptr() as *const usize,
+            self.graph.as_ptr() as *const Ix,
+            self.index.as_ptr() as *const Ix,
             node_id,
         ))
     }
@@ -702,7 +721,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     ///
     pub fn edge_reciprocal(
         &self,
-    ) -> Result<AbstractedProceduralMemory<usize>, Box<dyn std::error::Error>> {
+    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
         self.get_edge_reciprocal_impl()
     }
 
@@ -715,7 +734,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     ///
     pub fn edge_over(
         &self,
-    ) -> Result<AbstractedProceduralMemory<usize>, Box<dyn std::error::Error>> {
+    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
         self.get_edge_over_impl()
     }
 
@@ -932,9 +951,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
 #[derive(Debug, Clone)]
 pub struct NeighbourIter<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    edge_ptr: *const usize,
-    _orig_edge_ptr: *const usize,
-    _orig_id_ptr: *const usize,
+    edge_ptr: *const Ix,
+    _orig_edge_ptr: *const Ix,
+    _orig_id_ptr: *const Ix,
     id: usize,
     count: usize,
     offset: usize,
@@ -944,18 +963,18 @@ pub struct NeighbourIter<N: crate::graph::N, E: crate::graph::E, Ix: crate::grap
 }
 
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> NeighbourIter<N, E, Ix> {
-    fn new(edge_mmap: *const usize, id_mmap: *const usize, node_id: usize) -> Self {
+    fn new(edge_mmap: *const Ix, id_mmap: *const Ix, node_id: usize) -> Self {
         let _orig_edge_ptr = edge_mmap;
         let _orig_id_ptr = id_mmap;
         let id_ptr = unsafe { id_mmap.add(node_id) };
-        let offset = unsafe { id_ptr.read_unaligned() };
+        let offset = unsafe { id_ptr.read_unaligned().index() };
 
         NeighbourIter {
             edge_ptr: unsafe { edge_mmap.add(offset) },
             _orig_edge_ptr,
             _orig_id_ptr,
             id: node_id,
-            count: unsafe { id_ptr.add(1).read_unaligned() - offset },
+            count: unsafe { id_ptr.add(1).read_unaligned().index() - offset },
             offset,
             _phantom1: std::marker::PhantomData::<N>,
             _phantom2: std::marker::PhantomData::<E>,
@@ -966,7 +985,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Neighb
     #[inline(always)]
     fn _into_neighbour(&self) -> Self {
         NeighbourIter::new(self._orig_edge_ptr, self._orig_id_ptr, unsafe {
-            self.edge_ptr.read_unaligned()
+            self.edge_ptr.read_unaligned().index()
         })
     }
 
@@ -977,7 +996,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Neighb
         self.count -= 1;
         let next: (usize, usize);
         unsafe {
-            next = (self.id, self.edge_ptr.add(self.count).read_unaligned());
+            next = (self.id, self.edge_ptr.add(self.count).read_unaligned().index());
         };
         Some(next)
     }
@@ -993,7 +1012,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Neighb
         self.count -= 1;
         let next: (usize, usize);
         self.edge_ptr = unsafe {
-            next = (self.offset, self.edge_ptr.read_unaligned());
+            next = (self.offset, self.edge_ptr.read_unaligned().index());
             self.edge_ptr.add(1)
         };
         self.offset += 1;
@@ -1012,7 +1031,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
         self.count -= 1;
         let next: usize;
         unsafe {
-            next = self.edge_ptr.add(self.count).read_unaligned();
+            next = self.edge_ptr.add(self.count).read_unaligned().index();
         };
         Some(next)
     }
@@ -1032,7 +1051,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
         self.offset += 1;
         let next: usize;
         self.edge_ptr = unsafe {
-            next = self.edge_ptr.read_unaligned();
+            next = self.edge_ptr.read_unaligned().index();
             self.edge_ptr.add(1)
         };
         Some(next)
@@ -1048,28 +1067,22 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     std::ops::Index<std::ops::RangeFull> for GraphMemoryMap<N, E, Ix>
 {
-    type Output = [usize];
+    type Output = [Ix];
     #[inline]
-    fn index(&self, _index: std::ops::RangeFull) -> &[usize] {
-        // FIXME: this is really weird, most probably it is WRONG!!! Don't turn this in without replacing this ugly '* 8' for something that you understand and guarantee is right!!!
-        unsafe {
-            std::slice::from_raw_parts(
-                self.graph.as_ptr() as *const usize,
-                self.size() * 8 / self.edge_size,
-            )
-        }
+    fn index(&self, _index: std::ops::RangeFull) -> &[Ix] {
+        unsafe { std::slice::from_raw_parts(self.graph.as_ptr() as *const Ix, self.width()) }
     }
 }
 
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     std::ops::Index<std::ops::Range<usize>> for GraphMemoryMap<N, E, Ix>
 {
-    type Output = [usize];
+    type Output = [Ix];
     #[inline]
-    fn index(&self, index: std::ops::Range<usize>) -> &[usize] {
+    fn index(&self, index: std::ops::Range<usize>) -> &[Ix] {
         unsafe {
             std::slice::from_raw_parts(
-                self.graph.as_ptr().add(index.start * self.edge_size) as *const usize,
+                self.graph.as_ptr().add(index.start * self.edge_size) as *const Ix,
                 index.end - index.start,
             )
         }
@@ -1079,15 +1092,15 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     std::ops::Index<std::ops::Range<u64>> for GraphMemoryMap<N, E, Ix>
 {
-    type Output = [usize];
+    type Output = [Ix];
     #[inline]
-    fn index(&self, index: std::ops::Range<u64>) -> &[usize] {
+    fn index(&self, index: std::ops::Range<u64>) -> &[Ix] {
         let start = index.start as usize;
         let end = index.end as usize;
 
         unsafe {
             std::slice::from_raw_parts(
-                self.graph.as_ptr().add(start * self.edge_size) as *const usize,
+                self.graph.as_ptr().add(start * self.edge_size) as *const Ix,
                 end - start,
             )
         }
@@ -1638,21 +1651,21 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     EdgesConnecting<N, E, Ix>
 {
     fn new(
-        neigh_mmap: *const usize,
-        off_mmap: *const usize,
+        neigh_mmap: *const Ix,
+        off_mmap: *const Ix,
         orig_node: usize,
         target_node: usize,
     ) -> Self {
-        let mut offset = unsafe { off_mmap.add(orig_node).read() };
-        let mut count = unsafe { off_mmap.add(orig_node + 1).read() };
+        let mut offset = unsafe { off_mmap.add(orig_node).read().index() };
+        let mut count = unsafe { off_mmap.add(orig_node + 1).read().index() };
 
         let mut begin = false;
         #[allow(clippy::mut_range_bound)]
         for i in offset..count {
-            if !begin && unsafe { neigh_mmap.add(i).read() } == target_node {
+            if !begin && unsafe { neigh_mmap.add(i).read().index() } == target_node {
                 begin = true;
                 offset = i;
-            } else if begin && unsafe { neigh_mmap.add(i).read() } != target_node {
+            } else if begin && unsafe { neigh_mmap.add(i).read().index() } != target_node {
                 count = i - offset;
             }
         }
@@ -1709,7 +1722,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 }
 
 pub struct NodesWithDegree<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     count: usize,
     offset: usize,
     target_deg: usize,
@@ -1722,8 +1735,8 @@ pub struct NodesWithDegree<N: crate::graph::N, E: crate::graph::E, Ix: crate::gr
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     NodesWithDegree<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -1746,8 +1759,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
             if self.count == 0 {
                 return None;
             }
-            let curr = unsafe { self.off_ptr.add(self.count).read() };
-            if curr - unsafe { self.off_ptr.add(self.count.saturating_sub(1)).read() }
+            let curr = unsafe { self.off_ptr.add(self.count).read().index() };
+            if curr - unsafe { self.off_ptr.add(self.count.saturating_sub(1)).read().index() }
                 != self.target_deg
             {
                 continue;
@@ -1770,7 +1783,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             }
             let _ = self.count.saturating_sub(1);
             if unsafe {
-                self.off_ptr.add(self.offset + 1).read() - self.off_ptr.add(self.offset).read()
+                self.off_ptr.add(self.offset + 1).read().index() - self.off_ptr.add(self.offset).read().index()
             } != self.target_deg
             {
                 let _ = self.offset.saturating_add(1);
@@ -1788,7 +1801,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 }
 
 pub struct NodesWithDegreeLT<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     count: usize,
     offset: usize,
     target_deg: usize,
@@ -1801,8 +1814,8 @@ pub struct NodesWithDegreeLT<N: crate::graph::N, E: crate::graph::E, Ix: crate::
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     NodesWithDegreeLT<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -1825,8 +1838,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
             if self.count == 0 {
                 return None;
             }
-            let curr = unsafe { self.off_ptr.add(self.count).read() };
-            if curr - unsafe { self.off_ptr.add(self.count.saturating_sub(1)).read() }
+            let curr = unsafe { self.off_ptr.add(self.count).read().index() };
+            if curr - unsafe { self.off_ptr.add(self.count.saturating_sub(1)).read().index() }
                 >= self.target_deg
             {
                 continue;
@@ -1849,7 +1862,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             }
             let _ = self.count.saturating_sub(1);
             if unsafe {
-                self.off_ptr.add(self.offset + 1).read() - self.off_ptr.add(self.offset).read()
+                self.off_ptr.add(self.offset + 1).read().index() - self.off_ptr.add(self.offset).read().index()
             } >= self.target_deg
             {
                 let _ = self.offset.saturating_add(1);
@@ -1867,7 +1880,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 }
 
 pub struct NodesWithDegreeGE<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     count: usize,
     offset: usize,
     target_deg: usize,
@@ -1880,8 +1893,8 @@ pub struct NodesWithDegreeGE<N: crate::graph::N, E: crate::graph::E, Ix: crate::
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     NodesWithDegreeGE<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -1904,8 +1917,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
             if self.count == 0 {
                 return None;
             }
-            let curr = unsafe { self.off_ptr.add(self.count).read() };
-            if curr - unsafe { self.off_ptr.add(self.count.saturating_sub(1)).read() }
+            let curr = unsafe { self.off_ptr.add(self.count).read().index() };
+            if curr - unsafe { self.off_ptr.add(self.count.saturating_sub(1)).read().index() }
                 < self.target_deg
             {
                 continue;
@@ -1928,7 +1941,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             }
             let _ = self.count.saturating_sub(1);
             if unsafe {
-                self.off_ptr.add(self.offset + 1).read() - self.off_ptr.add(self.offset).read()
+                self.off_ptr.add(self.offset + 1).read().index() - self.off_ptr.add(self.offset).read().index()
             } < self.target_deg
             {
                 let _ = self.offset.saturating_add(1);
@@ -1951,7 +1964,7 @@ pub struct ParalelizableNodesWithDegreeLT<
     E: crate::graph::E,
     Ix: crate::graph::IndexType,
 > {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     stop_offset: usize,
     offset: Arc<AtomicUsize>,
     target_deg: usize,
@@ -1964,9 +1977,9 @@ pub struct ParalelizableNodesWithDegreeLT<
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParalelizableNodesWithDegreeLT<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let stop_offset = unsafe { off_mmap.add(node_count).read() };
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let stop_offset = unsafe { off_mmap.add(node_count).read().index() };
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -1992,7 +2005,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             if curr >= self.stop_offset {
                 return None;
             }
-            if unsafe { self.off_ptr.add(curr + 1).read() - self.off_ptr.add(curr).read() }
+            if unsafe { self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index() }
                 > self.target_deg
             {
                 continue;
@@ -2011,7 +2024,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 #[derive(Copy, Clone)]
 pub struct ParNodesWithDegreeLT<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     stop_offset: usize,
     offset: usize,
     target_deg: usize,
@@ -2042,9 +2055,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParNodesWithDegreeLT<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let stop_offset = unsafe { off_mmap.add(node_count).read() };
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let stop_offset = unsafe { off_mmap.add(node_count).read().index() };
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -2099,7 +2112,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            let deg = unsafe { self.off_ptr.add(i + 1).read() - self.off_ptr.add(i).read() };
+            let deg = unsafe { self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index() };
             if deg < self.target_deg {
                 folder = folder.consume(i);
             }
@@ -2196,7 +2209,7 @@ pub struct ParalelizableNodesWithDegreeGE<
     E: crate::graph::E,
     Ix: crate::graph::IndexType,
 > {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     stop_offset: usize,
     offset: Arc<AtomicUsize>,
     target_deg: usize,
@@ -2209,9 +2222,9 @@ pub struct ParalelizableNodesWithDegreeGE<
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParalelizableNodesWithDegreeGE<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let stop_offset = unsafe { off_mmap.add(node_count).read() };
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let stop_offset = unsafe { off_mmap.add(node_count).read().index() };
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -2237,7 +2250,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             if curr >= self.stop_offset {
                 return None;
             }
-            if unsafe { self.off_ptr.add(curr + 1).read() - self.off_ptr.add(curr).read() }
+            if unsafe { self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index() }
                 < self.target_deg
             {
                 continue;
@@ -2256,7 +2269,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 #[derive(Copy, Clone)]
 pub struct ParNodesWithDegreeGE<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     stop_offset: usize,
     offset: usize,
     target_deg: usize,
@@ -2287,9 +2300,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParNodesWithDegreeGE<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let stop_offset = unsafe { off_mmap.add(node_count).read() };
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let stop_offset = unsafe { off_mmap.add(node_count).read().index() };
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -2344,7 +2357,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            let deg = unsafe { self.off_ptr.add(i + 1).read() - self.off_ptr.add(i).read() };
+            let deg = unsafe { self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index() };
             if deg >= self.target_deg {
                 folder = folder.consume(i);
             }
@@ -2441,7 +2454,7 @@ pub struct ParalelizableNodesWithDegree<
     E: crate::graph::E,
     Ix: crate::graph::IndexType,
 > {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     stop_offset: usize,
     offset: Arc<AtomicUsize>,
     target_deg: usize,
@@ -2454,9 +2467,9 @@ pub struct ParalelizableNodesWithDegree<
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParalelizableNodesWithDegree<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let stop_offset = unsafe { off_mmap.add(node_count).read() };
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let stop_offset = unsafe { off_mmap.add(node_count).read().index() };
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -2482,7 +2495,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             if curr >= self.stop_offset {
                 return None;
             }
-            if unsafe { self.off_ptr.add(curr + 1).read() - self.off_ptr.add(curr).read() }
+            if unsafe { self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index() }
                 != self.target_deg
             {
                 continue;
@@ -2500,7 +2513,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 #[cfg(feature = "rayon")]
 #[derive(Copy, Clone)]
 pub struct ParNodesWithDegree<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    off_ptr: *const usize,
+    off_ptr: *const Ix,
     stop_offset: usize,
     offset: usize,
     target_deg: usize,
@@ -2531,9 +2544,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParNodesWithDegree<N, E, Ix>
 {
-    fn new(off_mmap: *const usize, node_count: usize, target_deg: usize) -> Self {
-        let stop_offset = unsafe { off_mmap.add(node_count).read() };
-        let offset = unsafe { off_mmap.read() };
+    fn new(off_mmap: *const Ix, node_count: usize, target_deg: usize) -> Self {
+        let stop_offset = unsafe { off_mmap.add(node_count).read().index() };
+        let offset = unsafe { off_mmap.read().index() };
 
         Self {
             off_ptr: off_mmap,
@@ -2588,7 +2601,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            let deg = unsafe { self.off_ptr.add(i + 1).read() - self.off_ptr.add(i).read() };
+            let deg = unsafe { self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index() };
             if deg == self.target_deg {
                 folder = folder.consume(i);
             }
@@ -2680,7 +2693,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Indexe
 }
 
 pub struct Neighbors<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    neigh_ptr: *const usize,
+    neigh_ptr: *const Ix,
     count: usize,
     offset: usize,
     _phantom1: std::marker::PhantomData<N>,
@@ -2690,13 +2703,13 @@ pub struct Neighbors<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::I
 
 #[allow(dead_code)]
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Neighbors<N, E, Ix> {
-    fn new(neigh_mmap: *const usize, off_mmap: *const usize, node_id: usize) -> Self {
+    fn new(neigh_mmap: *const Ix, off_mmap: *const Ix, node_id: usize) -> Self {
         let off_ptr = unsafe { off_mmap.add(node_id) };
-        let offset = unsafe { off_ptr.read_unaligned() };
+        let offset = unsafe { off_ptr.read_unaligned().index() };
 
         Self {
             neigh_ptr: unsafe { neigh_mmap.add(offset) },
-            count: unsafe { off_ptr.add(1).read_unaligned() - offset },
+            count: unsafe { off_ptr.add(1).read_unaligned().index() - offset },
             offset,
             _phantom1: std::marker::PhantomData::<N>,
             _phantom2: std::marker::PhantomData::<E>,
@@ -2704,7 +2717,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Neighb
         }
     }
     #[cfg(feature = "rayon")]
-    fn new_by_offset(neigh_mmap: *const usize, offset: usize, stop_offset: usize) -> Self {
+    fn new_by_offset(neigh_mmap: *const Ix, offset: usize, stop_offset: usize) -> Self {
         Self {
             neigh_ptr: unsafe { neigh_mmap.add(offset) },
             count: stop_offset - offset,
@@ -2732,7 +2745,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
             Some(
                 self.neigh_ptr
                     .add(self.count.saturating_sub(1))
-                    .read_unaligned(),
+                    .read_unaligned().index(),
             )
         }
     }
@@ -2751,7 +2764,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
         let _ = self.count.saturating_sub(1);
         let next: usize;
         self.neigh_ptr = unsafe {
-            next = self.neigh_ptr.read();
+            next = self.neigh_ptr.read().index();
             self.neigh_ptr.add(1)
         };
         let _ = self.offset.saturating_add(1);
@@ -2771,7 +2784,7 @@ pub struct ParalelizableNeighbors<
     E: crate::graph::E,
     Ix: crate::graph::IndexType,
 > {
-    neigh_ptr: *const usize,
+    neigh_ptr: *const Ix,
     stop_offset: usize,
     offset: Arc<AtomicUsize>,
     _phantom1: std::marker::PhantomData<N>,
@@ -2783,9 +2796,9 @@ pub struct ParalelizableNeighbors<
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     ParalelizableNeighbors<N, E, Ix>
 {
-    fn new(neigh_mmap: *const usize, off_mmap: *const usize, node_id: usize) -> Self {
-        let offset = unsafe { off_mmap.add(node_id).read() };
-        let stop_offset = unsafe { off_mmap.add(node_id + 1).read() };
+    fn new(neigh_mmap: *const Ix, off_mmap: *const Ix, node_id: usize) -> Self {
+        let offset = unsafe { off_mmap.add(node_id).read().index() };
+        let stop_offset = unsafe { off_mmap.add(node_id + 1).read().index() };
 
         Self {
             neigh_ptr: neigh_mmap,
@@ -2809,7 +2822,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
         if curr >= self.stop_offset {
             return None;
         }
-        unsafe { Some(self.neigh_ptr.add(curr).read()) }
+        unsafe { Some(self.neigh_ptr.add(curr).read().index()) }
     }
 
     #[inline(always)]
@@ -2822,7 +2835,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 #[cfg(feature = "rayon")]
 #[derive(Copy, Clone)]
 pub struct ParNeighbors<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    neigh_ptr: *const usize,
+    neigh_ptr: *const Ix,
     stop_offset: usize,
     offset: usize,
     _phantom1: std::marker::PhantomData<N>,
@@ -2851,9 +2864,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 #[cfg(feature = "rayon")]
 #[allow(dead_code)]
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ParNeighbors<N, E, Ix> {
-    fn new(neigh_mmap: *const usize, off_mmap: *const usize, node_id: usize) -> Self {
-        let offset = unsafe { off_mmap.add(node_id).read() };
-        let stop_offset = unsafe { off_mmap.add(node_id + 1).read() };
+    fn new(neigh_mmap: *const Ix, off_mmap: *const Ix, node_id: usize) -> Self {
+        let offset = unsafe { off_mmap.add(node_id).read().index() };
+        let stop_offset = unsafe { off_mmap.add(node_id + 1).read().index() };
 
         Self {
             neigh_ptr: neigh_mmap,
@@ -2905,7 +2918,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            unsafe { folder = folder.consume(self.neigh_ptr.add(i).read()) };
+            unsafe { folder = folder.consume(self.neigh_ptr.add(i).read().index()) };
         }
         folder
     }
@@ -2989,7 +3002,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Indexe
 
 pub struct NeighborsWithOffset<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 {
-    neigh_ptr: *const usize,
+    neigh_ptr: *const Ix,
     count: usize,
     offset: usize,
     _phantom1: std::marker::PhantomData<N>,
@@ -3001,13 +3014,13 @@ pub struct NeighborsWithOffset<N: crate::graph::N, E: crate::graph::E, Ix: crate
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     NeighborsWithOffset<N, E, Ix>
 {
-    fn new(neigh_mmap: *const usize, off_mmap: *const usize, node_id: usize) -> Self {
+    fn new(neigh_mmap: *const Ix, off_mmap: *const Ix, node_id: usize) -> Self {
         let off_ptr = unsafe { off_mmap.add(node_id) };
-        let offset = unsafe { off_ptr.read_unaligned() };
+        let offset = unsafe { off_ptr.read_unaligned().index() };
 
         Self {
             neigh_ptr: unsafe { neigh_mmap.add(offset) },
-            count: unsafe { off_ptr.add(1).read_unaligned() - offset },
+            count: unsafe { off_ptr.add(1).read_unaligned().index() - offset },
             offset,
             _phantom1: std::marker::PhantomData::<N>,
             _phantom2: std::marker::PhantomData::<E>,
@@ -3032,7 +3045,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
         unsafe {
             Some((
                 self.offset + self.count,
-                self.neigh_ptr.add(self.count).read_unaligned(),
+                self.neigh_ptr.add(self.count).read_unaligned().index(),
             ))
         }
     }
@@ -3051,7 +3064,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
         let _ = self.count.saturating_sub(1);
         let next: (usize, usize);
         self.neigh_ptr = unsafe {
-            next = (self.offset, self.neigh_ptr.read_unaligned());
+            next = (self.offset, self.neigh_ptr.read_unaligned().index());
             self.neigh_ptr.add(1)
         };
         let _ = self.offset.saturating_add(1);
@@ -3066,9 +3079,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
 }
 
 pub struct WalkNeighbors<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    neigh_ptr: *const usize,
-    orig_neigh_ptr: *const usize,
-    orig_off_ptr: *const usize,
+    neigh_ptr: *const Ix,
+    orig_neigh_ptr: *const Ix,
+    orig_off_ptr: *const Ix,
     count: usize,
     offset: usize,
     _phantom1: std::marker::PhantomData<N>,
@@ -3078,17 +3091,17 @@ pub struct WalkNeighbors<N: crate::graph::N, E: crate::graph::E, Ix: crate::grap
 
 #[allow(dead_code)]
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> WalkNeighbors<N, E, Ix> {
-    fn new(neigh_mmap: *const usize, off_mmap: *const usize, node_id: usize) -> Self {
+    fn new(neigh_mmap: *const Ix, off_mmap: *const Ix, node_id: usize) -> Self {
         let orig_neigh_ptr = neigh_mmap;
         let orig_off_ptr = off_mmap;
         let off_ptr = unsafe { off_mmap.add(node_id) };
-        let offset = unsafe { off_ptr.read_unaligned() };
+        let offset = unsafe { off_ptr.read_unaligned().index() };
 
         Self {
             neigh_ptr: unsafe { neigh_mmap.add(offset) },
             orig_neigh_ptr,
             orig_off_ptr,
-            count: unsafe { off_ptr.add(1).read_unaligned() - offset },
+            count: unsafe { off_ptr.add(1).read_unaligned().index() - offset },
             offset,
             _phantom1: std::marker::PhantomData::<N>,
             _phantom2: std::marker::PhantomData::<E>,
@@ -3099,7 +3112,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> WalkNe
     #[inline(always)]
     pub fn into_neighbour(self) -> Self {
         Self::new(self.orig_neigh_ptr, self.orig_off_ptr, unsafe {
-            self.neigh_ptr.read_unaligned()
+            self.neigh_ptr.read_unaligned().index()
         })
     }
 
@@ -3119,7 +3132,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
         let _ = self.count.saturating_sub(1);
         let next: usize;
         unsafe {
-            next = self.neigh_ptr.add(self.count).read_unaligned();
+            next = self.neigh_ptr.add(self.count).read_unaligned().index();
         };
         Some(next)
     }
@@ -3139,7 +3152,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
         let _ = self.offset.saturating_add(1);
         let next: usize;
         self.neigh_ptr = unsafe {
-            next = self.neigh_ptr.read_unaligned();
+            next = self.neigh_ptr.read_unaligned().index();
             self.neigh_ptr.add(1)
         };
         Some(next)
@@ -3157,9 +3170,9 @@ pub struct WalkNeighborsWithOffset<
     E: crate::graph::E,
     Ix: crate::graph::IndexType,
 > {
-    neigh_ptr: *const usize,
-    orig_neigh_ptr: *const usize,
-    orig_off_ptr: *const usize,
+    neigh_ptr: *const Ix,
+    orig_neigh_ptr: *const Ix,
+    orig_off_ptr: *const Ix,
     count: usize,
     offset: usize,
     _phantom1: std::marker::PhantomData<N>,
@@ -3171,17 +3184,17 @@ pub struct WalkNeighborsWithOffset<
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     WalkNeighborsWithOffset<N, E, Ix>
 {
-    fn new(neigh_mmap: *const usize, off_mmap: *const usize, node_id: usize) -> Self {
+    fn new(neigh_mmap: *const Ix, off_mmap: *const Ix, node_id: usize) -> Self {
         let orig_neigh_ptr = neigh_mmap;
         let orig_off_ptr = off_mmap;
         let off_ptr = unsafe { off_mmap.add(node_id) };
-        let offset = unsafe { off_ptr.read_unaligned() };
+        let offset = unsafe { off_ptr.read_unaligned().index() };
 
         Self {
             neigh_ptr: unsafe { neigh_mmap.add(offset) },
             orig_neigh_ptr,
             orig_off_ptr,
-            count: unsafe { off_ptr.add(1).read_unaligned() - offset },
+            count: unsafe { off_ptr.add(1).read_unaligned().index() - offset },
             offset,
             _phantom1: std::marker::PhantomData::<N>,
             _phantom2: std::marker::PhantomData::<E>,
@@ -3192,7 +3205,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     #[inline(always)]
     pub fn into_neighbour(self) -> Self {
         Self::new(self.orig_neigh_ptr, self.orig_off_ptr, unsafe {
-            self.neigh_ptr.read_unaligned()
+            self.neigh_ptr.read_unaligned().index()
         })
     }
 
@@ -3214,7 +3227,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Double
         unsafe {
             next = (
                 self.offset + self.count,
-                self.neigh_ptr.add(self.count).read_unaligned(),
+                self.neigh_ptr.add(self.count).read_unaligned().index(),
             );
         };
         Some(next)
@@ -3234,7 +3247,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
         let _ = self.count.saturating_sub(1);
         let next: (usize, usize);
         self.neigh_ptr = unsafe {
-            next = (self.offset, self.neigh_ptr.read_unaligned());
+            next = (self.offset, self.neigh_ptr.read_unaligned().index());
             self.neigh_ptr.add(1)
         };
         let _ = self.offset.saturating_add(1);

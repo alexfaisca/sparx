@@ -253,7 +253,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     ) -> Result<ProceduralMemoryHierholzers, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
 
         let e_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(0))?;
         let c_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(1))?;
@@ -274,8 +274,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
 
                 scope.spawn(move |_| {
                     for k in begin..end {
-                        *edges.get_mut(k) = *index_ptr.get(k);
-                        *count.get_mut(k) = (*index_ptr.get(k + 1) - *index_ptr.get(k)) as u8;
+                        *edges.get_mut(k) = index_ptr.get(k).index();
+                        *count.get_mut(k) = (index_ptr.get(k + 1).index() - index_ptr.get(k).index()) as u8;
                     }
                 });
             }
@@ -296,7 +296,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
             0 => return Ok(()),
             i => i,
         };
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), self.g.width());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), self.g.width());
 
         let (mut edges, mut edge_count) = proc_mem;
 
@@ -335,7 +335,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
             while let Some(&v) = stack.last() {
                 if *edge_count.get(v) > 0 {
                     *edge_count.get_mut(v) -= 1;
-                    stack.push(*neighbours_ptr.get(*edges.get(v)));
+                    stack.push(neighbours_ptr.get(*edges.get(v)).index());
                     *edges.get_mut(v) += 1;
                 } else {
                     stack.pop();

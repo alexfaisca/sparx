@@ -154,8 +154,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
         let mut next = Vec::with_capacity(self.g.size());
 
         next.push(self.source);
-        *ord.get_mut(0) = self.source;
-        let mut idx = 1;
+        // the loop below marks a node visited and writes it into `ord` the first time it's
+        // popped; pre-seeding `ord[0]`/pre-pushing the source here while *also* letting the loop
+        // process it as its first iteration would write the source twice (once here, once as the
+        // loop's first pop, since it isn't marked visited yet) and overflow `ord` by one slot for
+        // any graph where every node is reachable from `source` --- so the source must only be
+        // pushed onto the stack, not separately pre-written.
+        let mut idx = 0;
 
         // find cycles until no unused edges remain
         while let Some(u) = next.pop() {

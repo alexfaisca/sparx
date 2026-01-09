@@ -97,8 +97,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         let threads = self.g.thread_num();
         let thread_load = node_count.div_ceil(threads);
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // Shared atomic & simple arrays for counts and trussness
         let mut triangles = Triangles::new(self.g)?;
@@ -128,8 +128,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                 scope.spawn(move |_| {
                     let mut total_triangles_t = 0;
                     // initialize triangle_count with zeroes
-                    let edge_begin = *index_ptr.get(begin);
-                    let edge_end = *index_ptr.get(end);
+                    let edge_begin = index_ptr.get(begin).index();
+                    let edge_end = index_ptr.get(end).index();
                     for idx in edge_begin..edge_end {
                         *tris.get_mut(idx) = AtomicU8::new(0);
                     }
@@ -138,8 +138,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
 
                     let mut all_neighbours = HashSet::<usize>::new();
                     for u in begin..end {
-                        for j in *index_ptr.get(u)..*index_ptr.get(u + 1) {
-                            let v = *neighbours_ptr.get(j);
+                        for j in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                            let v = neighbours_ptr.get(j).index();
                             all_neighbours.insert(v);
                             total_triangles_t += tris.get(j).load(Ordering::Relaxed);
                         }
@@ -160,7 +160,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
 
                     for u in begin..end {
                         let mut u_triangles: usize = 0;
-                        for edge_idx in *index_ptr.get(u)..*index_ptr.get(u + 1) {
+                        for edge_idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                             u_triangles += tris.get(edge_idx).load(Ordering::Relaxed) as usize;
                         }
                         let undirected_triangles = u_triangles.div_ceil(2) as f64;

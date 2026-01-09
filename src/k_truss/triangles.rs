@@ -145,8 +145,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Triangles<'a, N, E, Ix>
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         let tris = self.triangles.shared_slice();
 
@@ -170,8 +170,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Triangles<'a, N, E, Ix>
                 scope.spawn(move |_| {
                     let mut neighbours = HashMap::<usize, OneOrMany<usize>>::new();
                     for u in begin..end {
-                        for j in *eo.get(u)..*index_ptr.get(u + 1) {
-                            let w = *neighbours_ptr.get(j);
+                        for j in eo.get(u).index()..index_ptr.get(u + 1).index() {
+                            let w = neighbours_ptr.get(j).index();
                             match neighbours.entry(w) {
                                 std::collections::hash_map::Entry::Vacant(e) => {
                                     e.insert(OneOrMany::One(j));
@@ -189,36 +189,36 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Triangles<'a, N, E, Ix>
                                 }
                             }
                         }
-                        for u_v in *index_ptr.get(u)..*eo.get(u) {
-                            let v = *neighbours_ptr.get(u_v);
+                        for u_v in index_ptr.get(u).index()..eo.get(u).index() {
+                            let v = neighbours_ptr.get(u_v).index();
                             if u == v {
                                 continue;
                             }
-                            for v_w in (*eo.get(v)..*index_ptr.get(v + 1)).rev() {
-                                let w = *neighbours_ptr.get(v_w);
+                            for v_w in (eo.get(v).index()..index_ptr.get(v + 1).index()).rev() {
+                                let w = neighbours_ptr.get(v_w).index();
                                 if w <= u {
                                     break;
                                 }
                                 match neighbours.get(&w) {
                                     Some(i) => match i {
                                         OneOrMany::One(u_w) => {
-                                            let w_u = *er.get(*u_w);
+                                            let w_u = er.get(*u_w).index();
                                             tris.get(u_v).fetch_add(1, Ordering::Relaxed);
                                             tris.get(v_w).fetch_add(1, Ordering::Relaxed);
                                             tris.get(*u_w).fetch_add(1, Ordering::Relaxed);
-                                            tris.get(*er.get(u_v)).fetch_add(1, Ordering::Relaxed);
-                                            tris.get(*er.get(v_w)).fetch_add(1, Ordering::Relaxed);
+                                            tris.get(er.get(u_v).index()).fetch_add(1, Ordering::Relaxed);
+                                            tris.get(er.get(v_w).index()).fetch_add(1, Ordering::Relaxed);
                                             tris.get(w_u).fetch_add(1, Ordering::Relaxed);
                                         }
                                         OneOrMany::Many(u_ws) => {
                                             for &u_w in u_ws {
-                                                let w_u = *er.get(u_w);
+                                                let w_u = er.get(u_w).index();
                                                 tris.get(u_v).fetch_add(1, Ordering::Relaxed);
                                                 tris.get(v_w).fetch_add(1, Ordering::Relaxed);
                                                 tris.get(u_w).fetch_add(1, Ordering::Relaxed);
-                                                tris.get(*er.get(u_v))
+                                                tris.get(er.get(u_v).index())
                                                     .fetch_add(1, Ordering::Relaxed);
-                                                tris.get(*er.get(v_w))
+                                                tris.get(er.get(v_w).index())
                                                     .fetch_add(1, Ordering::Relaxed);
                                                 tris.get(w_u).fetch_add(1, Ordering::Relaxed);
                                             }
