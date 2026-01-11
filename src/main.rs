@@ -1582,6 +1582,7 @@ impl<T: std::error::Error> From<T> for ParsingError<T> {
     }
 }
 
+#[allow(dead_code)]
 impl<T: std::error::Error> Display for ParsingError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
