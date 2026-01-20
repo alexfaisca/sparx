@@ -127,7 +127,7 @@ touch ___empty_input___.contigs.fa
 FILES=("___empty_input___.contigs.fa")
 
 # Now download datasets and append to FILES
-echo "Downloading datasets listed in: ../../${URLS_FILE}"
+echo "Downloading datasets listed in: ../../${URLS_FILE} for ggcat"
 while IFS= read -r url || [[ -n "$url" ]]; do
 	[[ -z "$url" || "$url" =~ ^# ]] && continue
 	fname="$(basename "${url}")"
@@ -137,6 +137,7 @@ while IFS= read -r url || [[ -n "$url" ]]; do
 		gunzip -f "${fname}"
 		fname="${fname%.gz}"
 	fi
+	
 	FILES+=("$fname")
 done <"../../${URLS_FILE}"
 
@@ -151,8 +152,10 @@ cd ".."
 # directly into graphs dir to curl kmer graphs
 cd "graphs"
 
+echo "Downloading suitesparse graphs"
+
 fname=kmer_V2a.tar.gz
-curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "https://suitesparse-collection-website.herokuapp.com/MM/GenBank/kmer_V2a.tar.gz"
+curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "http://sparse-files.engr.tamu.edu/MM/GenBank/kmer_V2a.tar.gz"
 echo "Decompressing ${fname}"
 gunzip -f "${fname}"
 tname="${fname%.gz}"
@@ -162,7 +165,7 @@ mv "./${dname}/kmer_V2a.mtx" .
 rm -r "${tname}" "${dname}"
 
 fname=kmer_A2a.tar.gz
-curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "https://suitesparse-collection-website.herokuapp.com/MM/GenBank/kmer_A2a.tar.gz"
+curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "http://sparse-files.engr.tamu.edu/MM/GenBank/kmer_A2a.tar.gz"
 echo "Decompressing ${fname}"
 gunzip -f "${fname}"
 tname="${fname%.gz}"
@@ -172,7 +175,7 @@ mv "./${dname}/kmer_A2a.mtx" .
 rm -r "${tname}" "${dname}"
 
 fname=kmer_V1r.tar.gz
-curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "https://suitesparse-collection-website.herokuapp.com/MM/GenBank/kmer_V1r.tar.gz"
+curl -L --fail --retry 5 --retry-connrefused --retry-delay 3 -o "${fname}" "http://sparse-files.engr.tamu.edu/MM/GenBank/kmer_V1r.tar.gz"
 echo "Decompressing ${fname}"
 gunzip -f "${fname}"
 tname="${fname%.gz}"
@@ -203,9 +206,17 @@ if ! command -v ggcat >/dev/null 2>&1; then
 		git clone https://github.com/algbio/ggcat
 	fi
 	pushd ggcat >/dev/null
+
+	echo "Updating ggcat submodules.."
+
+	git submodule update --init  
+
+	echo "Installing ggcat..."
+
 	cargo install --path crates/cmdline/ --locked
+
 	popd >/dev/null
-	echo "GGCAT installed to \$HOME/.cargo/bin. Ensure it's on your PATH."
+	echo "GGCAT installed to \$HOME/.cargo/bin. Ensure it's on your \$PATH."
 fi
 
 # 6) Helper: build a graph for one file and one k
@@ -247,6 +258,8 @@ build_one() {
 
 	cd ".."
 }
+
+echo "Building De Bruijn graphs using ggcat"
 
 # 7) Build per dataset:
 #    - k=5 and k=10 for all
