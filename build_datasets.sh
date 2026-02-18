@@ -320,7 +320,7 @@ python3 gen_dbg_mtx.py --alphabet protein20 --k 5 --out ./${WORKDIR}/graphs/synt
 python3 gen_dbg_mtx.py --alphabet protein23 --k 5 --out ./${WORKDIR}/graphs/synth_prot23_k5_edges296M.mtx
 
 # ~6.8B protein edges (exact 6,809,650,871) **WARNING!!!: Gigabyte A1 took 1 hour to parse the resulting file into a graph.**
-python3 gen_dbg_mtx.py --alphabet protein23 --k 6 --out ./${WORKDIR}/graphs/synth_prot23_k6_edges6_8B.mtx
+# python3 gen_dbg_mtx.py --alphabet protein23 --k 6 --out ./${WORKDIR}/graphs/synth_prot23_k6_edges6_8B.mtx
 
 echo
 echo "All graphs built under: $(pwd)/${WORKDIR}/graphs"

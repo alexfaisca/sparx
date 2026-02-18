@@ -123,6 +123,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
 #[cfg(test)]
 mod test {
+    use crate::graph::test_utils::unique_test_dir;
     use crate::shared_slice::SharedSliceMut;
 
     /// Direct, self-contained equivalence check for the `apply_mask_to_nodes` neighbour-write
@@ -137,11 +138,7 @@ mod test {
     /// changed, in isolation.
     #[test]
     fn direct_write_matches_collect_then_write_for_every_scenario() {
-        let dir = std::env::temp_dir().join(format!(
-            "sparx_induced_subgraph_write_check_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = unique_test_dir("induced_subgraph_write_check");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
 
         let scenarios: &[(&[usize], fn(usize) -> bool)] = &[

@@ -1,7 +1,7 @@
 mod producers;
 
 use super::{
-    GraphCache,
+    AccumulatorAtomic, GraphCache,
     utils::{FileType, H},
 };
 use crate::shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut};
@@ -36,7 +36,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
     /// [`DEFAULT_BATCHING_SIZE`]: ./struct.GraphCache.html#associatedconstant.DEFAULT_BATCHING_SIZE
-    pub(super) fn from_ggcat_file_impl<P: AsRef<Path>>(
+    pub(super) fn from_ggcat_file_impl<P: AsRef<Path>, D: AccumulatorAtomic>(
         path: P,
         id: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -57,7 +57,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let mut cache = Self::init_with_id(&id, batching)?;
 
         // parse and cache input
-        cache.parallel_parse_ggcat_bytes_mmap(&input[..])?;
+        cache.parallel_parse_ggcat_bytes_mmap::<D>(&input[..])?;
 
         // if a tmp file was created delete it
         if let Some(p) = tmp_path {
@@ -85,7 +85,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
     /// [`DEFAULT_BATCHING_SIZE`]: ./struct.GraphCache.html#associatedconstant.DEFAULT_BATCHING_SIZE
-    pub(super) fn from_ggcat_file_with_fst_impl<P: AsRef<Path>>(
+    pub(super) fn from_ggcat_file_with_fst_impl<P: AsRef<Path>, D: AccumulatorAtomic>(
         path: P,
         id: Option<String>,
         batch: Option<usize>,
@@ -109,7 +109,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let mut cache = Self::init_with_id(&id, batching)?;
 
         // parse and cache input
-        cache.parallel_parse_with_fst_ggcat_bytes_mmap(&input[..], in_fst)?;
+        cache.parallel_parse_with_fst_ggcat_bytes_mmap::<D>(&input[..], in_fst)?;
 
         // if a tmp file was created delete it
         if let Some(p) = tmp_path {
@@ -184,7 +184,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// * An error occurs writing the node into the memmapped cache files.
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
-    fn parallel_parse_ggcat_bytes_mmap(
+    fn parallel_parse_ggcat_bytes_mmap<D: AccumulatorAtomic>(
         &mut self,
         input: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -220,22 +220,31 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             FileType::Helper(H::H),
             Some(1),
         )?;
-        let degrees = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&d_fn, offsets_size, true)?;
+        let degrees = SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
-        // parse node degrees
+        // parse node degrees. a single node's degree exceeding `D`'s width is reported as an
+        // `AccumulatorOverflow`, never silently wrapped --- see `AccumulatorAtomic`'s
+        // documentation.
+        let overflowed = portable_atomic::AtomicBool::new(false);
         Self::parallel_edge_counter_parse_ggcat_bytes_mmap_with(
             input,
             {
                 let degrees = degrees.shared_slice();
+                let overflowed = &overflowed;
                 move |id, edge_count| {
-                    degrees.get(id).store(edge_count, Ordering::Relaxed);
+                    if degrees.get(id).checked_store(edge_count, Ordering::Relaxed).is_err() {
+                        overflowed.store(true, Ordering::Relaxed);
+                    }
                 }
             },
             threads,
         )?;
+        if overflowed.load(Ordering::Relaxed) {
+            return Err(super::AccumulatorOverflow.into());
+        }
 
         // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
-        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size)?;
+        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size, None)?;
 
         let neighbors =
             AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
@@ -250,7 +259,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     let mut neighbors = neighbors.shared_slice();
                     move |node_id, neighbors_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node {node_id}");
                     }
                 },
@@ -265,7 +274,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     move |node_id, neighbors_slice, node_label| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node ");
                     }
                 },
@@ -280,10 +289,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, edgelabels_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edgelabels slice for node");
                     }
                 },
@@ -300,10 +309,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     move |node_id, neighbors_slice, node_label, edgelabels_slice| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edgelabels slice for node");
                     }
                 },
@@ -356,7 +365,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// * An error occurs writing the node into the memmapped cache files.
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
-    fn parallel_parse_with_fst_ggcat_bytes_mmap(
+    fn parallel_parse_with_fst_ggcat_bytes_mmap<D: AccumulatorAtomic>(
         &mut self,
         input: &[u8],
         in_fst: fn(usize) -> bool,
@@ -393,22 +402,31 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             FileType::Helper(H::H),
             Some(1),
         )?;
-        let degrees = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&d_fn, offsets_size, true)?;
+        let degrees = SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
-        // parse node degrees
+        // parse node degrees. a single node's degree exceeding `D`'s width is reported as an
+        // `AccumulatorOverflow`, never silently wrapped --- see `AccumulatorAtomic`'s
+        // documentation.
+        let overflowed = portable_atomic::AtomicBool::new(false);
         Self::parallel_edge_counter_parse_ggcat_bytes_mmap_with(
             input,
             {
                 let degrees = degrees.shared_slice();
+                let overflowed = &overflowed;
                 move |id, edge_count| {
-                    degrees.get(id).store(edge_count, Ordering::Relaxed);
+                    if degrees.get(id).checked_store(edge_count, Ordering::Relaxed).is_err() {
+                        overflowed.store(true, Ordering::Relaxed);
+                    }
                 }
             },
             threads,
         )?;
+        if overflowed.load(Ordering::Relaxed) {
+            return Err(super::AccumulatorOverflow.into());
+        }
 
         // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
-        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size)?;
+        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size, None)?;
 
         let neighbors =
             AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
@@ -441,7 +459,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     let mut neighbors = neighbors.shared_slice();
                     move |node_id, neighbors_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                     }
                 },
@@ -478,7 +496,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     move |node_id, neighbors_slice, node_label| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                     }
                 },
@@ -515,10 +533,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, edgelabels_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edge labels slice for node");
                     }
                 },
@@ -557,10 +575,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     move |node_id, neighbors_slice, node_label, edgelabels_slice| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edge labels slice for node");
                     }
                 },
@@ -710,6 +728,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 #[cfg(test)]
 mod test {
     use super::GraphCache;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::graph::{GraphMemoryMap, label::VoidLabel};
     use std::io::Write;
 
@@ -728,18 +747,15 @@ mod test {
     /// reflect the narrower index width.
     #[test]
     fn ggcat_parser_round_trips_for_usize_and_u32_ix() {
-        let dir = std::env::temp_dir().join(format!(
-            "sparx_ggcat_ix_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = unique_test_dir("ggcat_ix_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
         let path = dir.join("tiny.txt");
         write_tiny_ggcat(&path);
 
         let cache_usize = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(
             &path,
-            Some("ggcat_ix_test_usize".to_string()),
+            Some(format!("ggcat_ix_test_usize_{run_tag}")),
             None,
             None,
         )
@@ -750,7 +766,7 @@ mod test {
 
         let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
             &path,
-            Some("ggcat_ix_test_u32".to_string()),
+            Some(format!("ggcat_ix_test_u32_{run_tag}")),
             None,
             None,
         )

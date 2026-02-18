@@ -20,6 +20,7 @@ use crate::communities::gve_louvain::AlgoGVELouvain;
 use crate::communities::hk_relax::HKRelax;
 use crate::graph::cache::GraphCache;
 use crate::graph::label::VoidLabel;
+use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
 use crate::graph::{GraphMemoryMap, IndexType};
 use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
 use crate::k_core::liu_et_al::AlgoLiuEtAl;
@@ -251,11 +252,7 @@ fn sweep_with_opts(
     widths: &[&str],
     compute_exact_centralities: bool,
 ) {
-    let dir = std::env::temp_dir().join(format!(
-        "sparx_cross_ix_sweep_{tier}_{}_{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let dir = unique_test_dir(&format!("cross_ix_sweep_{tier}"));
     std::fs::create_dir_all(&dir).expect("error creating tmp dir");
     let path = write_ring_graph_mtx(&dir, n, chords);
 
@@ -264,7 +261,7 @@ fn sweep_with_opts(
     // whatever cache files already exist on disk for it, so reusing a fixed id string across
     // repeated `cargo test` runs would silently resurrect stale cache state from a previous run
     // instead of rebuilding from this run's (freshly written) `.mtx` fixture.
-    let run_tag = format!("{}_{:?}", std::process::id(), std::thread::current().id());
+    let run_tag = unique_run_tag();
 
     let baseline = run_all_algorithms::<usize>(
         &path,

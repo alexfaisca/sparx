@@ -83,6 +83,7 @@ mod test {
     use super::*;
     use crate::graph::cache::GraphCache;
     use crate::graph::label::VoidLabel;
+    use crate::graph::test_utils::unique_test_dir;
     use crate::trails::{
         bfs_visit::{BFSVisit, BfsVisitor},
         dfs_visit::{DFSVisit, DfsVisitor},
@@ -100,11 +101,7 @@ mod test {
     /// 2 -> (none)             (node 2 has degree 0, an isolated sink)
     /// 3 -> 0                  (node 3 has degree 1)
     fn build_tiny_graph() -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
-        let dir = std::env::temp_dir().join(format!(
-            "sparx_impl_traits_neigh_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = unique_test_dir("impl_traits_neigh_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("tiny.mtx");
         std::fs::write(

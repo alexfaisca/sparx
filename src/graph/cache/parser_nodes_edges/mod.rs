@@ -1,13 +1,13 @@
 use super::{
-    GraphCache, MultithreadedParserIndexBounds,
+    AccumulatorAtomic, GraphCache, MultithreadedParserIndexBounds,
     utils::{FileType, H, cache_file_name},
 };
 use crate::shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut};
 
 use crossbeam::thread;
 use num_cpus::get_physical;
-use portable_atomic::{AtomicUsize, Ordering};
-use std::{path::Path, sync::Arc};
+use portable_atomic::Ordering;
+use std::path::Path;
 
 #[allow(dead_code)]
 impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
@@ -30,7 +30,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
     /// [`DEFAULT_BATCHING_SIZE`]: ./struct.GraphCache.html#associatedconstant.DEFAULT_BATCHING_SIZE
-    pub(super) fn from_node_edge_file_impl<P: AsRef<Path>>(
+    pub(super) fn from_node_edge_file_impl<P: AsRef<Path>, D: AccumulatorAtomic>(
         nodes_path: P,
         edges_path: P,
         id: Option<String>,
@@ -74,7 +74,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let mut cache = Self::init_with_id(&id, batching)?;
 
         // parse and cache input
-        cache.parallel_parse_node_edge(&input_nodes[..], &input_edges[..], in_fst)?;
+        cache.parallel_parse_node_edge::<D>(&input_nodes[..], &input_edges[..], in_fst)?;
 
         // if a tmp file was created delete it
         if let Some(p) = nodes_tmp_path {
@@ -231,7 +231,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// * An error occurs writing the node into the memmapped cache files.
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
-    fn parallel_parse_node_edge(
+    fn parallel_parse_node_edge<D: AccumulatorAtomic>(
         &mut self,
         input_nodes: &[u8],
         input_edges: &[u8],
@@ -267,10 +267,14 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
         let d_fn = cache_file_name(&self.offsets_filename, &FileType::Helper(H::H), Some(1))?;
         let degrees =
-            SharedSliceMut::<AtomicUsize>::abst_mem_mut(&d_fn, offsets_size, true)?;
+            SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
-        // get node degrees
-        thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
+        // get node degrees. `D::increment` is unchecked (no per-edge branch, see its
+        // documentation) --- overflow is instead caught below, once, by comparing
+        // `finalize_ix_offsets`'s computed total against `edges_emitted` (tallied practically
+        // for free: each thread counts its own lines locally and returns the count once, on
+        // join, not once per edge).
+        let edges_emitted = thread::scope(|s| -> Result<usize, Box<dyn std::error::Error>> {
             let mut handles = Vec::with_capacity(threads);
             (0..threads).for_each(|tid| {
                 let thread_bounds = edges_bounds[tid];
@@ -278,7 +282,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let degrees = degrees.shared_slice();
 
                 handles.push(s.spawn(
-                    move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    move |_| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+                        let mut local_edges = 0usize;
                         // this assumes UTF-8 but avoids full conversion
                         for line in input.split(|&b| b == b'\n') {
                             if line.is_empty() {
@@ -292,15 +297,18 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                             let mut node = node.iter().peekable();
 
                             let id: usize = node.next().unwrap().parse()?;
-                            degrees.get(id).add(1, Ordering::Relaxed);
+                            degrees.get(id).increment(Ordering::Relaxed);
+                            local_edges += 1;
                         }
-                        Ok(())
+                        Ok(local_edges)
                     },
                 ));
             });
-            // check for errors
+            // check for errors and sum each thread's local edge count
+            let mut total_edges = 0usize;
             for (tid, r) in handles.into_iter().enumerate() {
-                r.join()
+                total_edges += r
+                    .join()
                     .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
                     .map_err(|e| -> Box<dyn std::error::Error> {
                         format!(
@@ -310,22 +318,36 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                         .into()
                     })?;
             }
-            Ok(())
+            Ok(total_edges)
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
         // prefix sum degrees to get offsets, persisting them, Ix-width, into `self.offsets_file`
-        let (_degrees_owner, offsets_s, sum) = self.finalize_ix_offsets(degrees, offsets_size)?;
+        let (_degrees_owner, offsets_s, sum) =
+            self.finalize_ix_offsets(degrees, offsets_size, Some(edges_emitted))?;
 
         let neighbors =
             AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
-        let _batch_num = Arc::new(AtomicUsize::new(0));
-        let _batch_size = self.batch.map_or(Self::DEFAULT_BATCHING_SIZE, |s| s);
 
         let counters_fn =
             cache_file_name(&self.offsets_filename, &FileType::Helper(H::H), Some(0))?;
-        let counters = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&counters_fn, node_count, true)?;
-        // write edges
+        let counters = SharedSliceMut::<D>::abst_mem_mut(&counters_fn, node_count, true)?;
+        // write edges. Every edge independently claims its own, unique output position via
+        // `counters`' atomic fetch-add --- regardless of which thread/chunk it was parsed from,
+        // or whether a node's edges happen to be split across a thread boundary. This used to be
+        // special-cased (the first distinct node id seen by each thread was queued, then flushed
+        // to a *statically computed* position range assumed to be exactly this thread's share of
+        // that node's segment) to preserve each node's edges' original file order even when
+        // split across threads --- but that queue-flush raced with any other thread's
+        // `fetch_add`-based writes to the very same node (nothing synchronized the two
+        // mechanisms), so, depending on scheduling, two edges could land on the same position
+        // (silently dropping one) or the "assumed" position range could be wrong entirely for a
+        // node spanning more than two threads' chunks. Confirmed as a real, reproducible data
+        // race (not a test-infra artifact): simply re-running the affected round-trip test
+        // in complete isolation (no other tests involved) still intermittently produced wrong
+        // neighbour sets. Preserving per-node original file order was never actually load-bearing
+        // here anyway: `sort_edges` (below) re-sorts every node's neighbour list immediately
+        // after this, making any such ordering purely incidental.
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::with_capacity(threads);
             (0..threads).for_each(|tid| {
@@ -337,59 +359,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
                 handles.push(s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                        let mut input_lines = input.split(|&b| b == b'\n');
-
-                        // parse first node's edges: guarantee edges are stored in ascending order even
-                        // when a node's parsing is split between threads
-                        let mut first_node = None;
-                        let mut queue = Vec::with_capacity(256);
-                        for line in &mut input_lines {
-                            if line.is_empty() {
-                                continue;
-                            }
-                            let line_str = std::str::from_utf8(line)?;
-
-                            let node = line_str.split_whitespace().collect::<Vec<&str>>();
-                            let mut node = node.iter().peekable();
-
-                            let orig_id: usize = node.next().unwrap().parse()?;
-                            let dest_id: usize = node.next().unwrap().parse()?;
-                            let dir = node.next().unwrap();
-                            let dir = Self::parse_node_edge_direction(dir).map_err(
-                                |e| -> Box<dyn std::error::Error + Send + Sync> {
-                                    format!("error in thread {tid}: {e}").into()
-                                },
-                            )?;
-                            if let Some(id) = first_node {
-                                if orig_id == id {
-                                    queue.push((dest_id, dir));
-                                } else {
-                                    // *edges.get_mut(
-                                    //     offsets.get(orig_id).load(Ordering::Relaxed)
-                                    //         + counters.get(orig_id).fetch_add(1, Ordering::Relaxed),
-                                    // ) = Edge::new(dest_id as u64, dir);
-                                    *neighbors.get_mut(
-                                        *offsets.get(orig_id)
-                                            + counters.get(orig_id).fetch_add(1, Ordering::Relaxed),
-                                    ) = Ix::new(dest_id);
-                                    break;
-                                }
-                            } else {
-                                first_node = Some(orig_id);
-                                queue.push((dest_id, dir));
-                            }
-                        }
-                        // now write edges of first node taking into account the missing ones
-                        if let Some(id) = first_node {
-                            let _begin = *offsets.get(id + 1) - queue.len();
-                            for (offset, (dest, _dir)) in (_begin..*offsets.get(id + 1)).zip(queue)
-                            {
-                                // *edges.get_mut(offset) = Edge::new(dest as u64, dir);
-                                *neighbors.get_mut(offset) = Ix::new(dest);
-                            }
-                        }
-                        // parse rest of the thread's edges
-                        for line in input_lines {
+                        for line in input.split(|&b| b == b'\n') {
                             if line.is_empty() {
                                 continue;
                             }
@@ -402,14 +372,17 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
                             let orig_id: usize = node.next().unwrap().parse()?;
                             let dest_id: usize = node.next().unwrap().parse()?;
-                            let _dir = node.next().unwrap();
+                            let dir = node.next().unwrap();
+                            Self::parse_node_edge_direction(dir).map_err(
+                                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                                    format!("error in thread {tid}: {e}").into()
+                                },
+                            )?;
 
                             *neighbors.get_mut(
-                                *offsets.get(orig_id)
-                                    + counters.get(orig_id).fetch_add(1, Ordering::Relaxed),
+                                D::widen(*offsets.get(orig_id))
+                                    + counters.get(orig_id).fetch_add_one_widened(Ordering::Relaxed),
                             ) = Ix::new(dest_id);
-
-                            continue;
                         }
                         Ok(())
                     },
@@ -432,7 +405,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
-        Self::sort_edges(offsets_s, neighbors.shared_slice(), threads)?;
+        Self::sort_edges::<D>(offsets_s, neighbors.shared_slice(), threads)?;
         neighbors.flush_async()?;
         drop(neighbors);
 
@@ -454,6 +427,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 #[cfg(test)]
 mod test {
     use super::GraphCache;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::graph::{GraphMemoryMap, label::VoidLabel};
     use std::io::Write;
 
@@ -482,17 +456,14 @@ mod test {
     /// reflect the narrower index width.
     #[test]
     fn nodes_edges_parser_round_trips_for_usize_and_u32_ix() {
-        let dir = std::env::temp_dir().join(format!(
-            "sparx_nodes_edges_ix_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = unique_test_dir("nodes_edges_ix_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
         let nodes_path = write_tiny_nodes_edges(&dir);
 
         let cache_usize = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(
             &nodes_path,
-            Some("nodes_edges_ix_test_usize".to_string()),
+            Some(format!("nodes_edges_ix_test_usize_{run_tag}")),
             None,
             None,
         )
@@ -503,7 +474,7 @@ mod test {
 
         let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
             &nodes_path,
-            Some("nodes_edges_ix_test_u32".to_string()),
+            Some(format!("nodes_edges_ix_test_u32_{run_tag}")),
             None,
             None,
         )

@@ -13,7 +13,6 @@ use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemory
 use utils::{
     ensure_file_writable, cache_file_name, cache_file_name_from_id, cache_metadata_file_name_from_id, cleanup_cache, edges_to_nodes, graph_id_from_cache_file_name, id_for_subgraph_export, id_from_filename, nodes_to_edges, pers_cache_file_name, toml_cache_file_name, FileType, CACHE_DIR, H
 };
-use portable_atomic::AtomicUsize;
 
 #[cfg(any(test, feature = "bench"))]
 use utils::EXACT_VALUE_CACHE_DIR;
@@ -53,6 +52,126 @@ pub struct CacheMetadata {
 }
 
 const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
+
+/// Error returned when a chosen [`AccumulatorAtomic`] width is too narrow for the graph actually
+/// being parsed (either a single node's degree, or the cumulative total, exceeds the chosen
+/// width's range). Never the result of silent wraparound: every write path that could overflow
+/// checks for it explicitly (see [`AccumulatorAtomic::checked_increment`]/[`checked_store`]).
+///
+/// [`checked_store`]: AccumulatorAtomic::checked_store
+#[derive(Debug)]
+pub struct AccumulatorOverflow;
+
+impl std::fmt::Display for AccumulatorOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "error degree/offset accumulator overflowed its configured width during parsing; use a wider `AccumulatorAtomic` (e.g. the default `AtomicUsize`)"
+        )
+    }
+}
+
+impl std::error::Error for AccumulatorOverflow {}
+
+/// A width-matched atomic integer type usable for lock-free, per-node degree accumulation and
+/// edge-position tracking during graph parsing, abstracting over [`portable_atomic`]'s per-width
+/// atomic types so parsers can stream through narrower buffers (`AtomicU32`/`AtomicU16`) instead
+/// of always paying `AtomicUsize`'s full width --- a real memory-bandwidth win for graphs that
+/// comfortably fit a narrower width (e.g. under ~4B edges for `AtomicU32`), at the cost of an
+/// explicit, loud [`AccumulatorOverflow`] (never silent wraparound/corruption) if they don't.
+///
+/// Node degrees fitting the chosen width implies per-node edge-position counters do too (a
+/// counter only ever counts up to its own node's degree), so [`fetch_add_one_widened`] and
+/// [`load_widened`] are intentionally unchecked: their safety is inherited from degrees having
+/// already been validated via [`checked_increment`]/[`checked_store`].
+///
+/// # Safety
+///
+/// Implementors must guarantee `Self` and `Self::Plain` have identical size and alignment, so a
+/// buffer of `Self` may be soundly reinterpreted in place as a buffer of `Self::Plain` (see
+/// [`SharedSliceMut::cast`]) once parallel accumulation has finished and no concurrent writers
+/// remain.
+///
+/// [`fetch_add_one_widened`]: AccumulatorAtomic::fetch_add_one_widened
+/// [`load_widened`]: AccumulatorAtomic::load_widened
+/// [`checked_increment`]: AccumulatorAtomic::checked_increment
+/// [`checked_store`]: AccumulatorAtomic::checked_store
+pub unsafe trait AccumulatorAtomic: Default + Send + Sync + 'static {
+    /// Non-atomic counterpart with identical size/layout as `Self`.
+    type Plain: Copy + Default + TryFrom<usize> + Send + Sync + 'static;
+
+    /// Widens a `Self::Plain` value to `usize`. Always lossless: this crate only supports
+    /// platforms where `usize` is at least 64 bits wide (see the `const_assert!` above), so
+    /// `Self::Plain` (at most `usize`-wide by construction) always fits.
+    fn widen(val: Self::Plain) -> usize;
+
+    /// Atomically increments by one. Unchecked/uncounted: a per-node degree exceeding
+    /// `Self::Plain`'s range wraps silently *here*, but is always caught downstream, loudly, by
+    /// comparing the prefix-summed total against an independently-tallied true edge count (see
+    /// [`finalize_ix_offsets`](GraphCache::finalize_ix_offsets)) --- wrapping can only ever make a
+    /// node's apparent degree *smaller*, so any single node overflowing strictly reduces that
+    /// total below the true count, with no false negatives. This keeps the (far hotter, once
+    /// per edge) accumulation path free of a per-call branch, at the cost of a single O(threads)
+    /// combine instead of an O(edges) check.
+    fn increment(&self, order: portable_atomic::Ordering);
+
+    /// Atomically stores an exact value. Returns [`AccumulatorOverflow`] if `val` doesn't fit in
+    /// `Self::Plain`'s range. Checked (unlike [`increment`](Self::increment)): callers of this
+    /// method already know the exact value to store (it isn't accumulated edge-by-edge), so
+    /// checking it costs one validation per *node*, not per *edge*.
+    fn checked_store(&self, val: usize, order: portable_atomic::Ordering) -> Result<(), AccumulatorOverflow>;
+
+    /// Atomically increments by one, returning the pre-increment value widened to `usize`.
+    /// Unchecked: see the trait's documentation for why this is sound.
+    fn fetch_add_one_widened(&self, order: portable_atomic::Ordering) -> usize;
+
+    /// Atomically loads the current value, widened to `usize`. Unchecked: see the trait's
+    /// documentation for why this is sound.
+    fn load_widened(&self, order: portable_atomic::Ordering) -> usize;
+}
+
+macro_rules! impl_accumulator_atomic {
+    ($atomic:ty, $plain:ty) => {
+        unsafe impl AccumulatorAtomic for $atomic {
+            type Plain = $plain;
+
+            #[inline(always)]
+            fn widen(val: Self::Plain) -> usize {
+                val as usize
+            }
+
+            #[inline(always)]
+            fn increment(&self, order: portable_atomic::Ordering) {
+                self.add(1, order);
+            }
+
+            #[inline(always)]
+            fn checked_store(
+                &self,
+                val: usize,
+                order: portable_atomic::Ordering,
+            ) -> Result<(), AccumulatorOverflow> {
+                let val = <$plain>::try_from(val).map_err(|_| AccumulatorOverflow)?;
+                self.store(val, order);
+                Ok(())
+            }
+
+            #[inline(always)]
+            fn fetch_add_one_widened(&self, order: portable_atomic::Ordering) -> usize {
+                self.fetch_add(1, order) as usize
+            }
+
+            #[inline(always)]
+            fn load_widened(&self, order: portable_atomic::Ordering) -> usize {
+                self.load(order) as usize
+            }
+        }
+    };
+}
+
+impl_accumulator_atomic!(portable_atomic::AtomicUsize, usize);
+impl_accumulator_atomic!(portable_atomic::AtomicU32, u32);
+impl_accumulator_atomic!(portable_atomic::AtomicU16, u16);
 
 /// Verifies that `node_count` distinct node ids and `edge_count` `CSR` offset values can be
 /// represented, losslessly, by the index type `I`, returning an error otherwise.
@@ -522,7 +641,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
         let nodelabel_file = match OpenOptions::new()
             .read(true)
-            .open(metalabel_filename.as_str())
+            .open(nodelabel_filename.as_str())
         {
             Ok(file) => Arc::new(file),
             Err(_) => {
@@ -636,11 +755,26 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         batch: Option<usize>,
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_file_with_accumulator::<P, portable_atomic::AtomicUsize>(p, id, batch, in_fst)
+    }
+
+    /// Same as [`from_file`](Self::from_file), but lets the caller choose the width-matched
+    /// atomic type (`D`) used for lock-free per-node degree accumulation and edge-position
+    /// tracking during parsing (see [`AccumulatorAtomic`]). Defaults to `AtomicUsize` (always
+    /// safe); `AtomicU32`/`AtomicU16` trade a (checked, never silently wrong) range restriction
+    /// for reduced memory traffic while streaming through these buffers --- worthwhile for
+    /// graphs comfortably within that narrower width (e.g. under ~4B edges for `AtomicU32`).
+    pub fn from_file_with_accumulator<P: AsRef<Path>, D: AccumulatorAtomic>(
+        p: P,
+        id: Option<String>,
+        batch: Option<usize>,
+        in_fst: Option<fn(usize) -> bool>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
 
         let mut cache = match Self::evaluate_input_file_type(p.as_ref())? {
             #[cfg(feature = "mtx")]
-            InputFileType::MTX(_) => Self::from_mtx_file(p.as_ref(), id, batch),
+            InputFileType::MTX(_) => Self::from_mtx_file_with_accumulator::<_, D>(p.as_ref(), id, batch),
             #[cfg(feature = "nodes_edges")]
             InputFileType::NODE_EDGE(ext) => 
             match ext {
@@ -649,14 +783,14 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 .ok_or_else(|| -> Box<dyn std::error::Error> {
                     "error getting edges path from nodes path".into()
                 })?;
-                    Self::from_node_edge_file(p.as_ref(), edges_path.as_ref(), id, batch, in_fst)
+                    Self::from_node_edge_file_with_accumulator::<_, D>(p.as_ref(), edges_path.as_ref(), id, batch, in_fst)
                 },
                 Self::EXT_PLAINTEXT_EDGES => {
                     let nodes_path = edges_to_nodes(p.as_ref())
                 .ok_or_else(|| -> Box<dyn std::error::Error> {
                     "error getting nodes path from edges path".into()
                 })?;
-                    Self::from_node_edge_file(nodes_path.as_ref(), p.as_ref(), id, batch, in_fst)
+                    Self::from_node_edge_file_with_accumulator::<_, D>(nodes_path.as_ref(), p.as_ref(), id, batch, in_fst)
                 },
                 _ => Err(format!(
                     "error ubknown extension for node/edge input file {:?}: must be of type .{} or .{}",
@@ -669,8 +803,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             #[cfg(feature = "ggcat")]
             InputFileType::GGCAT(ext) => 
             match ext {
-                Self::EXT_COMPRESSED_LZ4 => Self::from_ggcat_file(p.as_ref(), id),
-                Self::EXT_PLAINTEXT_TXT => Self::from_ggcat_file(p.as_ref(), id),
+                Self::EXT_COMPRESSED_LZ4 => Self::from_ggcat_file_with_accumulator::<_, D>(p.as_ref(), id),
+                Self::EXT_PLAINTEXT_TXT => Self::from_ggcat_file_with_accumulator::<_, D>(p.as_ref(), id),
                 _ => Err(format!(
                     "error ubknown extension for GGCAT output file {:?}: must be of type .{} or .{}",
                     ext,
@@ -713,7 +847,20 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         batch: Option<usize>,
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_node_edge_file_impl(nodes_path, edges_path, id, batch, in_fst)
+        Self::from_node_edge_file_impl::<P, portable_atomic::AtomicUsize>(nodes_path, edges_path, id, batch, in_fst)
+    }
+
+    /// Same as [`from_node_edge_file`](Self::from_node_edge_file), but lets the caller choose the
+    /// [`AccumulatorAtomic`] type used for degree/edge-position accumulation during parsing.
+    #[cfg(feature = "nodes_edges")]
+    pub fn from_node_edge_file_with_accumulator<P: AsRef<Path>, D: AccumulatorAtomic>(
+        nodes_path: P,
+        edges_path: P,
+        id: Option<String>,
+        batch: Option<usize>,
+        in_fst: Option<fn(usize) -> bool>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_node_edge_file_impl::<P, D>(nodes_path, edges_path, id, batch, in_fst)
     }
 
     /// Parses a [`GGCAT`](https://github.com/algbio/ggcat) output file input into a [`GraphCache`] instance.
@@ -735,7 +882,17 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         path: P,
         id: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_ggcat_file_impl(path, id)
+        Self::from_ggcat_file_impl::<P, portable_atomic::AtomicUsize>(path, id)
+    }
+
+    /// Same as [`from_ggcat_file`](Self::from_ggcat_file), but lets the caller choose the
+    /// [`AccumulatorAtomic`] type used for degree accumulation during parsing.
+    #[cfg(feature = "ggcat")]
+    pub fn from_ggcat_file_with_accumulator<P: AsRef<Path>, D: AccumulatorAtomic>(
+        path: P,
+        id: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_ggcat_file_impl::<P, D>(path, id)
     }
 
     /// Parses a [`GGCAT`](https://github.com/algbio/ggcat) output file input into a [`GraphCache`] instance, with meta labels.
@@ -764,7 +921,19 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         batch: Option<usize>,
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_ggcat_file_with_fst_impl(path, id, batch, in_fst)
+        Self::from_ggcat_file_with_fst_impl::<P, portable_atomic::AtomicUsize>(path, id, batch, in_fst)
+    }
+
+    /// Same as [`from_ggcat_file_with_fst`](Self::from_ggcat_file_with_fst), but lets the caller
+    /// choose the [`AccumulatorAtomic`] type used for degree accumulation during parsing.
+    #[cfg(feature = "ggcat")]
+    pub fn from_ggcat_file_with_fst_and_accumulator<P: AsRef<Path>, D: AccumulatorAtomic>(
+        path: P,
+        id: Option<String>,
+        batch: Option<usize>,
+        in_fst: Option<fn(usize) -> bool>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_ggcat_file_with_fst_impl::<P, D>(path, id, batch, in_fst)
     }
 
     /// Parses a [`MatrixMarket`](https://math.nist.gov/MatrixMarket/formats.html) file input into a [`GraphCache`] instance.
@@ -792,7 +961,18 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         id: Option<String>,
         batch: Option<usize>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_mtx_file_impl(path, id, batch)
+        Self::from_mtx_file_impl::<P, portable_atomic::AtomicUsize>(path, id, batch)
+    }
+
+    /// Same as [`from_mtx_file`](Self::from_mtx_file), but lets the caller choose the
+    /// [`AccumulatorAtomic`] type used for degree/edge-position accumulation during parsing.
+    #[cfg(feature = "mtx")]
+    pub fn from_mtx_file_with_accumulator<P: AsRef<Path>, D: AccumulatorAtomic>(
+        path: P,
+        id: Option<String>,
+        batch: Option<usize>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_mtx_file_impl::<P, D>(path, id, batch)
     }
 
     /// Creates a [`GraphCache`] instance from an existing cached graph.
@@ -1289,6 +1469,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             CacheFile::General => FileType::General,
             CacheFile::BFS => FileType::BFS(H::H),
             CacheFile::DFS => FileType::DFS(H::H),
+            CacheFile::DfsVisitor => FileType::DfsVisitor(H::H),
+            CacheFile::BfsVisitor => FileType::BfsVisitor(H::H),
             CacheFile::EulerIndex => FileType::EulerIndex(H::H),
             CacheFile::EulerTrail => FileType::EulerTrail(H::H),
             CacheFile::KCoreBZ => FileType::KCoreBZ(H::H),
@@ -1403,45 +1585,64 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         ensure_fits_in_index_type::<Ix>(node_count, edge_count)
     }
 
-    /// Given a parallel-populated, `AtomicUsize`-backed, per-node degree scratch buffer[^1] of
-    /// length `offset_size` (`= |V| + 1`), computes the prefix-summed `CSR` offsets and persists
-    /// them into `self.offsets_file` using the cache's `Ix` index width.
+    /// Given a parallel-populated [`AccumulatorAtomic`]-backed, per-node degree scratch buffer[^1]
+    /// of length `offset_size` (`= |V| + 1`), computes the prefix-summed `CSR` offsets and
+    /// persists them into `self.offsets_file` using the cache's `Ix` index width.
     ///
     /// Returns the (now prefix-summed) scratch buffer --- both as its owning handle[^2] and as a
-    /// plain (non atomic) `usize`-width view over it --- together with the total number of edges
-    /// (`|E|`); the view is useful for addressing each node's position in the neighbors array
-    /// while it is being populated, irrespective of `Ix`'s width.
+    /// plain (non atomic) view over it, widthed by `D::Plain` --- together with the total number
+    /// of edges (`|E|`); the view is useful for addressing each node's position in the neighbors
+    /// array while it is being populated, irrespective of `Ix`'s width.
     ///
-    /// [^1]: the scratch buffer is always `usize`-width, regardless of `Ix`, so that it may be
-    /// used for lock-free atomic degree accumulation (`Ix` need not support atomic operations).
+    /// `expected_edges`, if provided, is compared against the computed prefix-sum total,
+    /// catching any `D::Plain`-width overflow during the (unchecked, per-edge) accumulation
+    /// phase: a wrapped degree can only ever make a node's apparent degree *smaller*, so any
+    /// single node overflowing strictly reduces the computed total below the true edge count,
+    /// with no false negatives. Pass `None` when the caller already guarantees no accumulation
+    /// overflow occurred by construction (e.g. degrees stored as exact, pre-known values rather
+    /// than incrementally accumulated).
+    ///
+    /// [^1]: the scratch buffer's width is chosen by the caller via `D` (defaults to
+    /// `AtomicUsize`, always safe; `AtomicU32`/`AtomicU16` trade a (checked) range restriction
+    /// for reduced memory traffic while streaming through this buffer).
     /// [^2]: the owning handle must be kept alive by the caller for as long as the returned view
     /// is used, as it backs the view's memory mapping.
     #[allow(clippy::type_complexity)]
-    pub(super) fn finalize_ix_offsets(
+    pub(super) fn finalize_ix_offsets<D: AccumulatorAtomic>(
         &mut self,
-        degrees: AbstractedProceduralMemoryMut<AtomicUsize>,
+        degrees: AbstractedProceduralMemoryMut<D>,
         offset_size: usize,
+        expected_edges: Option<usize>,
     ) -> Result<
         (
-            AbstractedProceduralMemoryMut<AtomicUsize>,
-            SharedSliceMut<usize>,
+            AbstractedProceduralMemoryMut<D>,
+            SharedSliceMut<D::Plain>,
             usize,
         ),
         Box<dyn std::error::Error>,
     > {
         // this works because freshly mmapped files are zeroed (so degrees[|V|] = 0)
         let mut degrees_s = unsafe {
-            degrees.shared_slice().cast::<usize>().ok_or_else(
+            degrees.shared_slice().cast::<D::Plain>().ok_or_else(
                 || -> Box<dyn std::error::Error> { "error getting non atomic slice".into() },
             )?
         };
 
-        // prefix sum degrees to get offsets
+        // prefix sum degrees to get offsets --- accumulated in `usize` (never overflows), only
+        // the narrowing write-back into `D::Plain` is checked.
         let mut sum: usize = 0;
         for u in 0..offset_size {
-            let deg_u = *degrees_s.get(u);
-            *degrees_s.get_mut(u) = sum;
+            let deg_u: usize = D::widen(*degrees_s.get(u));
+            *degrees_s.get_mut(u) = D::Plain::try_from(sum).map_err(|_| -> Box<dyn std::error::Error> {
+                AccumulatorOverflow.into()
+            })?;
             sum += deg_u;
+        }
+
+        if let Some(expected) = expected_edges {
+            if sum != expected {
+                return Err(AccumulatorOverflow.into());
+            }
         }
 
         Self::ensure_fits_in_ix(offset_size.saturating_sub(1), sum)?;
@@ -1452,7 +1653,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         let mut offsets =
             AbstractedProceduralMemoryMut::<Ix>::from_file(&self.offsets_file, offset_size)?;
         for u in 0..offset_size {
-            *offsets.get_mut(u) = Ix::new(*degrees_s.get(u));
+            *offsets.get_mut(u) = Ix::new(D::widen(*degrees_s.get(u)));
         }
         offsets.flush()?;
 
