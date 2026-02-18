@@ -50,3 +50,15 @@ criterion_backup*
 *.zip
 papers/
 
+
+.devcontainer/
+.vs/
+.vscode/
+.idea/
+.zed/
+.cursor/
+.claude/
+.codex/
+.windsurf/
+.clinerules
+.opencode/
