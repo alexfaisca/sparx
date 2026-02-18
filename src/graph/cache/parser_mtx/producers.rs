@@ -76,7 +76,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         path: P,
         emit: F,
         threads: usize,
-    ) -> Result<(), Box<dyn std::error::Error>>
+    ) -> Result<usize, Box<dyn std::error::Error>>
     where
         F: FnMut(usize, usize) + Send + Sync + Clone,
     {
@@ -144,11 +144,13 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
             .div_ceil(threads as u64);
 
         let seen = Arc::new(AtomicUsize::new(0));
+        let edges_emitted = Arc::new(AtomicUsize::new(0));
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();
 
             for tid in 0..threads {
                 let mut local_seen = 0;
+                let mut local_edges_emitted = 0usize;
                 let begin_pos = std::cmp::min(header_offset + tid as u64 * thread_load, file_len);
                 let end_pos =
                     std::cmp::min(header_offset + (tid + 1) as u64 * thread_load, file_len)
@@ -156,6 +158,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 let p = path.as_ref();
 
                 let seen = seen.clone();
+                let edges_emitted = edges_emitted.clone();
                 let mut emit = emit.clone();
 
                 let handle = s.spawn(
@@ -227,16 +230,19 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                             // Emit edges:
                             // first directed edge i --(w)--> j
                             emit(i, j);
+                            local_edges_emitted += 1;
 
                             // second directed edge (if symmetrical) j --(w)--> i
                             if symmetric && i != j {
                                 emit(j, i);
+                                local_edges_emitted += 1;
                             }
 
                             local_seen += 1;
                         }
 
                         seen.add(local_seen, Ordering::Relaxed);
+                        edges_emitted.add(local_edges_emitted, Ordering::Relaxed);
                         Ok(())
                     },
                 );
@@ -258,7 +264,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
-        Ok(())
+        Ok(edges_emitted.load(Ordering::Relaxed))
     }
 
     pub(super) fn parallel_edge_labels_parse_mtx_with<F, P: AsRef<Path>>(

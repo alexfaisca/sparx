@@ -1,13 +1,13 @@
 use crate::shared_slice::SharedSliceMut;
 
-use super::{utils::apply_permutation_in_place, GraphCache};
+use super::{utils::apply_permutation_in_place, AccumulatorAtomic, GraphCache};
 
 use crossbeam::thread;
 
 #[allow(dead_code)]
 impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     #[inline(always)]
-    pub(super) fn sort_edges(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<Ix>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn sort_edges<D: AccumulatorAtomic>(offsets: SharedSliceMut<D::Plain>, neighbors: SharedSliceMut<Ix>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = offsets.len().saturating_sub(1);
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();
@@ -20,8 +20,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let handle = s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         for node in begin..end {
-                            let begin = *offsets.get(node);
-                            let end = *offsets.get(node + 1);
+                            let begin = D::widen(*offsets.get(node));
+                            let end = D::widen(*offsets.get(node + 1));
                             let node_edges = neighbors.mut_slice(begin, end).ok_or_else(
                                 || -> Box<dyn std::error::Error + Send + Sync> {
                                     format!("error getting node {node}'s edges as a mut slice for ordering")
@@ -51,7 +51,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     }
 
     #[inline(always)]
-    pub(super) fn sort_edges_with_labels(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<Ix>, edge_labels: SharedSliceMut<E>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn sort_edges_with_labels<D: AccumulatorAtomic>(offsets: SharedSliceMut<D::Plain>, neighbors: SharedSliceMut<Ix>, edge_labels: SharedSliceMut<E>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = offsets.len().saturating_sub(1);
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();
@@ -66,8 +66,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let mut idx = Vec::with_capacity(u16::MAX as usize);
                         for node in begin..end {
-                            let begin = *offsets.get(node);
-                            let end = *offsets.get(node + 1);
+                            let begin = D::widen(*offsets.get(node));
+                            let end = D::widen(*offsets.get(node + 1));
                             (0..end - begin).for_each(|v| {
                                 idx.push(v);
                             });

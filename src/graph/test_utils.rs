@@ -31,6 +31,31 @@ pub(crate) fn exact_value_cache() -> &'static ExactValueCache {
     EXACT_VALUE_CACHE.get_or_init(DashMap::new)
 }
 
+/// Returns a short, genuinely unique tag (`"<pid>_<thread-id>_<counter>"`), suitable for use as
+/// (part of) a cache id string, test-fixture directory name, or anywhere else uniqueness across
+/// concurrently-running tests matters. See [`unique_test_dir`]'s doc comment for why
+/// pid+thread-id alone is not sufficient.
+#[allow(dead_code)]
+pub(crate) fn unique_run_tag() -> String {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}_{:?}_{id}", std::process::id(), std::thread::current().id())
+}
+
+/// Returns a genuinely unique scratch directory for a test fixture file.
+///
+/// `std::process::id()` + `std::thread::current().id()` alone is *not* sufficient: cargo test's
+/// worker thread pool reuses OS threads across different test functions, so two different tests
+/// running on the same worker thread could derive the exact same deterministic path and race on
+/// (or silently reuse a stale cache for) each other's fixture file --- this was a real, confirmed
+/// source of cross-test flakiness when running the suite with its default parallelism. An
+/// atomic, monotonically increasing counter makes every call unique regardless of thread reuse
+/// or execution order.
+#[allow(dead_code)]
+pub(crate) fn unique_test_dir(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("sparx_{tag}_{}", unique_run_tag()))
+}
+
 #[allow(dead_code)]
 fn cache_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(PathBuf::from(CACHE_DIR))
