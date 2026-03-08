@@ -54,12 +54,19 @@ pub type DefaultIx = usize;
 pub unsafe trait IndexType:
     Copy + Default + Hash + Ord + Debug + Send + Sync + 'static
 {
+    /// Width-matched atomic counterpart (see [`cache::AccumulatorAtomic`]), usable wherever a
+    /// lock-free counter the same width as `Self` is needed (e.g. community-detection's
+    /// aggregation-phase edge counters).
+    ///
+    /// [`cache::AccumulatorAtomic`]: ./cache/trait.AccumulatorAtomic.html#
+    type Atomic: cache::AccumulatorAtomic<Plain = Self>;
     fn new(x: usize) -> Self;
     fn index(&self) -> usize;
     fn max() -> Self;
 }
 
 unsafe impl IndexType for usize {
+    type Atomic = portable_atomic::AtomicUsize;
     #[inline(always)]
     fn new(x: usize) -> Self {
         x
@@ -75,6 +82,7 @@ unsafe impl IndexType for usize {
 }
 
 unsafe impl IndexType for u32 {
+    type Atomic = portable_atomic::AtomicU32;
     #[inline(always)]
     fn new(x: usize) -> Self {
         x as u32
@@ -90,6 +98,7 @@ unsafe impl IndexType for u32 {
 }
 
 unsafe impl IndexType for u16 {
+    type Atomic = portable_atomic::AtomicU16;
     #[inline(always)]
     fn new(x: usize) -> Self {
         x as u16
@@ -105,6 +114,7 @@ unsafe impl IndexType for u16 {
 }
 
 unsafe impl IndexType for u8 {
+    type Atomic = portable_atomic::AtomicU8;
     #[inline(always)]
     fn new(x: usize) -> Self {
         x as u8
@@ -141,18 +151,6 @@ impl<Ix: IndexType> NodeIndex<Ix> {
 
     fn _into_edge(self) -> EdgeIndex<Ix> {
         EdgeIndex(self.0)
-    }
-}
-
-unsafe impl<Ix: IndexType> IndexType for NodeIndex<Ix> {
-    fn index(&self) -> usize {
-        self.0.index()
-    }
-    fn new(x: usize) -> Self {
-        NodeIndex::new(x)
-    }
-    fn max() -> Self {
-        NodeIndex(<Ix as IndexType>::max())
     }
 }
 /// Edge identifier.
@@ -676,7 +674,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
     pub fn modularity(
         &self,
-        communities: &[usize],
+        communities: &[Ix],
         comms_cardinality: usize,
     ) -> Result<f64, Box<dyn std::error::Error>> {
         self.modularity_impl(communities, comms_cardinality)

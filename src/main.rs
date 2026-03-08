@@ -310,7 +310,7 @@ fn sandbox_parse<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>
     // _liu_et_al.drop_cache()?;
 
     // let time = Instant::now();
-    // let mut _louvain = AlgoGVELouvain::new(&graph_mmaped)?;
+    // let mut _louvain = AlgoGVELouvain::<_, _, _, f64>::new(&graph_mmaped)?;
     // println!("found {} communities", _louvain.community_count());
     // println!("partition modularity {} ", _louvain.partition_modularity());
     // println!("louvain finished in {:?}", time.elapsed());
@@ -519,7 +519,7 @@ fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     _liu_et_al.drop_cache()?;
 
     let time = Instant::now();
-    let mut _louvain = AlgoGVELouvain::new(&graph_mmaped)?;
+    let mut _louvain = AlgoGVELouvain::<_, _, _, f64>::new(&graph_mmaped)?;
     println!("found {} communities", _louvain.community_count());
     println!("partition modularity {} ", _louvain.partition_modularity());
     println!("louvain finished in {:?}", time.elapsed());
@@ -805,7 +805,7 @@ fn pages_profile_6<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
 
     let time = Instant::now();
-    let mut _louvain = AlgoGVELouvain::new(&graph_mmaped)?;
+    let mut _louvain = AlgoGVELouvain::<_, _, _, f64>::new(&graph_mmaped)?;
     println!("found {} communities", _louvain.community_count());
     println!("partition modularity {} ", _louvain.partition_modularity());
     println!("louvain finished in {:?}", time.elapsed());

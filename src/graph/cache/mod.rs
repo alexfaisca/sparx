@@ -172,6 +172,7 @@ macro_rules! impl_accumulator_atomic {
 impl_accumulator_atomic!(portable_atomic::AtomicUsize, usize);
 impl_accumulator_atomic!(portable_atomic::AtomicU32, u32);
 impl_accumulator_atomic!(portable_atomic::AtomicU16, u16);
+impl_accumulator_atomic!(portable_atomic::AtomicU8, u8);
 
 /// Verifies that `node_count` distinct node ids and `edge_count` `CSR` offset values can be
 /// represented, losslessly, by the index type `I`, returning an error otherwise.

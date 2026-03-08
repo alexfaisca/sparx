@@ -178,7 +178,7 @@ fn run_all_algorithms<Ix: IndexType>(
     let hierholzer_trail_count = hierholzer.trail_number();
     let hierholzer_trails_concat = hierholzer.get_all_trails().0.to_vec();
 
-    let louvain = AlgoGVELouvain::new(&graph)?;
+    let louvain = AlgoGVELouvain::<_, _, _, f64>::new(&graph)?;
     let louvain_community_count = louvain.community_count();
     let louvain_modularity_bits = louvain.partition_modularity().to_bits();
 
