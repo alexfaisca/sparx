@@ -14,7 +14,7 @@ use std::{
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphMemoryMap<N, E, Ix> {
     pub(super) fn modularity_impl(
         &self,
-        communities: &[usize],
+        communities: &[Ix],
         comms_cardinality: usize,
     ) -> Result<f64, Box<dyn std::error::Error>> {
         let m2 = match self.width() {
@@ -42,13 +42,14 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
         for u in 0..node_count {
             let iter = self.neighbours(u)?;
-            *total_degree.get_mut(communities[u]) += iter.remaining_neighbours();
+            let comm_u = communities[u].index();
+            *total_degree.get_mut(comm_u) += iter.remaining_neighbours();
             for v in iter {
                 if v >= node_count {
                     continue;
                 } // safety
-                if communities[v] == communities[u] {
-                    *internal_degree.get_mut(communities[u]) += 1;
+                if communities[v].index() == comm_u {
+                    *internal_degree.get_mut(comm_u) += 1;
                 }
             }
         }
@@ -68,7 +69,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
     pub(crate) fn coallesce_isolated_nodes_community(
         &self,
-        communities: SharedSliceMut<usize>,
+        communities: SharedSliceMut<Ix>,
         comm_count: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let node_count = self.size();
@@ -103,7 +104,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                     // mark isolated nodes
                     for u in begin..end {
                         if offsets_ptr.get(u + 1).index() - offsets_ptr.get(u).index() == 0 {
-                            let comm_u = *communities.get(u);
+                            let comm_u = communities.get(u).index();
                             assert!(comm_u <= comm_count);
                             *counter.get_mut(comm_u) = 1;
                         }
@@ -128,10 +129,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
                     for u in begin..end {
                         if offsets_ptr.get(u + 1).index() - offsets_ptr.get(u).index() == 0 {
-                            *communities.get_mut(u) = isolated_nodes_comm;
+                            *communities.get_mut(u) = Ix::new(isolated_nodes_comm);
                         } else {
-                            *communities.get_mut(u) -= *counter.get(*communities.get(u));
-                            if *communities.get_mut(u) > 1000000000 {
+                            let comm_u = communities.get(u).index();
+                            let new_comm_u = comm_u - *counter.get(comm_u);
+                            *communities.get_mut(u) = Ix::new(new_comm_u);
+                            if new_comm_u > 1000000000 {
                                 println!("{u}");
                             }
                         }

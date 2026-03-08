@@ -1,4 +1,5 @@
 use crate::graph;
+use crate::graph::cache::AccumulatorAtomic;
 use crate::graph::*;
 use crate::shared_slice::*;
 
@@ -13,42 +14,174 @@ use std::sync::Barrier;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-type Weight = f64;
-type AtomicWeight = AtomicF64;
+/// Floating-point weight type usable for edge/node weights in Louvain community detection,
+/// abstracting over `f32`/`f64` so the (hot, streamed-through-repeatedly) weight arrays can be
+/// narrowed for reduced memory traffic --- same motivation, and same `Plain`/`Atomic` pairing
+/// convention, as [`graph::cache::AccumulatorAtomic`].
+///
+/// # Safety
+///
+/// Implementors must guarantee `Self` and `Self::Atomic` have identical size and alignment, so a
+/// buffer of `Self` may be soundly reinterpreted in place as a buffer of `Self::Atomic` (used for
+/// the `k`/`sigma` lock-free weight accumulators), and vice-versa.
+pub unsafe trait Weight:
+    Copy
+    + Default
+    + PartialOrd
+    + std::fmt::Debug
+    + std::fmt::Display
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Div<Output = Self>
+    + std::ops::AddAssign
+    + Send
+    + Sync
+    + 'static
+{
+    /// Width-matched atomic counterpart.
+    type Atomic: WeightAtomic<Plain = Self>;
+    fn zero() -> Self;
+    fn one() -> Self;
+    /// Widens a node/edge count (always non-negative, always representable) into a weight value.
+    fn from_usize(x: usize) -> Self;
+    fn is_finite(self) -> bool;
+    fn is_normal(self) -> bool;
+    /// Machine epsilon at `Self`'s precision. Not currently used internally (the one place that
+    /// used to need a width-aware significance threshold, `louvain_move`'s gain check, now
+    /// compares in `f64` unconditionally --- see `delta_q`'s docs), but kept as part of the
+    /// trait's general-purpose numeric surface.
+    fn epsilon() -> Self;
+    /// Widens to `f64`, used only for the final, single, summary modularity scalar (always kept
+    /// `f64`-precision regardless of `Self`, since it's one value, not a hot per-edge array).
+    fn to_f64(self) -> f64;
+}
 
-type ProceduralMemoryGVELouvain<Ix> = (
+/// Atomic counterpart of a [`Weight`] type, abstracting over [`portable_atomic`]'s `AtomicF32`/
+/// `AtomicF64`.
+///
+/// # Safety
+///
+/// Implementors must guarantee `Self` and `Self::Plain` have identical size and alignment (same
+/// requirement as, and mirrored by, [`Weight`]'s own safety section).
+pub unsafe trait WeightAtomic: Default + Send + Sync + 'static {
+    /// Non-atomic counterpart with identical size/layout as `Self`.
+    type Plain: Weight<Atomic = Self>;
+    fn new(v: Self::Plain) -> Self;
+    fn load(&self, order: Ordering) -> Self::Plain;
+    fn store(&self, v: Self::Plain, order: Ordering);
+    fn fetch_add(&self, v: Self::Plain, order: Ordering) -> Self::Plain;
+    fn fetch_update<F>(
+        &self,
+        set_order: Ordering,
+        fetch_order: Ordering,
+        f: F,
+    ) -> Result<Self::Plain, Self::Plain>
+    where
+        F: FnMut(Self::Plain) -> Option<Self::Plain>;
+}
+
+macro_rules! impl_weight {
+    ($plain:ty, $atomic:ty) => {
+        unsafe impl Weight for $plain {
+            type Atomic = $atomic;
+            #[inline(always)]
+            fn zero() -> Self {
+                0.
+            }
+            #[inline(always)]
+            fn one() -> Self {
+                1.
+            }
+            #[inline(always)]
+            fn from_usize(x: usize) -> Self {
+                x as $plain
+            }
+            #[inline(always)]
+            fn is_finite(self) -> bool {
+                <$plain>::is_finite(self)
+            }
+            #[inline(always)]
+            fn is_normal(self) -> bool {
+                <$plain>::is_normal(self)
+            }
+            #[inline(always)]
+            fn epsilon() -> Self {
+                <$plain>::EPSILON
+            }
+            #[inline(always)]
+            fn to_f64(self) -> f64 {
+                self as f64
+            }
+        }
+
+        unsafe impl WeightAtomic for $atomic {
+            type Plain = $plain;
+            #[inline(always)]
+            fn new(v: $plain) -> Self {
+                <$atomic>::new(v)
+            }
+            #[inline(always)]
+            fn load(&self, order: Ordering) -> $plain {
+                <$atomic>::load(self, order)
+            }
+            #[inline(always)]
+            fn store(&self, v: $plain, order: Ordering) {
+                <$atomic>::store(self, v, order)
+            }
+            #[inline(always)]
+            fn fetch_add(&self, v: $plain, order: Ordering) -> $plain {
+                <$atomic>::fetch_add(self, v, order)
+            }
+            #[inline(always)]
+            fn fetch_update<F>(
+                &self,
+                set_order: Ordering,
+                fetch_order: Ordering,
+                f: F,
+            ) -> Result<$plain, $plain>
+            where
+                F: FnMut($plain) -> Option<$plain>,
+            {
+                <$atomic>::fetch_update(self, set_order, fetch_order, f)
+            }
+        }
+    };
+}
+
+impl_weight!(f64, AtomicF64);
+impl_weight!(f32, AtomicF32);
+
+type ProceduralMemoryGVELouvain<Ix, W> = (
     // K' --- renamed to k
-    AbstractedProceduralMemoryMut<AtomicWeight>,
+    AbstractedProceduralMemoryMut<<W as Weight>::Atomic>,
     // Σ' --- renamed to sigma
-    AbstractedProceduralMemoryMut<AtomicWeight>,
+    AbstractedProceduralMemoryMut<<W as Weight>::Atomic>,
     // first CSR
-    // G'.index --- renamed to gdi
-    // NB: kept `usize`-width (not `Ix`), rather than `node_count`-bounded, because during
-    // aggregation (`louvain_aggregate`) this array's `next_index` role is unsafely reinterpreted,
-    // in-place, as an `AtomicUsize` array (`next_index.cast::<AtomicUsize>()`) to serve as a
-    // lock-free edge counter --- a trick that requires the element size to match `AtomicUsize`'s.
-    AbstractedProceduralMemoryMut<usize>,
+    // G'.index --- renamed to gdi, `Ix`-width: during aggregation (`louvain_aggregate`) this
+    // array's `next_index` role is unsafely reinterpreted, in-place, as an `Ix::Atomic` array
+    // (`next_index.cast::<Ix::Atomic>()`) to serve as a lock-free edge counter --- sound because
+    // `Ix::Atomic`'s `Plain` is `Ix` by construction (see `graph::IndexType::Atomic`).
+    AbstractedProceduralMemoryMut<Ix>,
     // G'.edges --- renamed to gde
     AbstractedProceduralMemoryMut<Ix>,
     // G'.weights --- renamed to gdw
-    AbstractedProceduralMemoryMut<Weight>,
+    AbstractedProceduralMemoryMut<W>,
     // second CSR
-    // G''.index --- renamed to gddi (see `gdi`'s note: swaps roles with it across passes, so it
-    // is subject to the same `usize`-width constraint)
-    AbstractedProceduralMemoryMut<usize>,
+    // G''.index --- renamed to gddi (see `gdi`'s note: swaps roles with it across passes)
+    AbstractedProceduralMemoryMut<Ix>,
     // G''.edges --- renamed to gdde
     AbstractedProceduralMemoryMut<Ix>,
     // G''.weights --- renamed to gddw
-    AbstractedProceduralMemoryMut<Weight>,
+    AbstractedProceduralMemoryMut<W>,
     // processed --- flags node as processed
     AbstractedProceduralMemoryMut<AtomicBool>,
-    // C' --- renamed to coms (C is stored as a member of the struct)
-    // NB: kept `usize`-width for the same reason as `gdi`/`gddi`: reinterpreted, in-place, as an
-    // `f64` array (`coms.cast::<f64>()`) when computing the final partition's modularity.
-    AbstractedProceduralMemoryMut<usize>,
-    // Helper array for C' renumbering, dendrogram lookup & CSR aggregation
-    // NB: kept `usize`-width for the same reason (reinterpreted as `f64` via `helper.cast::<f64>()`).
-    AbstractedProceduralMemoryMut<usize>,
+    // C' --- renamed to coms (C is stored as a member of the struct), `Ix`-width: community ids
+    // are bounded exactly like node ids.
+    AbstractedProceduralMemoryMut<Ix>,
+    // Helper array for C' renumbering, dendrogram lookup & CSR aggregation, `Ix`-width for the
+    // same reason as `coms`.
+    AbstractedProceduralMemoryMut<Ix>,
 );
 
 /// For the computation of Louvain partitions as described in ["GVE-Louvain: Fast Louvain Algorithm for Community Detection in Shared Memory Setting"](https://doi.org/10.48550/arXiv.2312.04876) on [`GraphMemoryMap`] instances.
@@ -56,11 +189,11 @@ type ProceduralMemoryGVELouvain<Ix> = (
 /// [`GraphMemoryMap`]: ../../generic_memory_map/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AlgoGVELouvain<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+pub struct AlgoGVELouvain<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
     /// Graph for which the partition is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
     /// Memmapped array containing each node's community.
-    community: AbstractedProceduralMemoryMut<usize>,
+    community: AbstractedProceduralMemoryMut<Ix>,
     /// Cardinality of distinct communities in the final partition.
     community_count: usize,
     /// Partition modularity.
@@ -71,9 +204,10 @@ pub struct AlgoGVELouvain<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     /// If feature = "bench" is enabled: store number of iterations, number of nodes (communities),
     /// time for louvain_move() for each pass performed on the graph.
     iters: Vec<(usize, usize, u128)>,
+    _marker: std::marker::PhantomData<W>,
 }
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouvain<'a, N, E, Ix, W> {
     /// Constants set according to the optimizeds parameters described in ["GVE-Louvain: Fast Louvain Algorithm for Community Detection in Shared Memory Setting"](https://doi.org/10.48550/arXiv.2312.04876).
     /// Described in 4.1.2 Limiting the number of iterations per pass.
     const MAX_ITERATIONS: usize = 20;
@@ -150,9 +284,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let l_fn = g.build_cache_filename(CacheFile::GVELouvain, None)?;
         if Path::new(&l_fn).exists() {
-            if let Ok(comms) = AbstractedProceduralMemoryMut::from_file_name(&l_fn) {
+            if let Ok(comms) = AbstractedProceduralMemoryMut::<Ix>::from_file_name(&l_fn) {
                 let mut max = 0;
                 comms.as_slice().iter().for_each(|&c| {
+                    let c = c.index();
                     if c > max {
                         max = c;
                     }
@@ -166,6 +301,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                         threads: g.thread_num().max(1),
                         #[cfg(feature = "bench")]
                         iters: vec![],
+                        _marker: std::marker::PhantomData,
                     });
                 }
             }
@@ -194,11 +330,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     /// Returns the community label of a given node.
     pub fn node_community(&self, idx: usize) -> usize {
         assert!(idx < self.g.size());
-        *self.community.get(idx)
+        self.community.get(idx).index()
     }
 
     /// Returns a slice where each element corresponds (by index) to each node's community label.
-    pub fn communities(&self) -> &[usize] {
+    pub fn communities(&self) -> &[Ix] {
         self.community.as_slice()
     }
 
@@ -217,7 +353,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouvain<'a, N, E, Ix, W> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -238,7 +374,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryGVELouvain<Ix>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryGVELouvain<Ix, W>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -246,7 +382,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryGVELouvain<Ix>, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryGVELouvain<Ix, W>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -254,7 +390,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryGVELouvain<Ix>,
+        proc_mem: ProceduralMemoryGVELouvain<Ix, W>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -263,7 +399,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryGVELouvain<Ix>,
+        proc_mem: ProceduralMemoryGVELouvain<Ix, W>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -288,7 +424,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::GVELouvain, None)?;
-        let coms = SharedSliceMut::<usize>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let coms = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
         Ok(Self {
             g,
             community: coms,
@@ -297,12 +433,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
             threads,
             #[cfg(feature = "bench")]
             iters: Vec::new(),
+            _marker: std::marker::PhantomData,
         })
     }
 
     fn init_cache_mem_impl(
         &self,
-    ) -> Result<ProceduralMemoryGVELouvain<Ix>, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryGVELouvain<Ix, W>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
@@ -318,19 +455,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         let c_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(9))?;
         let h_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(10))?;
 
-        let k = SharedSliceMut::<AtomicWeight>::abst_mem_mut(&k_fn, node_count, true)?;
-        let sigma = SharedSliceMut::<AtomicWeight>::abst_mem_mut(&s_fn, node_count, true)?;
-        let gdi = SharedSliceMut::<usize>::abst_mem_mut(&gdi_fn, 2 * node_count, true)?;
+        let k = SharedSliceMut::<W::Atomic>::abst_mem_mut(&k_fn, node_count, true)?;
+        let sigma = SharedSliceMut::<W::Atomic>::abst_mem_mut(&s_fn, node_count, true)?;
+        let gdi = SharedSliceMut::<Ix>::abst_mem_mut(&gdi_fn, 2 * node_count, true)?;
         let gde = SharedSliceMut::<Ix>::abst_mem_mut(&gde_fn, edge_count, true)?;
-        let gdw = SharedSliceMut::<Weight>::abst_mem_mut(&gdw_fn, edge_count, true)?;
-        let gddi = SharedSliceMut::<usize>::abst_mem_mut(&gddi_fn, 2 * node_count, true)?;
+        let gdw = SharedSliceMut::<W>::abst_mem_mut(&gdw_fn, edge_count, true)?;
+        let gddi = SharedSliceMut::<Ix>::abst_mem_mut(&gddi_fn, 2 * node_count, true)?;
         let gdde = SharedSliceMut::<Ix>::abst_mem_mut(&gdde_fn, edge_count, true)?;
-        let gddw = SharedSliceMut::<Weight>::abst_mem_mut(&gddw_fn, edge_count, true)?;
+        let gddw = SharedSliceMut::<W>::abst_mem_mut(&gddw_fn, edge_count, true)?;
         let processed = SharedSliceMut::<AtomicBool>::abst_mem_mut(&a_fn, node_count, true)?;
-        let coms = SharedSliceMut::<usize>::abst_mem_mut(&c_fn, node_count, true)?;
+        let coms = SharedSliceMut::<Ix>::abst_mem_mut(&c_fn, node_count, true)?;
         // has to be size max(|V|, |E|) as it is both used to store the 'holey' CSR (O(|E|) space) and
         // renumbered community memberships (O(|V|) space)
-        let help = SharedSliceMut::<usize>::abst_mem_mut(&h_fn, edge_count.max(node_count), true)?;
+        let help = SharedSliceMut::<Ix>::abst_mem_mut(&h_fn, edge_count.max(node_count), true)?;
 
         let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
         let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
@@ -359,7 +496,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
                 threads_res.push(scope.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                        let weights: Vec<Weight> = vec![1.; u16::MAX as usize];
+                        let weights: Vec<W> = vec![W::one(); u16::MAX as usize];
                         for u in begin..end {
                             let u_start = index_ptr.get(u).index();
                             let u_end = index_ptr.get(u + 1).index();
@@ -383,11 +520,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                             processed.get(u).swap(false, Ordering::Relaxed);
 
                             // initilize helper, communities, coms and CSR vectors
-                            *helper.get_mut(u) = usize::MAX;
-                            *communities.get_mut(u) = u;
-                            *coms.get_mut(u) = u;
-                            *gdi.get_mut(out_offset) = u_start;
-                            *gdi.get_mut(out_offset + 1) = u_end;
+                            *helper.get_mut(u) = <Ix as graph::IndexType>::max();
+                            *communities.get_mut(u) = Ix::new(u);
+                            *coms.get_mut(u) = Ix::new(u);
+                            *gdi.get_mut(out_offset) = Ix::new(u_start);
+                            *gdi.get_mut(out_offset + 1) = Ix::new(u_end);
 
                             // copy G onto G' --- no copy/alloc needed: `edges` already borrows the
                             // `Ix`-width neighbours straight out of the original graph's mmap, and
@@ -396,8 +533,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                             gdw.write_slice(u_start, &weights[0..(u_end - u_start)]);
 
                             // Σ′ ← 𝐾′ ← 𝑣𝑒𝑟𝑡𝑒𝑥_w𝑒𝑖𝑔ℎ𝑡𝑠(𝐺′)
-                            *k.get_mut(u) = AtomicWeight::new(deg_u as Weight);
-                            *sigma.get_mut(u) = AtomicWeight::new(deg_u as Weight);
+                            *k.get_mut(u) = W::Atomic::new(W::from_usize(deg_u));
+                            *sigma.get_mut(u) = W::Atomic::new(W::from_usize(deg_u));
                         }
                         Ok(())
                     },
@@ -438,16 +575,27 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     /// # Returns
     ///
     /// Difference in modularity upon moving node `u` from community `d` to community `c`.
+    ///
+    /// Always computed in `f64`, regardless of the algorithm's own `W`: `sig_c`/`sig_d`/`m` scale
+    /// with the *total* graph weight, so `sig_c - sig_d` (and `k_u_c - k_u_d`) is a subtraction of
+    /// two large, often near-equal values --- classic catastrophic cancellation. In `f32`, once
+    /// community weights exceed ~2^24 (~16.7M, easily reached by real graphs), this cancellation
+    /// destroys essentially all of `𝛿𝑄`'s precision, making every computed gain round down to
+    /// (near) zero and silently stalling the whole algorithm (confirmed: on a 68M-edge graph,
+    /// `f32`-stored weights with this computation also done in `f32` left *every* node in its own
+    /// singleton community). Doing just this one, numerically-sensitive computation in `f64`
+    /// fixes that while leaving `k`/`sigma`/edge weights narrow (`W`) everywhere else, preserving
+    /// the memory-bandwidth benefit that narrower storage was for.
     #[inline(always)]
     fn delta_q(
-        k_u_c: Weight,
-        k_u_d: Weight,
-        k_u: Weight,
-        sig_c: Weight,
-        sig_d: Weight,
-        m: Weight,
-    ) -> Weight {
-        assert!(k_u_c >= 0. && k_u_d >= 0. && k_u >= 0. && sig_c >= 0. && sig_d >= 0. && m >= 0.);
+        k_u_c: f64,
+        k_u_d: f64,
+        k_u: f64,
+        sig_c: f64,
+        sig_d: f64,
+        m: f64,
+    ) -> f64 {
+        assert!(k_u_c >= 0.0 && k_u_d >= 0.0 && k_u >= 0.0 && sig_c >= 0.0 && sig_d >= 0.0 && m >= 0.0);
         assert!(
             k_u_c.is_finite()
                 && k_u_d.is_finite()
@@ -456,8 +604,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                 && sig_d.is_finite()
                 && m.is_normal()
         );
-        let dq = (k_u_c - k_u_d) / m - k_u * (k_u + sig_c - sig_d) / (2. * m * m);
-        if dq > 1. {
+        let dq = (k_u_c - k_u_d) / m - k_u * (k_u + sig_c - sig_d) / (2.0 * m * m);
+        if dq > 1.0 {
             println!(
                 "Deviant dq: ({k_u_c} - {k_u_d}) / {m} - {k_u} * ({k_u} + {sig_c} - {sig_d}) / (2. *{m} * {m}) = {dq}"
             );
@@ -480,34 +628,35 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     #[allow(clippy::too_many_arguments)]
     fn scan_communities(
         comm_count: usize,
-        nmap: &mut HashMap<usize, Weight>,
-        index: SharedSliceMut<usize>,
+        nmap: &mut HashMap<usize, W>,
+        index: SharedSliceMut<Ix>,
         edges: SharedSliceMut<Ix>,
-        weights: SharedSliceMut<Weight>,
-        coms: SharedSliceMut<usize>,
+        weights: SharedSliceMut<W>,
+        coms: SharedSliceMut<Ix>,
         u: usize,
         self_allowed: bool,
     ) {
-        for e_idx in *index.get(2 * u)..*index.get(2 * u + 1) {
+        for e_idx in index.get(2 * u).index()..index.get(2 * u + 1).index() {
             let v = edges.get(e_idx).index();
             if !self_allowed && v == u {
                 continue;
             }
-            if *coms.get(v) > comm_count {
+            let coms_v = coms.get(v).index();
+            if coms_v > comm_count {
                 println!(
                     "WARNING!! Impossible neighbour commnity for node {u} (neighbour {}): {{{} > {comm_count}}} but c: {}",
                     v,
-                    *coms.get(v),
-                    *coms.get(*coms.get(v))
+                    coms_v,
+                    coms.get(coms_v).index()
                 );
                 println!(
                     "{}..{} at {e_idx}\n",
-                    *index.get(2 * u),
-                    *index.get(2 * u + 1)
+                    index.get(2 * u).index(),
+                    index.get(2 * u + 1).index()
                 );
             }
             // 𝐻𝑡[𝐶'[v]] ← 𝐻𝑡[𝐶'[v]] + w
-            *nmap.entry(*coms.get(v)).or_insert(0.) += *weights.get(e_idx);
+            *nmap.entry(coms_v).or_insert(W::zero()) += *weights.get(e_idx);
         }
     }
 
@@ -528,31 +677,34 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     /// * `𝛿𝑄*` is the delta modularity arising thereof.
     #[inline(always)]
     fn choose_community(
-        nmap: &mut HashMap<usize, Weight>,
-        sigma: SharedSliceMut<AtomicWeight>,
+        nmap: &mut HashMap<usize, W>,
+        sigma: SharedSliceMut<W::Atomic>,
         c_u: usize,
-        k_u: Weight,
-        m: Weight,
-    ) -> (usize, Weight) {
+        k_u: W,
+        m: W,
+    ) -> (usize, f64) {
         // houses c*
-        let mut best_gain = 0.;
+        let mut best_gain = 0.0f64;
         // houses 𝛿𝑄*
         let mut best_comm = c_u;
 
+        let k_u_f64 = k_u.to_f64();
+        let m_f64 = m.to_f64();
+
         // Ku->d
-        let k_u_d = nmap.get(&c_u).cloned().unwrap_or(0.);
+        let k_u_d = nmap.get(&c_u).cloned().unwrap_or(W::zero()).to_f64();
         // Σd
-        let sig_d = sigma.get(c_u).load(Ordering::Relaxed);
+        let sig_d = sigma.get(c_u).load(Ordering::Relaxed).to_f64();
 
         for (&c_v, &k_u_c) in nmap.iter() {
             if c_v == c_u {
                 continue;
             }
             // Σc
-            let sig_c = sigma.get(c_v).load(Ordering::Relaxed);
+            let sig_c = sigma.get(c_v).load(Ordering::Relaxed).to_f64();
 
             // 𝛿𝑄 = (Ku->c - Ku->d) / m - (Ku * (Σc - Σd) / (2m^2))
-            let dq = Self::delta_q(k_u_c, k_u_d, k_u, sig_c, sig_d, m);
+            let dq = Self::delta_q(k_u_c.to_f64(), k_u_d, k_u_f64, sig_c, sig_d, m_f64);
             if dq > best_gain {
                 // 𝛿𝑄∗ = 𝛿𝑄
                 best_gain = dq;
@@ -570,16 +722,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
     fn louvain_move(
         l_pass: usize,
         comm_count: usize,
-        k: SharedSliceMut<AtomicWeight>,
-        sigma: SharedSliceMut<AtomicWeight>,
+        k: SharedSliceMut<W::Atomic>,
+        sigma: SharedSliceMut<W::Atomic>,
         processed: SharedSliceMut<AtomicBool>,
-        idx: SharedSliceMut<usize>,
-        mut next_index: SharedSliceMut<usize>,
+        idx: SharedSliceMut<Ix>,
+        mut next_index: SharedSliceMut<Ix>,
         e: SharedSliceMut<Ix>,
-        w: SharedSliceMut<Weight>,
-        mut c: SharedSliceMut<usize>,
-        mut helper: SharedSliceMut<usize>,
-        m: Weight,
+        w: SharedSliceMut<W>,
+        mut c: SharedSliceMut<Ix>,
+        mut helper: SharedSliceMut<Ix>,
+        m: W,
         tolerance: f64,
         threads: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
@@ -598,7 +750,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                 let mut thread_res = Vec::with_capacity(threads);
                 for tid in 0..threads {
                     let mut local_delta_q_sum = 0.0;
-                    let mut nmap: HashMap<usize, Weight> = HashMap::new();
+                    let mut nmap: HashMap<usize, W> = HashMap::new();
 
                     let k = k.clone();
                     let s = sigma.clone();
@@ -617,10 +769,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                             if l_pass != 0 && i == 0 {
                                 for u in begin..end {
                                     // unprune all nodes
-                                    *helper.get_mut(u) = usize::MAX;
-                                    *next_index.get_mut(u * 2) = 0;
+                                    *helper.get_mut(u) = <Ix as graph::IndexType>::max();
+                                    *next_index.get_mut(u * 2) = Ix::new(0);
                                     // reassign node community to itself
-                                    *c.get_mut(u) = u;
+                                    *c.get_mut(u) = Ix::new(u);
                                 }
                             }
 
@@ -632,7 +784,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                                 if processed.get(u).swap(true, Ordering::Relaxed) {
                                     continue;
                                 }
-                                let c_u = *c.get(u);
+                                let c_u = c.get(u).index();
                                 // get weight of u k[u]
                                 let k_u = k.get(u).load(Ordering::Relaxed);
                                 // gather neighbour communities and edge weight sums using the adjacency list of u
@@ -643,7 +795,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
                                 let (b_c, b_g) = Self::choose_community(nm, s.clone(), c_u, k_u, m);
 
-                                // move u to the best community if it yields positive gain
+                                // move u to the best community if it yields positive gain. the
+                                // comparison is always done in `f64` (see `delta_q`'s docs), so
+                                // this threshold is independent of `W`.
                                 if b_c != c_u && b_g > 1e-12 {
                                     // atomic updates to community totals --- if node has already
                                     // been moved don't do anything
@@ -660,10 +814,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                                     {
                                         s.get(b_c).fetch_add(k_u, Ordering::Relaxed);
                                         // update community assignment of u
-                                        *c.get_mut(u) = b_c;
+                                        *c.get_mut(u) = Ix::new(b_c);
                                         local_delta_q_sum += b_g;
                                         // mark all neighbors of u to be processed in the next iteration
-                                        for idx in *idx.get(u * 2)..*idx.get(u * 2 + 1) {
+                                        for idx in idx.get(u * 2).index()..idx.get(u * 2 + 1).index() {
                                             processed
                                                 .get(e.get(idx).index())
                                                 .store(false, Ordering::Relaxed);
@@ -713,17 +867,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         l_pass: usize,
         comm_count: usize,
         new_comm_count: usize,
-        k: SharedSliceMut<AtomicWeight>,
-        sigma: SharedSliceMut<AtomicWeight>,
+        k: SharedSliceMut<W::Atomic>,
+        sigma: SharedSliceMut<W::Atomic>,
         processed: SharedSliceMut<AtomicBool>,
-        index: SharedSliceMut<usize>,
-        mut next_index: SharedSliceMut<usize>,
+        index: SharedSliceMut<Ix>,
+        mut next_index: SharedSliceMut<Ix>,
         edges: SharedSliceMut<Ix>,
         mut next_edges: SharedSliceMut<Ix>,
-        weights: SharedSliceMut<Weight>,
-        mut next_weights: SharedSliceMut<Weight>,
-        coms: SharedSliceMut<usize>,
-        mut helper: SharedSliceMut<usize>,
+        weights: SharedSliceMut<W>,
+        mut next_weights: SharedSliceMut<W>,
+        coms: SharedSliceMut<Ix>,
+        mut helper: SharedSliceMut<Ix>,
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // recalculate comm load per thread
@@ -733,18 +887,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         let synchronize = Arc::new(Barrier::new(threads));
         let counter = unsafe {
             next_index
-                .cast::<AtomicUsize>()
+                .cast::<Ix::Atomic>()
                 .ok_or_else(|| -> Box<dyn std::error::Error> {
                     "error getting atomic edge counters".into()
                 })?
         };
 
         // exclusive scan
-        let mut sum = 0;
+        let mut sum = 0usize;
         for u in 0..new_comm_count {
-            let degree = *next_index.get(u * 2);
-            *next_index.get_mut(u * 2) = sum;
-            *next_index.get_mut(u * 2 + 1) = sum;
+            let degree = next_index.get(u * 2).index();
+            *next_index.get_mut(u * 2) = Ix::new(sum);
+            *next_index.get_mut(u * 2 + 1) = Ix::new(sum);
             sum += degree;
         }
 
@@ -754,7 +908,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
             for tid in 0..threads {
 
                 // hashmap to store edges for each community
-                let mut nm: HashMap<usize, Weight> = HashMap::new();
+                let mut nm: HashMap<usize, W> = HashMap::new();
 
                 let counter = counter.clone();
                 let k = k.clone();
@@ -772,12 +926,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         // add com - node edges atomically
                         for u in prev_begin..prev_end {
-                            let degree = *index.get(u * 2 + 1) - *index.get(u * 2);
+                            let degree = index.get(u * 2 + 1).index() - index.get(u * 2).index();
                             // guard against isolated nodes to not go over community index boundary
                             if degree > 0 {
                                 // add edge (C'[u], u)
-                                let idx = counter.get(*coms.get(u) * 2 + 1).fetch_add(1, Ordering::Relaxed);
-                                *helper.get_mut(idx) = u;
+                                let idx = counter
+                                    .get(coms.get(u).index() * 2 + 1)
+                                    .fetch_add_one_widened(Ordering::Relaxed);
+                                *helper.get_mut(idx) = Ix::new(u);
                             }
                         }
 
@@ -794,7 +950,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                         for c in new_begin..new_end {
                             // local accumulator variables
                             let mut total = 0;
-                            let mut total_weight = 0.;
+                            let mut total_weight = W::zero();
 
                             // mark unprocessed
                             processed.get(c).store(false, Ordering::Relaxed);
@@ -804,8 +960,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
 
                             // for every node in the community scan edges to accumulate supergraph
                             // edge weights
-                            for e_idx in *next_index.get(c * 2)..*next_index.get(c * 2 + 1) {
-                                Self::scan_communities(comm_count, &mut nm, index, edges, weights, coms, *helper.get(e_idx), true);
+                            for e_idx in next_index.get(c * 2).index()..next_index.get(c * 2 + 1).index() {
+                                Self::scan_communities(comm_count, &mut nm, index, edges, weights, coms, helper.get(e_idx).index(), true);
                             }
 
                             // for every linked community store (dest, weight) in CSR
@@ -819,8 +975,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                                 }
 
                                 // store edge
-                                *next_edges.get_mut(*next_index.get(c * 2) + total) = Ix::new(d);
-                                *next_weights.get_mut(*next_index.get(c * 2) + total) = w;
+                                let base = next_index.get(c * 2).index();
+                                *next_edges.get_mut(base + total) = Ix::new(d);
+                                *next_weights.get_mut(base + total) = w;
 
                                 // increment counts
                                 total += 1;
@@ -828,14 +985,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
                             }
 
                             // set cmommunity index upper boundary
-                            *next_index.get_mut(c * 2 + 1) = *next_index.get(c * 2) + total;
+                            *next_index.get_mut(c * 2 + 1) = Ix::new(next_index.get(c * 2).index() + total);
 
                             // check for indexing missalignment errors
-                            if c > 0 && *next_index.get(c * 2) < *next_index.get(c * 2 - 1) {
-                                println!("error {} {} {}", new_begin, *next_index.get(c * 2), *next_index.get(c * 2 - 1));
+                            if c > 0 && next_index.get(c * 2).index() < next_index.get(c * 2 - 1).index() {
+                                println!("error {} {} {}", new_begin, next_index.get(c * 2).index(), next_index.get(c * 2 - 1).index());
                                 return Err(
                                     format!("error building supergraph: index missalignment, node {} ends at {} and node {c} starts at {}",
-                                            c - 1, *next_index.get(c * 2 - 1), *next_index.get(c * 2)
+                                            c - 1, next_index.get(c * 2 - 1).index(), next_index.get(c * 2).index()
                                             ).into()
                                     );
                             }
@@ -862,9 +1019,52 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         Ok(())
     }
 
+    /// Accumulates each community's internal/total degree (into `int_deg`/`tot_deg`, zeroed by
+    /// the caller) and computes the resulting partition modularity.
+    ///
+    /// Generic over `T: Weight`, independently of the algorithm's own `W`: `int_deg`/`tot_deg`
+    /// are purely a transient scratch computation local to this one function, so the caller is
+    /// free to pick whichever `T` lets it reuse already-allocated memory in place (see call
+    /// site), with the division/summation always happening in `f64` regardless, so `T` and `W`
+    /// never need to match.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_modularity<T: Weight>(
+        &self,
+        mut int_deg: SharedSliceMut<T>,
+        mut tot_deg: SharedSliceMut<T>,
+        communities: SharedSliceMut<Ix>,
+        node_count: usize,
+        prev_comm_count: usize,
+        m2: f64,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        // sum internal degree ---> int_deg | sum total degree ---> tot_deg
+        for u in 0..node_count {
+            let comm_u = communities.get(u).index();
+            let iter = self.g.neighbours(u)?;
+            *tot_deg.get_mut(comm_u) += T::from_usize(iter.remaining_neighbours());
+            for v in iter {
+                if v >= node_count {
+                    continue;
+                } // safety
+                if communities.get(v).index() == comm_u {
+                    *int_deg.get_mut(comm_u) += T::one();
+                }
+            }
+        }
+
+        // modularity: sum_c( internal_dir_edges[c]/m2 - (Kc[c]/m2)^2 )
+        let mut partition_modularity = 0.0f64;
+        for c in 0..prev_comm_count {
+            let lc_over_m2 = int_deg.get(c).to_f64() / m2;
+            let kc_over_m2 = tot_deg.get(c).to_f64() / m2;
+            partition_modularity += lc_over_m2 - kc_over_m2 * kc_over_m2;
+        }
+        Ok(partition_modularity)
+    }
+
     fn compute_with_proc_mem_impl(
         &mut self,
-        proc_mem: ProceduralMemoryGVELouvain<Ix>,
+        proc_mem: ProceduralMemoryGVELouvain<Ix, W>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
@@ -882,8 +1082,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         let mut new_comm_count: usize = 0;
 
         // 2m (since each undirected edge has weight 2)
-        let m2 = edge_count as Weight;
-        let m = m2 / 2.;
+        let m2 = W::from_usize(edge_count);
+        let m = m2 / (W::one() + W::one());
 
         let mut coms = coms.shared_slice();
         let mut helper = helper.shared_slice();
@@ -945,23 +1145,24 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
             }
 
             for u in 0..prev_comm_count {
-                let degree = *index.get(u * 2 + 1) - *index.get(u * 2);
-                let c = *coms.get(u);
-                let new_c = *helper.get(c);
-                if new_c == usize::MAX {
-                    *helper.get_mut(c) = new_comm_count;
-                    *coms.get_mut(u) = new_comm_count;
-                    *next_index.get_mut(new_comm_count * 2) = degree;
+                let degree = index.get(u * 2 + 1).index() - index.get(u * 2).index();
+                let c = coms.get(u).index();
+                let new_c = helper.get(c).index();
+                if new_c == <Ix as graph::IndexType>::max().index() {
+                    *helper.get_mut(c) = Ix::new(new_comm_count);
+                    *coms.get_mut(u) = Ix::new(new_comm_count);
+                    *next_index.get_mut(new_comm_count * 2) = Ix::new(degree);
                     new_comm_count += 1;
                 } else {
-                    *coms.get_mut(u) = new_c;
-                    *next_index.get_mut(new_c * 2) += degree;
+                    *coms.get_mut(u) = Ix::new(new_c);
+                    let prev = next_index.get(new_c * 2).index();
+                    *next_index.get_mut(new_c * 2) = Ix::new(prev + degree);
                 }
             }
 
             // 𝐶 ← Lookup dendrogram using 𝐶 to 𝐶
             for orig in 0..node_count {
-                let c = *communities.get(orig);
+                let c = communities.get(orig).index();
                 if c < prev_comm_count {
                     *communities.get_mut(orig) = *coms.get(c);
                 } else {
@@ -1029,65 +1230,258 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoGVELouvain<'a, N, E
         self.community_count = prev_comm_count;
 
         // compute partition modularity
-        if m2 == 0. {
+        if m2 == W::zero() {
             self.modularity = 0.0;
             self.g.cleanup_cache(CacheFile::GVELouvain)?;
             return Ok(());
         }
+        let m2_f64 = m2.to_f64();
 
-        let mut int_deg = if self.g.size() <= self.g.width() {
-            weights.par_zero_out_bytes()
+        self.modularity = if self.g.size() <= self.g.width() {
+            // common case (|E| >= |V|): reuse the already-`W`-typed weight buffers directly ---
+            // no cast, no extra allocation.
+            let int_deg = weights.par_zero_out_bytes();
+            let tot_deg = next_weights.par_zero_out_bytes();
+            self.finish_modularity::<W>(
+                int_deg,
+                tot_deg,
+                communities,
+                node_count,
+                prev_comm_count,
+                m2_f64,
+            )?
+        } else if let (Some(mut int_deg), Some(mut tot_deg)) =
+            (unsafe { helper.cast::<f64>() }, unsafe { coms.cast::<f64>() })
+        {
+            // rare case (|V| > |E|): `Ix` happens to be 8 bytes wide, matching `f64` --- reuse
+            // `helper`/`coms` in place, no extra allocation.
+            self.finish_modularity::<f64>(
+                int_deg.par_zero_out_bytes(),
+                tot_deg.par_zero_out_bytes(),
+                communities,
+                node_count,
+                prev_comm_count,
+                m2_f64,
+            )?
+        } else if let (Some(mut int_deg), Some(mut tot_deg)) =
+            (unsafe { helper.cast::<f32>() }, unsafe { coms.cast::<f32>() })
+        {
+            // rare case (|V| > |E|): `Ix` happens to be 4 bytes wide, matching `f32` --- reuse
+            // `helper`/`coms` in place, no extra allocation.
+            self.finish_modularity::<f32>(
+                int_deg.par_zero_out_bytes(),
+                tot_deg.par_zero_out_bytes(),
+                communities,
+                node_count,
+                prev_comm_count,
+                m2_f64,
+            )?
         } else {
-            unsafe {
-                helper
-                    .cast::<f64>()
-                    .ok_or_else(|| -> Box<dyn std::error::Error> {
-                        "error getting atomic edge counters".into()
-                    })?
-                    .par_zero_out_bytes()
-            }
+            // rare case (|V| > |E|) *and* `Ix` is 1 or 2 bytes wide (`u8`/`u16`): no float width
+            // matches, so there's nothing sound to reinterpret in place --- fall back to a
+            // small, dedicated scratch allocation. Both conditions needed to reach here are
+            // uncommon, so this is not a hot path.
+            let id_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(11))?;
+            let td_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(12))?;
+            let int_deg_owner = SharedSliceMut::<W>::abst_mem_mut(&id_fn, prev_comm_count, true)?;
+            let tot_deg_owner = SharedSliceMut::<W>::abst_mem_mut(&td_fn, prev_comm_count, true)?;
+            let modularity = self.finish_modularity::<W>(
+                int_deg_owner.shared_slice(),
+                tot_deg_owner.shared_slice(),
+                communities,
+                node_count,
+                prev_comm_count,
+                m2_f64,
+            )?;
+            drop(int_deg_owner);
+            drop(tot_deg_owner);
+            std::fs::remove_file(&id_fn)?;
+            std::fs::remove_file(&td_fn)?;
+            modularity
         };
-        let mut tot_deg = if self.g.size() <= self.g.width() {
-            next_weights.par_zero_out_bytes()
-        } else {
-            unsafe {
-                coms.cast::<f64>()
-                    .ok_or_else(|| -> Box<dyn std::error::Error> {
-                        "error getting atomic edge counters".into()
-                    })?
-                    .par_zero_out_bytes()
-            }
-        };
 
-        // sum internal degree ---> sigma | sum total degree ---> k
-        for u in 0..node_count {
-            let comm_u = *communities.get(u);
-            let iter = self.g.neighbours(u)?;
-            *tot_deg.get_mut(*communities.get(u)) += iter.remaining_neighbours() as Weight;
-            for v in iter {
-                if v >= node_count {
-                    continue;
-                } // safety
-                if *communities.get(v) == comm_u {
-                    *int_deg.get_mut(comm_u) += 1.;
-                }
-            }
-        }
-
-        // modularity: sum_c( internal_dir_edges[c]/m2 - (Kc[c]/m2)^2 )
-        let mut partition_modularity = 0.0f64;
-        #[allow(clippy::unnecessary_cast)]
-        for c in 0..prev_comm_count {
-            let lc_over_m2 = *int_deg.get(c) / m2;
-            let kc_over_m2 = *tot_deg.get(c) / m2;
-            partition_modularity += (lc_over_m2 - kc_over_m2 * kc_over_m2) as f64;
-        }
-
-        self.modularity = partition_modularity;
         self.community.flush()?;
 
         self.g.cleanup_cache(CacheFile::GVELouvain)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{AlgoGVELouvain, Weight};
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
+    use crate::graph::{GraphMemoryMap, IndexType, label::VoidLabel};
+    use std::io::Write;
+
+    /// Two 4-cliques (nodes 1-4, 5-8) bridged by a single edge (4-5): a classic community-
+    /// detection fixture expected to split into (at least) two communities. Dense enough
+    /// (|E| = 26 directed internal edges >> |V| = 8) that modularity computation always takes
+    /// the common (`weights`-reuse) path, not the rare fallback.
+    fn write_two_cliques_mtx(path: &std::path::Path) {
+        let mut f = std::fs::File::create(path).expect("error creating cliques mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "8 8 13").unwrap();
+        for &(u, v) in &[
+            (1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4),
+            (5, 6), (5, 7), (5, 8), (6, 7), (6, 8), (7, 8),
+            (4, 5),
+        ] {
+            writeln!(f, "{u} {v}").unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// A long path graph (|V| = 20, |E| = 19*2 = 38 directed edges, still |E| > |V| here, so
+    /// this alone doesn't exercise the rare fallback --- see
+    /// `write_sparse_more_nodes_than_edges_mtx` for that).
+    fn write_path_mtx(path: &std::path::Path, n: usize) {
+        let mut f = std::fs::File::create(path).expect("error creating path mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "{n} {n} {}", n - 1).unwrap();
+        for i in 1..n {
+            writeln!(f, "{i} {}", i + 1).unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// A graph with strictly more nodes than edges (most nodes isolated): exercises Louvain's
+    /// rare modularity fallback path (`self.g.size() > self.g.width()`), which --- depending on
+    /// `Ix`'s width --- either reinterprets `helper`/`coms` in place as a same-width float, or,
+    /// for `u8`/`u16`, falls back further to a dedicated scratch allocation.
+    fn write_sparse_more_nodes_than_edges_mtx(path: &std::path::Path) {
+        let mut f = std::fs::File::create(path).expect("error creating sparse mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        // 40 nodes, only 2 edges (one connected pair, 38 isolated nodes): |V| = 40 > |E| = 4
+        // (after symmetric doubling).
+        writeln!(f, "40 40 2").unwrap();
+        writeln!(f, "1 2").unwrap();
+        writeln!(f, "3 4").unwrap();
+        f.flush().unwrap();
+    }
+
+    fn run_louvain<Ix: IndexType, W: Weight>(path: &std::path::Path, id: &str) -> (usize, f64) {
+        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, Ix>::from_file(
+            path,
+            Some(id.to_string()),
+            None,
+        )
+        .expect("graph parse should succeed");
+        let louvain = AlgoGVELouvain::<_, _, _, W>::new(&graph)
+            .unwrap_or_else(|e| panic!("louvain({id}) should succeed: {e}"));
+        (louvain.community_count(), louvain.partition_modularity())
+    }
+
+    /// Runs Louvain across every supported `(Ix, W)` combination on a graph with a real community
+    /// structure, asserting all combinations agree on the qualitative result (nodes 1-4 end up
+    /// together, nodes 5-8 end up together, in a different community) and produce a finite,
+    /// non-negative-looking modularity. `W=f32` vs `W=f64` aren't expected to be bit-identical
+    /// (different floating-point precision throughout accumulation), but should be close.
+    #[test]
+    fn gve_louvain_cross_ix_and_weight_combinations() {
+        let dir = unique_test_dir("gve_louvain_cross_ix_weight_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("cliques.mtx");
+        write_two_cliques_mtx(&path);
+
+        macro_rules! check {
+            ($ix:ty, $w:ty, $tag:expr) => {{
+                let (comm_count, modularity) =
+                    run_louvain::<$ix, $w>(&path, &format!("gve_cross_{}_{}", $tag, run_tag));
+                assert!(
+                    comm_count >= 2,
+                    "expected at least 2 communities for the two-cliques fixture with Ix={}, W={}, got {comm_count}",
+                    stringify!($ix),
+                    stringify!($w)
+                );
+                assert!(
+                    modularity.is_finite() && modularity > 0.0,
+                    "expected a positive, finite modularity for the two-cliques fixture with Ix={}, W={}, got {modularity}",
+                    stringify!($ix),
+                    stringify!($w)
+                );
+                (comm_count, modularity)
+            }};
+        }
+
+        let (comm_usize_f64, mod_usize_f64) = check!(usize, f64, "usize_f64");
+        let (comm_u32_f32, mod_u32_f32) = check!(u32, f32, "u32_f32");
+        let (comm_u16_f32, _mod_u16_f32) = check!(u16, f32, "u16_f32");
+        let (comm_u8_f32, _mod_u8_f32) = check!(u8, f32, "u8_f32");
+
+        // all widths should find the same number of communities on this small, unambiguous
+        // fixture (2 cliques bridged by one edge almost always resolves to exactly 2
+        // communities regardless of float precision).
+        assert_eq!(comm_usize_f64, comm_u32_f32);
+        assert_eq!(comm_usize_f64, comm_u16_f32);
+        assert_eq!(comm_usize_f64, comm_u8_f32);
+        // f32 vs f64 modularity should be close (not necessarily bit-identical).
+        assert!(
+            (mod_usize_f64 - mod_u32_f32).abs() < 1e-3,
+            "f64 modularity {mod_usize_f64} and f32 modularity {mod_u32_f32} diverge too much"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Exercises the rare modularity-computation fallback path (more nodes than edges) across
+    /// every `Ix` width, including the narrowest ones (`u8`/`u16`) that have no same-width float
+    /// to reinterpret in place, forcing the dedicated-scratch-allocation sub-fallback.
+    #[test]
+    fn gve_louvain_sparse_more_nodes_than_edges_fallback() {
+        let dir = unique_test_dir("gve_louvain_sparse_fallback_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("sparse.mtx");
+        write_sparse_more_nodes_than_edges_mtx(&path);
+
+        macro_rules! check {
+            ($ix:ty, $w:ty, $tag:expr) => {{
+                let (comm_count, modularity) =
+                    run_louvain::<$ix, $w>(&path, &format!("gve_sparse_{}_{}", $tag, run_tag));
+                assert!(modularity.is_finite(), "modularity should be finite, got {modularity}");
+                comm_count
+            }};
+        }
+
+        // every isolated node starts (and, with no positive-gain moves possible, stays) in its
+        // own community, plus the one connected pair in each of two more communities ---
+        // whatever the exact count, it must be identical across every (Ix, W) combination.
+        let comm_usize_f64 = check!(usize, f64, "usize_f64");
+        let comm_u32_f64 = check!(u32, f64, "u32_f64");
+        let comm_u32_f32 = check!(u32, f32, "u32_f32");
+        // `u16`/`u8` have no same-width float (4 or 8 bytes) to reinterpret `helper`/`coms`
+        // into, forcing the dedicated-scratch-allocation sub-fallback.
+        let comm_u16_f32 = check!(u16, f32, "u16_f32");
+        let comm_u8_f32 = check!(u8, f32, "u8_f32");
+
+        assert_eq!(comm_usize_f64, comm_u32_f64);
+        assert_eq!(comm_usize_f64, comm_u32_f32);
+        assert_eq!(comm_usize_f64, comm_u16_f32);
+        assert_eq!(comm_usize_f64, comm_u8_f32);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Sanity check that a slightly larger, still-dense path graph also works end to end across
+    /// `Ix`/`W` combinations (a different topology than the clique fixture, to catch anything
+    /// specific to highly-clustered graphs).
+    #[test]
+    fn gve_louvain_path_graph_cross_ix_and_weight() {
+        let dir = unique_test_dir("gve_louvain_path_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("path.mtx");
+        write_path_mtx(&path, 20);
+
+        let (comm_a, mod_a) = run_louvain::<usize, f64>(&path, &format!("gve_path_usize_f64_{run_tag}"));
+        let (comm_b, mod_b) = run_louvain::<u32, f32>(&path, &format!("gve_path_u32_f32_{run_tag}"));
+
+        assert!(comm_a >= 1 && mod_a.is_finite());
+        assert!(comm_b >= 1 && mod_b.is_finite());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
