@@ -7,6 +7,7 @@ mod impl_miscelanious;
 mod impl_partition;
 pub(crate) mod impl_traits;
 pub mod label;
+mod weight;
 
 #[cfg(feature = "petgraph")]
 mod export_petgraph;
@@ -18,6 +19,7 @@ pub mod test_utils;
 use crate::graph::cache::{AccumulatorAtomic, GraphCache};
 use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut};
 use cache::CacheMetadata;
+pub use weight::{Weight, WeightAtomic};
 pub use graph_derive::{GenericEdge, GenericEdgeType};
 
 use label::VoidLabel;

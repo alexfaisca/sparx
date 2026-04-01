@@ -7,10 +7,10 @@ use num_cpus::get_physical;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 
-type ProceduralMemoryBZ = (
+type ProceduralMemoryBZ<Ix> = (
     AbstractedProceduralMemoryMut<u8>,
-    AbstractedProceduralMemoryMut<usize>,
-    AbstractedProceduralMemoryMut<usize>,
+    AbstractedProceduralMemoryMut<Ix>,
+    AbstractedProceduralMemoryMut<Ix>,
 );
 
 /// For the computation of a [`GraphMemoryMap`] instance's k-core decomposition as described in ["An O(m) Algorithm for Cores Decomposition of Networks"](https://doi.org/10.48550/arXiv.cs/0310049) by Batagelj V. and Zaversnik M.
@@ -31,7 +31,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     ///
     /// The resulting k-core subgraphs are stored in memory (in a memmapped file) nodewise[^1].
     ///
-    /// [^1]: for each node of the graph it's coreness is stored in an array.
+    /// [^1]: for each node of the graph its coreness is stored in an array.
     ///
     /// # Arguments
     ///
@@ -50,7 +50,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     ///
     /// The resulting k-core subgraphs are stored in memory (in a memmapped file) nodewise[^1].
     ///
-    /// [^1]: for each node of the graph it's coreness is stored in an array.
+    /// [^1]: for each node of the graph its coreness is stored in an array.
     ///
     /// # Arguments
     ///
@@ -118,13 +118,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
-    pub(crate) fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ, Box<dyn std::error::Error>> {
+    pub(crate) fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -132,7 +132,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBZ,
+        proc_mem: ProceduralMemoryBZ<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -141,7 +141,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBZ,
+        proc_mem: ProceduralMemoryBZ<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -159,7 +159,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         Ok(Self { g, k_cores })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBZ, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBZ<Ix>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
         let d_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(0))?;
@@ -167,15 +167,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         let p_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(2))?;
 
         let degree = SharedSliceMut::<u8>::abst_mem_mut(&d_fn, node_count, true)?;
-        let node = SharedSliceMut::<usize>::abst_mem_mut(&n_fn, node_count, true)?;
-        let pos = SharedSliceMut::<usize>::abst_mem_mut(&p_fn, node_count, true)?;
+        let node = SharedSliceMut::<Ix>::abst_mem_mut(&n_fn, node_count, true)?;
+        let pos = SharedSliceMut::<Ix>::abst_mem_mut(&p_fn, node_count, true)?;
 
         Ok((degree, node, pos))
     }
 
     fn compute_with_proc_mem_impl(
         &self,
-        proc_mem: ProceduralMemoryBZ,
+        proc_mem: ProceduralMemoryBZ<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
@@ -264,9 +264,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         // fill node array with vertices ordered by degree
         for v in 0..node_count {
             let d = *degree.get(v) as usize;
-            let idx = bins[d] as usize;
-            *node.get_mut(idx) = v;
-            *pos.get_mut(v) = idx;
+            let idx = bins[d];
+            *node.get_mut(idx) = Ix::new(v);
+            *pos.get_mut(v) = Ix::new(idx);
             bins[d] += 1; // increment the bin index for the next vertex of same degree
         }
         node.flush()?;
@@ -281,7 +281,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         // peel vertices in order of increasing current degree
         let mut degree = degree.shared_slice();
         for i in 0..node_count {
-            let v = *node.get(i);
+            let v = node.get(i).index();
             let deg_v = *degree.get(v);
             *core.get_mut(v) = deg_v; // coreness of v
 
@@ -291,16 +291,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
                 let deg_u = *degree.get(u);
                 if deg_u > deg_v {
                     // swap u's position node array to maintain order
-                    let u_pos = *pos.get(u);
+                    let u_pos = pos.get(u).index();
                     let new_pos = bins[deg_u as usize];
                     // bins[deg_u] points to start of nodes with degree >= old_deg
                     // swap the node at new_pos with u to move u into the bucket of (u_new_degree)
-                    let w = *node.get(new_pos);
+                    let w = node.get(new_pos).index();
                     if u != w {
-                        *node.get_mut(u_pos) = w;
-                        *pos.get_mut(w) = u_pos;
-                        *node.get_mut(new_pos) = u;
-                        *pos.get_mut(u) = new_pos;
+                        *node.get_mut(u_pos) = Ix::new(w);
+                        *pos.get_mut(w) = Ix::new(u_pos);
+                        *node.get_mut(new_pos) = Ix::new(u);
+                        *pos.get_mut(u) = Ix::new(new_pos);
                     }
                     bins[deg_u as usize] += 1;
                     *degree.get_mut(u) = deg_u - 1;
@@ -336,7 +336,9 @@ mod test {
     use crate::{k_core::verify_k_cores, test_common::get_or_init_dataset_cache_entry};
 
     use super::*;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use paste::paste;
+    use std::io::Write;
     use std::path::Path;
 
     macro_rules! graph_tests {
@@ -385,5 +387,97 @@ mod test {
         // ggcat_8_15 => "../ggcat/graphs/random_graph_8_15.lz4",
         // ggcat_9_15 => "../ggcat/graphs/random_graph_9_15.lz4",
         // … add the rest
+    }
+
+    /// A graph with clearly nested k-core structure: a 5-clique (nodes 1-5, each internal degree
+    /// 4, forming a 4-core), bridged by a single edge (5-6) to a triangle (nodes 6-8, each
+    /// internal degree 2 plus node 6's bridge edge, forming a 2-core), with one more pendant edge
+    /// (8-9) hanging off (node 9 is degree 1, a 1-core; the bridge/pendant edges themselves are
+    /// always in the lower of the two endpoints' cores).
+    fn write_nested_cores_mtx(path: &std::path::Path) {
+        let mut f = std::fs::File::create(path).expect("error creating nested-cores mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "9 9 15").unwrap();
+        for &(u, v) in &[
+            (1, 2), (1, 3), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5), (3, 4), (3, 5), (4, 5),
+            (5, 6),
+            (6, 7), (6, 8), (7, 8),
+            (8, 9),
+        ] {
+            writeln!(f, "{u} {v}").unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// Standalone node-indexed k-core validity check (independent of `verify_k_cores`, whose
+    /// edge-indexed length assumption doesn't match this algorithm's actual node-indexed
+    /// `k_cores` layout --- a pre-existing mismatch, unrelated to this test, that's never been
+    /// exercised since it's normally only reached via the ggcat-dataset tests above, which can't
+    /// run without those datasets present).
+    ///
+    /// Checks the core k-core invariant: every node `v` with coreness `k` must have at least `k`
+    /// neighbours whose own coreness is `>= k` (i.e. `v` genuinely belongs to its own claimed
+    /// core).
+    fn assert_valid_node_indexed_k_cores<Ix: crate::graph::IndexType>(
+        graph: &GraphMemoryMap<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, Ix>,
+        coreness: &[u8],
+    ) {
+        assert_eq!(coreness.len(), graph.size(), "k_cores should be node-indexed");
+        for v in 0..graph.size() {
+            let k_v = coreness[v];
+            let qualifying_neighbours = graph
+                .neighbours(v)
+                .expect("neighbours should succeed")
+                .filter(|&u| coreness[u] >= k_v)
+                .count();
+            assert!(
+                qualifying_neighbours >= k_v as usize,
+                "node {v} claims coreness {k_v} but only has {qualifying_neighbours} neighbours with coreness >= {k_v}"
+            );
+        }
+    }
+
+    fn run_bz<Ix: crate::graph::IndexType>(path: &std::path::Path, id: &str) -> Vec<u8> {
+        let graph = GraphMemoryMap::<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, Ix>::from_file(
+            path,
+            Some(id.to_string()),
+            None,
+        )
+        .expect("graph parse should succeed");
+        let bz = AlgoBatageljZaversnik::new(&graph)
+            .unwrap_or_else(|e| panic!("batagelj-zaversnik({id}) should succeed: {e}"));
+        let coreness = bz.k_cores().to_vec();
+        assert_valid_node_indexed_k_cores(&graph, &coreness);
+        coreness
+    }
+
+    /// Runs the Batagelj-Zaversnik k-core decomposition across several `Ix` widths on a graph
+    /// with genuinely nested core structure, asserting every width agrees on the exact (bit-for-
+    /// bit identical) per-node coreness assignment --- the canonical k-core decomposition doesn't
+    /// depend on `Ix`'s width, only on graph structure, so narrower `Ix` must never change the
+    /// result --- and that the decomposition is itself structurally valid.
+    #[test]
+    fn k_cores_batagelj_zaversnik_cross_ix_widths() {
+        let dir = unique_test_dir("bz_cross_ix_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("nested_cores.mtx");
+        write_nested_cores_mtx(&path);
+
+        let usize_cores = run_bz::<usize>(&path, &format!("bz_usize_{run_tag}"));
+        let u32_cores = run_bz::<u32>(&path, &format!("bz_u32_{run_tag}"));
+        let u16_cores = run_bz::<u16>(&path, &format!("bz_u16_{run_tag}"));
+
+        assert_eq!(usize_cores, u32_cores, "Ix=u32 coreness should match Ix=usize exactly");
+        assert_eq!(usize_cores, u16_cores, "Ix=u16 coreness should match Ix=usize exactly");
+
+        // exact expected values (node ids 1-9 in the fixture map to indices 0-8 here): the
+        // 5-clique (nodes 1-5) is a 4-core, the triangle (nodes 6-8) is a 2-core, and the pendant
+        // (node 9) is a 1-core --- independently verified via standard k-core peeling.
+        assert_eq!(
+            usize_cores,
+            vec![4, 4, 4, 4, 4, 2, 2, 2, 1],
+            "unexpected coreness values for the nested-cores fixture"
+        );
     }
 }

@@ -37,10 +37,10 @@ pub use hyperloglog_rs::prelude::Precision15;
 /// For HyperLogLog++ registers with 2¹⁶ bits.
 pub use hyperloglog_rs::prelude::Precision16;
 
-type ProceduralMemoryHB<P, const B: usize> = (
+type ProceduralMemoryHB<P, const B: usize, W> = (
     AbstractedProceduralMemoryMut<HyperLogLog<P, B>>,
-    AbstractedProceduralMemoryMut<f64>,
-    AbstractedProceduralMemoryMut<f64>,
+    AbstractedProceduralMemoryMut<W>,
+    AbstractedProceduralMemoryMut<W>,
 );
 
 pub type HyperBall4<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision4, 6>;
@@ -85,31 +85,32 @@ pub struct HyperBallInner<
     Ix: graph::IndexType,
     P: WordType<B> = Precision8,
     const B: usize = 6,
+    W: Weight = f64,
 > {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
     /// Memmapped slice containing each node's *HyperLogLog++* counter.
     counters: AbstractedProceduralMemoryMut<hyperloglog_rs::prelude::HyperLogLog<P, B>>,
     /// Memmapped slice containing each node's distance accumulator.
-    distances: AbstractedProceduralMemoryMut<f64>,
+    distances: AbstractedProceduralMemoryMut<W>,
     /// Memmapped slice containing each node's inverse distance accumulator.
-    inverse_distances: AbstractedProceduralMemoryMut<f64>,
+    inverse_distances: AbstractedProceduralMemoryMut<W>,
     /// Maximum number of iteration --- default is 128, max is 1024 (details on how these values are ludicrously big are found in the abovementioned paper).
     max_t: usize,
     /// Closeness centralities' cached values --- under various degrees of normalization.
-    closeness: [Option<AbstractedProceduralMemoryMut<f64>>; 2],
+    closeness: [Option<AbstractedProceduralMemoryMut<W>>; 2],
     /// Harmonic centralities' cached values --- under various degrees of normalization.
-    harmonic: [Option<AbstractedProceduralMemoryMut<f64>>; 2],
+    harmonic: [Option<AbstractedProceduralMemoryMut<W>>; 2],
     /// Lin's centrality's cached values.
-    lin: Option<AbstractedProceduralMemoryMut<f64>>,
+    lin: Option<AbstractedProceduralMemoryMut<W>>,
     threads: usize,
     #[cfg(any(test, feature = "bench"))]
     iters: usize,
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B: usize>
-    HyperBallInner<'a, N, E, Ix, P, B>
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B: usize, W: Weight>
+    HyperBallInner<'a, N, E, Ix, P, B, W>
 {
     const DEAFULT_MAX_DEPTH: usize = 100;
     const MAX_MAX_DEPTH: usize = 1024;
@@ -248,7 +249,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     fn get_from_cent_file(
         &self,
         target: Centrality,
-    ) -> Result<AbstractedProceduralMemoryMut<f64>, Box<dyn std::error::Error>> {
+    ) -> Result<AbstractedProceduralMemoryMut<W>, Box<dyn std::error::Error>> {
         let t_fn = self.centrality_cache_file_name(target)?;
         if Path::new(&t_fn).exists() {
             AbstractedProceduralMemoryMut::from_file_name(&t_fn)
@@ -258,24 +259,24 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     }
 
     /// Gets (from a previously cached result) the approximation of a given node's total distance to other nodes from their respective distance accumulator.
-    pub fn get_geodesic_distance(&self, node_id: usize) -> f64 {
+    pub fn get_geodesic_distance(&self, node_id: usize) -> W {
         assert!(node_id < self.g.size());
         *self.distances.get(node_id)
     }
 
     /// Gets (from a previously cached result) the approximation of a given node's total inverse distance to other nodes from their respective inverse distance accumulator.
-    pub fn get_harmonic_geodesic_distance(&self, node_id: usize) -> f64 {
+    pub fn get_harmonic_geodesic_distance(&self, node_id: usize) -> W {
         assert!(node_id < self.g.size());
         *self.inverse_distances.get(node_id)
     }
 
     /// Gets (from a previously cached result) the approximation of each node's total distance to other nodes from their respective distance accumulator.
-    pub fn geodesic_distances(&'a self) -> &'a [f64] {
+    pub fn geodesic_distances(&'a self) -> &'a [W] {
         self.distances.as_slice()
     }
 
     /// Gets (from a previously cached result) the approximation of each node's total inverse distance to other nodes from their respective inverse distance accumulator.
-    pub fn harmonic_geodesic_distances(&'a self) -> &'a [f64] {
+    pub fn harmonic_geodesic_distances(&'a self) -> &'a [W] {
         self.inverse_distances.as_slice()
     }
 
@@ -290,7 +291,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn get_closeness_centrality(
         &'a self,
         normalization: bool,
-    ) -> Result<&'a [f64], Box<dyn std::error::Error>> {
+    ) -> Result<&'a [W], Box<dyn std::error::Error>> {
         let idx = Self::index_by_normalization(normalization);
         if let Some(mem) = self.closeness[idx].as_ref() {
             return Ok(mem.as_slice());
@@ -302,7 +303,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn search_cache_closeness_centrality(
         &mut self,
         normalization: bool,
-    ) -> Result<&[f64], Box<dyn std::error::Error>> {
+    ) -> Result<&[W], Box<dyn std::error::Error>> {
         if let Ok(mem) = self.get_from_cent_file(Self::centrality_normalization(
             Centrality::Closeness,
             normalization,
@@ -327,7 +328,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn get_or_compute_closeness_centrality(
         &'a mut self,
         normalization: bool,
-    ) -> Result<&'a [f64], Box<dyn std::error::Error>> {
+    ) -> Result<&'a [W], Box<dyn std::error::Error>> {
         let idx = Self::index_by_normalization(normalization);
         if self.harmonic[idx].is_none() {
             self.compute_closeness_centrality(normalization)
@@ -347,7 +348,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn get_hamonic_centrality(
         &'a self,
         normalization: bool,
-    ) -> Result<&'a [f64], Box<dyn std::error::Error>> {
+    ) -> Result<&'a [W], Box<dyn std::error::Error>> {
         let idx = Self::index_by_normalization(normalization);
         if let Some(mem) = self.harmonic[idx].as_ref() {
             return Ok(mem.as_slice());
@@ -359,7 +360,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn search_cache_harmonic_centrality(
         &mut self,
         normalization: bool,
-    ) -> Result<&[f64], Box<dyn std::error::Error>> {
+    ) -> Result<&[W], Box<dyn std::error::Error>> {
         if let Ok(mem) = self.get_from_cent_file(Self::centrality_normalization(
             Centrality::Harmonic,
             normalization,
@@ -384,7 +385,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn get_or_compute_harmonic_centrality(
         &'a mut self,
         normalization: bool,
-    ) -> Result<&'a [f64], Box<dyn std::error::Error>> {
+    ) -> Result<&'a [W], Box<dyn std::error::Error>> {
         let idx = Self::index_by_normalization(normalization);
         if self.harmonic[idx].is_none() {
             self.compute_harmonic_centrality(normalization)
@@ -394,7 +395,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     }
 
     /// Gets (from a previously cached result) the approximation of each node's *Lin's Centrality* from their respective distance accumulator and their respective *HyperLogLog++* counter estimation.
-    pub fn get_lins_centrality(&self) -> Result<&[f64], Box<dyn std::error::Error>> {
+    pub fn get_lins_centrality(&self) -> Result<&[W], Box<dyn std::error::Error>> {
         if let Some(mem) = self.lin.as_ref() {
             return Ok(mem.as_slice());
         }
@@ -402,7 +403,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     }
 
     /// Searches cache for the approximation of each node's *Lin's Centrality* from their respective distance accumulator.
-    pub fn search_cache_lins_centrality(&mut self) -> Result<&[f64], Box<dyn std::error::Error>> {
+    pub fn search_cache_lins_centrality(&mut self) -> Result<&[W], Box<dyn std::error::Error>> {
         if let Ok(mem) =
             self.get_from_cent_file(Self::centrality_normalization(Centrality::Lin, false))
         {
@@ -415,7 +416,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     }
 
     /// Gets (from a previously cached result) or computes the approximation of each node's *Lin's Centrality* from their respective distance accumulator and their respective *HyperLogLog++* counter estimation.
-    pub fn get_or_compute_lins_centrality(&mut self) -> Result<&[f64], Box<dyn std::error::Error>> {
+    pub fn get_or_compute_lins_centrality(&mut self) -> Result<&[W], Box<dyn std::error::Error>> {
         if self.lin.is_none() {
             self.compute_lins_centrality()
         } else {
@@ -434,32 +435,32 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn compute_closeness_centrality(
         &'a mut self,
         normalize: bool,
-    ) -> Result<&'a [f64], Box<dyn std::error::Error>> {
+    ) -> Result<&'a [W], Box<dyn std::error::Error>> {
         let node_count = self.g.size(); // |V|
 
         let c_fn = self.centrality_cache_file_name(Self::centrality_normalization(
             Centrality::Closeness,
             normalize,
         ))?;
-        let mut mem = SharedSliceMut::<f64>::abst_mem_mut(&c_fn, node_count, true)?;
+        let mut mem = SharedSliceMut::<W>::abst_mem_mut(&c_fn, node_count, true)?;
 
         // normalized by number of reacheable nodes
         if normalize {
             for idx in 0..node_count {
                 if !self.distances.get(idx).is_normal() {
-                    *mem.get_mut(idx) = 0.;
+                    *mem.get_mut(idx) = W::zero();
                 } else {
-                    *mem.get_mut(idx) = (self.counters.get_mut(idx).estimate_cardinality() as f64
-                        - 1.)
+                    *mem.get_mut(idx) = (W::from_f32(self.counters.get_mut(idx).estimate_cardinality())
+                        - W::one())
                         / *self.distances.get(idx);
                 }
             }
         // normalized by node count (|V| - 1)
         } else {
-            let normalize_factor = node_count as f64 - 1.; // |V| - 1
+            let normalize_factor = W::from_usize(node_count) - W::one(); // |V| - 1
             for idx in 0..node_count {
                 if !self.distances.get(idx).is_normal() {
-                    *mem.get_mut(idx) = 0.;
+                    *mem.get_mut(idx) = W::zero();
                 } else {
                     *mem.get_mut(idx) = normalize_factor / *self.distances.get(idx);
                 }
@@ -487,31 +488,31 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     pub fn compute_harmonic_centrality(
         &mut self,
         normalize: bool,
-    ) -> Result<&[f64], Box<dyn std::error::Error>> {
+    ) -> Result<&[W], Box<dyn std::error::Error>> {
         let node_count = self.g.size(); // |V|
 
         let c_fn = self.centrality_cache_file_name(Self::centrality_normalization(
             Centrality::Harmonic,
             normalize,
         ))?;
-        let mut mem = SharedSliceMut::<f64>::abst_mem_mut(&c_fn, node_count, true)?;
+        let mut mem = SharedSliceMut::<W>::abst_mem_mut(&c_fn, node_count, true)?;
 
         // normalized by number of reacheable nodes
         if normalize {
             for idx in 0..node_count {
                 if !self.distances.get(idx).is_normal() {
-                    *mem.get_mut(idx) = 0.;
+                    *mem.get_mut(idx) = W::zero();
                 } else {
                     *mem.get_mut(idx) = *self.inverse_distances.get(idx)
-                        / (self.counters.get_mut(idx).estimate_cardinality() as f64 - 1.);
+                        / (W::from_f32(self.counters.get_mut(idx).estimate_cardinality()) - W::one());
                 }
             }
         // normalized by node count (|v| - 1)
         } else {
-            let normalize_factor = node_count as f64 - 1.; // |V| - 1
+            let normalize_factor = W::from_usize(node_count) - W::one(); // |V| - 1
             for idx in 0..node_count {
                 if !self.distances.get(idx).is_normal() {
-                    *mem.get_mut(idx) = 0.;
+                    *mem.get_mut(idx) = W::zero();
                 } else {
                     *mem.get_mut(idx) = *self.inverse_distances.get(idx) / normalize_factor;
                 }
@@ -529,21 +530,22 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
     }
 
     /// Computes the approximation of each node's *Lin's Centrality* from their respective distance accumulator and their respective *HyperLogLog++* counter estimation.
-    pub fn compute_lins_centrality(&mut self) -> Result<&[f64], Box<dyn std::error::Error>> {
+    pub fn compute_lins_centrality(&mut self) -> Result<&[W], Box<dyn std::error::Error>> {
         let node_count = self.g.size(); // |V|
 
         let c_fn = self.centrality_cache_file_name(Centrality::Lin)?;
-        let mut mem = SharedSliceMut::<f64>::abst_mem_mut(&c_fn, node_count, true)?;
+        let mut mem = SharedSliceMut::<W>::abst_mem_mut(&c_fn, node_count, true)?;
 
         // lin's centrality is like a closeness centraility doubly normalized by number of
         // reacheable nodes
         for idx in 0..node_count {
             if !self.distances.get(idx).is_normal() {
-                *mem.get_mut(idx) = 1.;
+                *mem.get_mut(idx) = W::one();
             } else {
-                *mem.get_mut(idx) = (self.counters.get_mut(idx).estimate_cardinality() as f64 - 1.)
-                    .powi(2)
-                    / *self.distances.get(idx);
+                let reachable_minus_one =
+                    W::from_f32(self.counters.get_mut(idx).estimate_cardinality()) - W::one();
+                *mem.get_mut(idx) =
+                    (reachable_minus_one * reachable_minus_one) / *self.distances.get(idx);
             }
         }
 
@@ -595,8 +597,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B: usize>
-    HyperBallInner<'a, N, E, Ix, P, B>
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B: usize, W: Weight>
+    HyperBallInner<'a, N, E, Ix, P, B, W>
 {
     #[cfg(feature = "bench")]
     #[inline(always)]
@@ -683,7 +685,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
 
     fn init_cache(
         g: &'a GraphMemoryMap<N, E, Ix>,
-    ) -> Result<ProceduralMemoryHB<P, B>, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryHB<P, B, W>, Box<dyn std::error::Error>> {
         let node_count = g.size();
 
         let c_fn = g.build_cache_filename(CacheFile::HyperBall, None)?;
@@ -693,8 +695,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
         let counters = SharedSliceMut::<hyperloglog_rs::prelude::HyperLogLog<P, B>>::abst_mem_mut(
             &c_fn, node_count, true,
         )?;
-        let distances = SharedSliceMut::<f64>::abst_mem_mut(&d_fn, node_count, true)?;
-        let inverse_distances = SharedSliceMut::<f64>::abst_mem_mut(&i_fn, node_count, true)?;
+        let distances = SharedSliceMut::<W>::abst_mem_mut(&d_fn, node_count, true)?;
+        let inverse_distances = SharedSliceMut::<W>::abst_mem_mut(&i_fn, node_count, true)?;
 
         Ok((counters, distances, inverse_distances))
     }
@@ -716,8 +718,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
         (0..node_count).for_each(|u| {
             *counters.get_mut(u) = hyperloglog_rs::prelude::HyperLogLog::<P, B>::default();
             counters.get_mut(u).insert(u);
-            *distances.get_mut(u) = 0f64;
-            *inverse_distances.get_mut(u) = 0f64;
+            *distances.get_mut(u) = W::zero();
+            *inverse_distances.get_mut(u) = W::zero();
         });
 
         Ok(Self {
@@ -765,8 +767,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
         let counters = self.counters.shared_slice();
         let swap = swap.shared_slice();
 
-        let mut t_f64: f64 = 1.; // first iteration is initialization
-        let mut inv_t_f64: f64 = 1.; // first iteration is initialization
+        let mut t: W = W::one(); // first iteration is initialization
+        let mut inv_t: W = W::one(); // first iteration is initialization
         let mut changed = 0;
 
         #[cfg(feature = "bench")]
@@ -797,7 +799,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
                                     iters.add(1, Ordering::Relaxed);
                                 }
                                 {
-                                    // println!("HyperBall tid {tid} iteration {t_f64}");
+                                    // println!("HyperBall tid {tid} iteration {t}");
                                 }
 
                                 for u in begin..end {
@@ -816,13 +818,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
                                     }
 
                                     let curr_count = a.estimate_cardinality();
-                                    let count_diff = (curr_count - prev_count) as f64;
+                                    let count_diff = W::from_f32(curr_count - prev_count);
 
-                                    if count_diff > 0f64 {
+                                    if count_diff > W::zero() {
                                         // update accumulators
-                                        *distance_accumulator.get_mut(u) += t_f64 * count_diff;
+                                        *distance_accumulator.get_mut(u) += t * count_diff;
                                         *inverse_distance_accumulator.get_mut(u) +=
-                                            inv_t_f64 * count_diff;
+                                            inv_t * count_diff;
                                         // update local changed count
                                         changed += 1;
                                     }
@@ -839,8 +841,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
 
                                 swap = std::mem::replace(&mut counters, swap);
                                 changed = 0;
-                                t_f64 += 1.;
-                                inv_t_f64 = 1. / t_f64;
+                                t += W::one();
+                                inv_t = W::one() / t;
 
                                 synchronize.wait();
 
@@ -871,5 +873,99 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: WordType<B>, const B
         // println!();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::graph::label::VoidLabel;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
+    use std::io::Write;
+
+    /// A small 4-clique: a connected graph with a trivially known structure (every node reaches
+    /// every other node in exactly one hop), used to sanity-check `HyperBall`'s distance/
+    /// centrality accumulation across `Ix` widths and `W` (weight) precisions.
+    fn write_clique_mtx(path: &std::path::Path) {
+        let mut f = std::fs::File::create(path).expect("error creating clique mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "4 4 6").unwrap();
+        for &(u, v) in &[(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)] {
+            writeln!(f, "{u} {v}").unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    fn run_hyperball<Ix: graph::IndexType, W: Weight>(
+        path: &std::path::Path,
+        id: &str,
+    ) -> (Vec<f64>, usize) {
+        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, Ix>::from_file(
+            path,
+            Some(id.to_string()),
+            None,
+        )
+        .expect("graph parse should succeed");
+        let hb = HyperBallInner::<VoidLabel, VoidLabel, Ix, Precision8, 6, W>::new(&graph)
+            .unwrap_or_else(|e| panic!("hyperball({id}) should succeed: {e}"));
+        let distances: Vec<f64> = hb.geodesic_distances().iter().map(|d| d.to_f64()).collect();
+        (distances, graph.size())
+    }
+
+    /// Runs `HyperBall` across several `Ix` widths (with `W` fixed to `f64`) on a small clique,
+    /// asserting every width produces the exact same (bit-for-bit identical) geodesic distances
+    /// --- `Ix`'s width only affects indexing/storage, never the floating-point computation
+    /// itself, so narrower `Ix` must never change the result.
+    #[test]
+    fn hyperball_cross_ix_widths_agree() {
+        let dir = unique_test_dir("hyperball_cross_ix_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("clique.mtx");
+        write_clique_mtx(&path);
+
+        let (usize_dist, node_count) =
+            run_hyperball::<usize, f64>(&path, &format!("hb_usize_{run_tag}"));
+        let (u32_dist, _) = run_hyperball::<u32, f64>(&path, &format!("hb_u32_{run_tag}"));
+        let (u16_dist, _) = run_hyperball::<u16, f64>(&path, &format!("hb_u16_{run_tag}"));
+
+        assert_eq!(usize_dist, u32_dist, "Ix=u32 distances should match Ix=usize exactly");
+        assert_eq!(usize_dist, u16_dist, "Ix=u16 distances should match Ix=usize exactly");
+
+        // sanity: in a 4-clique every node reaches the 3 others in exactly one hop each, so each
+        // node's total geodesic distance should be close to 3 (subject to HyperLogLog's own
+        // cardinality-estimation error, independent of `Ix`/`W`).
+        for (v, &d) in usize_dist.iter().enumerate() {
+            assert!(
+                d.is_finite() && d > 0.0,
+                "node {v} should have a positive, finite geodesic distance, got {d}"
+            );
+        }
+        assert_eq!(node_count, 4);
+    }
+
+    /// Runs `HyperBall` with `W=f32` vs `W=f64` on the same clique, asserting the resulting
+    /// geodesic distances agree closely (not necessarily bit-for-bit, since `f32`/`f64` differ in
+    /// precision, but the accumulation itself is pure-addition/division --- see `compute_closeness
+    /// _centrality`'s module docs --- so no catastrophic-cancellation risk exists here, unlike
+    /// GVE-Louvain's `delta_q`; small graphs in particular should match almost exactly).
+    #[test]
+    fn hyperball_f32_and_f64_agree_closely() {
+        let dir = unique_test_dir("hyperball_cross_weight_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("clique.mtx");
+        write_clique_mtx(&path);
+
+        let (f64_dist, _) = run_hyperball::<usize, f64>(&path, &format!("hb_f64_{run_tag}"));
+        let (f32_dist, _) = run_hyperball::<usize, f32>(&path, &format!("hb_f32_{run_tag}"));
+
+        assert_eq!(f64_dist.len(), f32_dist.len());
+        for (v, (&d64, &d32)) in f64_dist.iter().zip(f32_dist.iter()).enumerate() {
+            assert!(
+                (d64 - d32).abs() < 1e-2,
+                "node {v}: f64 distance {d64} and f32 distance {d32} should be close"
+            );
+        }
     }
 }
