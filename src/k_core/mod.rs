@@ -7,7 +7,7 @@ use _verify::verify_k_cores;
 #[cfg(test)]
 mod _verify {
     use crate::{
-        graph::{GraphMemoryMap, cache::utils::{FileType, H, cache_file_name}},
+        graph::{self, GraphMemoryMap, cache::utils::{FileType, H, cache_file_name}},
         shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut},
     };
 
@@ -16,8 +16,8 @@ mod _verify {
     use std::sync::{Arc, Barrier};
 
     #[allow(dead_code)]
-    pub(super) fn verify_k_cores(
-        graph: &GraphMemoryMap,
+    pub(super) fn verify_k_cores<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+        graph: &GraphMemoryMap<N, E, Ix>,
         edge_coreness: AbstractedProceduralMemoryMut<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let threads = get_physical() * 2;
@@ -88,7 +88,7 @@ mod _verify {
                                 higher_deg_than_core = 0;
                                 let core = *n_coreness.get(u);
                                 for e_idx in graph.index_node(u) {
-                                    let dest_node = unsafe { graph.neighbours_ptr().add(e_idx).read() };
+                                    let dest_node = unsafe { graph.neighbours_ptr().add(e_idx).read() }.index();
                                     let n_core = *n_coreness.get(dest_node);
                                     // ensure coreness((u,v)) == min(coreness(u), coreness(v))
                                     if *e_coreness.get(e_idx) > n_core {
