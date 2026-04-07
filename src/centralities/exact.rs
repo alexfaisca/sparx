@@ -22,11 +22,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
         g: &'a GraphMemoryMap<N, E, Ix>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut hyper_ball = Self::new_no_compute(g, normalized)?;
+        let mut closeness = Self::new_no_compute(g, normalized)?;
 
-        hyper_ball.compute_with_proc_mem(())?;
+        closeness.compute_with_proc_mem(())?;
 
-        Ok(hyper_ball)
+        Ok(closeness)
     }
 
     pub fn get_node_centrality(&self, idx: usize) -> W {
@@ -158,7 +158,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         if index == 0 {
                             for u in begin..end {
-                                let bfs = BFSDists::new(graph, u).map_err(
+                                let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error: {:?}", e).into()
                                     },
@@ -172,7 +172,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
                         } else if index == 1 {
                             let norm = W::from_usize(node_count.saturating_sub(1));
                             for u in begin..end {
-                                let bfs = BFSDists::new(graph, u).map_err(
+                                let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error: {:?}", e).into()
                                     },
@@ -185,7 +185,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
                             }
                         } else {
                             for u in begin..end {
-                                let bfs = BFSDists::new(graph, u).map_err(
+                                let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error: {:?}", e).into()
                                     },
@@ -219,6 +219,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
 
         self.g.cleanup_cache(CacheFile::ExactCloseness)?;
 
+        // `new_t`'s distances buffer is a persisted (`.mmap`, not `.tmp`) per-thread file, not
+        // caught by `cleanup_cache`'s `.tmp`-only glob --- remove each thread's leftover file
+        // directly (idle threads with no assigned nodes never created one, so tolerate
+        // not-found).
+        for tid in 0..threads {
+            if let Ok(fname) = self.g.build_pers_cache_filename(CacheFile::BFS, Some(tid)) {
+                let _ = std::fs::remove_file(fname);
+            }
+        }
+
         Ok(())
     }
 }
@@ -237,13 +247,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
         g: &'a GraphMemoryMap<N, E, Ix>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut hyper_ball = Self::new_no_compute(g, normalized)?;
+        let mut harmonic = Self::new_no_compute(g, normalized)?;
 
-        hyper_ball.compute_with_proc_mem(())?;
+        harmonic.compute_with_proc_mem(())?;
 
-        hyper_ball.g.cleanup_cache(CacheFile::HyperBall)?;
-
-        Ok(hyper_ball)
+        Ok(harmonic)
     }
 
     pub fn get_node_centrality(&self, idx: usize) -> W {
@@ -375,7 +383,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         if index == 0 {
                             for u in begin..end {
-                                let bfs = BFSDists::new(graph, u).map_err(
+                                let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error: {:?}", e).into()
                                     },
@@ -396,7 +404,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                         } else if index == 1 {
                             let norm = W::from_usize(node_count.saturating_sub(1));
                             for u in begin..end {
-                                let bfs = BFSDists::new(graph, u).map_err(
+                                let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error: {:?}", e).into()
                                     },
@@ -416,7 +424,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                             }
                         } else {
                             for u in begin..end {
-                                let bfs = BFSDists::new(graph, u).map_err(
+                                let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                     |e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error: {:?}", e).into()
                                     },
@@ -456,6 +464,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
 
         self.g.cleanup_cache(CacheFile::ExactHarmonic)?;
 
+        // see `ExactClosenessCentrality::compute_with_proc_mem_impl`'s identical cleanup for why
+        // this is needed in addition to `cleanup_cache`.
+        for tid in 0..threads {
+            if let Ok(fname) = self.g.build_pers_cache_filename(CacheFile::BFS, Some(tid)) {
+                let _ = std::fs::remove_file(fname);
+            }
+        }
+
         Ok(())
     }
 }
@@ -469,13 +485,11 @@ pub struct ExactLinCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType
 #[allow(dead_code)]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCentrality<'a, N, E, Ix, W> {
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut hyper_ball = Self::new_no_compute(g)?;
+        let mut lin = Self::new_no_compute(g)?;
 
-        hyper_ball.compute_with_proc_mem(())?;
+        lin.compute_with_proc_mem(())?;
 
-        hyper_ball.g.cleanup_cache(CacheFile::HyperBall)?;
-
-        Ok(hyper_ball)
+        Ok(lin)
     }
 
     pub fn get_node_centrality(&self, idx: usize) -> W {
@@ -560,7 +574,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
-        let e_fn = g.build_cache_filename(CacheFile::ExactCloseness, None)?;
+        let e_fn = g.build_cache_filename(CacheFile::ExactLin, None)?;
 
         Ok(Self {
             g,
@@ -601,7 +615,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
                 threads_res.push(scope.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         for u in begin..end {
-                            let bfs = BFSDists::new(graph, u).map_err(
+                            let bfs = BFSDists::new_t(graph, u, tid).map_err(
                                 |e| -> Box<dyn std::error::Error + Send + Sync> {
                                     format!("error: {:?}", e).into()
                                 },
@@ -633,6 +647,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
         .map_err(|e| -> Box<dyn std::error::Error> { format!("error HyperBall {:?}", e).into() })?;
 
         self.g.cleanup_cache(CacheFile::ExactLin)?;
+
+        // see `ExactClosenessCentrality::compute_with_proc_mem_impl`'s identical cleanup for why
+        // this is needed in addition to `cleanup_cache`.
+        for tid in 0..threads {
+            if let Ok(fname) = self.g.build_pers_cache_filename(CacheFile::BFS, Some(tid)) {
+                let _ = std::fs::remove_file(fname);
+            }
+        }
 
         Ok(())
     }
