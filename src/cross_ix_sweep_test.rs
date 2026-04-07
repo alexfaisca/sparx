@@ -183,17 +183,17 @@ fn run_all_algorithms<Ix: IndexType>(
     let louvain_modularity_bits = louvain.partition_modularity().to_bits();
 
     let (closeness, harmonic, lin) = if compute_exact_centralities {
-        let closeness = ExactClosenessCentrality::new(&graph, Some(true))?
+        let closeness = ExactClosenessCentrality::<_, _, _, f64>::new(&graph, Some(true))?
             .centralities()
             .iter()
             .map(|f| f.to_bits())
             .collect::<Vec<u64>>();
-        let harmonic = ExactHarmonicCentrality::new(&graph, Some(true))?
+        let harmonic = ExactHarmonicCentrality::<_, _, _, f64>::new(&graph, Some(true))?
             .centralities()
             .iter()
             .map(|f| f.to_bits())
             .collect::<Vec<u64>>();
-        let lin = ExactLinCentrality::new(&graph)?
+        let lin = ExactLinCentrality::<_, _, _, f64>::new(&graph)?
             .centralities()
             .iter()
             .map(|f| f.to_bits())

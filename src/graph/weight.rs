@@ -34,6 +34,9 @@ pub unsafe trait Weight:
     /// Converts an `f32` value (e.g. a `HyperLogLog` cardinality estimate, which is always
     /// computed in `f32` regardless of `Self`) into a weight value.
     fn from_f32(x: f32) -> Self;
+    /// Converts an `f64` value (e.g. `BFSDists::total_distances`, always computed in `f64`
+    /// regardless of `Self`) into a weight value.
+    fn from_f64(x: f64) -> Self;
     fn is_finite(self) -> bool;
     fn is_normal(self) -> bool;
     /// Machine epsilon at `Self`'s precision. Not currently used internally (the one place that
@@ -88,6 +91,10 @@ macro_rules! impl_weight {
             }
             #[inline(always)]
             fn from_f32(x: f32) -> Self {
+                x as $plain
+            }
+            #[inline(always)]
+            fn from_f64(x: f64) -> Self {
                 x as $plain
             }
             #[inline(always)]

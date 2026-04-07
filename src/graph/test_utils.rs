@@ -207,15 +207,15 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                 match value_type {
                     FileType::ExactClosenessCentrality(H::H) => {
                         println!("compute closeness centrality");
-                        ExactClosenessCentrality::new(graph, Some(true))?;
+                        ExactClosenessCentrality::<_, _, _, f64>::new(graph, Some(true))?;
                     }
                     FileType::ExactHarmonicCentrality(H::H) => {
                         println!("compute harmonic centrality");
-                        ExactHarmonicCentrality::new(graph, Some(true))?;
+                        ExactHarmonicCentrality::<_, _, _, f64>::new(graph, Some(true))?;
                     }
                     FileType::ExactLinCentrality(H::H) => {
                         println!("compute lin's centrality");
-                        ExactLinCentrality::new(graph)?;
+                        ExactLinCentrality::<_, _, _, f64>::new(graph)?;
                     }
                     _ => {}
                 };
