@@ -107,15 +107,15 @@ struct AlgorithmResults {
 struct DiscoveryOrderVisitor {
     log: Arc<Mutex<Vec<usize>>>,
 }
-impl DfsVisitor for DiscoveryOrderVisitor {
-    fn discover_vertex(&mut self, u: usize, _time: usize, _parent: usize) -> ControlFlow<()> {
-        self.log.lock().unwrap().push(u);
+impl<Ix: IndexType> DfsVisitor<Ix> for DiscoveryOrderVisitor {
+    fn discover_vertex(&mut self, u: Ix, _time: Ix, _parent: Ix) -> ControlFlow<()> {
+        self.log.lock().unwrap().push(u.index());
         ControlFlow::Continue(())
     }
 }
-impl BfsVisitor for DiscoveryOrderVisitor {
-    fn discover_vertex(&mut self, u: usize, _dist: usize, _parent: usize) -> ControlFlow<()> {
-        self.log.lock().unwrap().push(u);
+impl<Ix: IndexType> BfsVisitor<Ix> for DiscoveryOrderVisitor {
+    fn discover_vertex(&mut self, u: Ix, _dist: Ix, _parent: Ix) -> ControlFlow<()> {
+        self.log.lock().unwrap().push(u.index());
         ControlFlow::Continue(())
     }
 }
@@ -151,10 +151,10 @@ fn run_all_algorithms<Ix: IndexType>(
         .collect::<Vec<u64>>();
 
     let bfs = BFSDists::new(&graph, 0)?;
-    let bfs_distances = bfs.get_distances().to_vec();
+    let bfs_distances = bfs.get_distances().iter().map(|d| d.index()).collect::<Vec<usize>>();
     let bfs_reachable = bfs.recheable();
 
-    let dfs_order = DFS::new(&graph, 0)?.get_order().to_vec();
+    let dfs_order = DFS::new(&graph, 0)?.get_order().iter().map(|d| d.index()).collect::<Vec<usize>>();
 
     let dfs_log = Arc::new(Mutex::new(vec![0usize]));
     {

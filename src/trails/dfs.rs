@@ -17,7 +17,7 @@ pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     /// Source node for DFS.
     source: usize,
     /// Memmapped slice containing the nodes in discovery order.
-    order: AbstractedProceduralMemoryMut<usize>,
+    order: AbstractedProceduralMemoryMut<Ix>,
 }
 
 #[allow(dead_code)]
@@ -38,7 +38,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     }
 
     /// Returns all nodes' discovery order as determined by the DFS with the given source.
-    pub fn get_order(&'a self) -> &'a [usize] {
+    pub fn get_order(&'a self) -> &'a [Ix] {
         self.order.as_slice()
     }
 
@@ -130,7 +130,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
         Ok(Self {
             g,
             source,
-            order: SharedSliceMut::<usize>::abst_mem_mut(&out_fn, g.size(), true)?,
+            order: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
         })
     }
 
@@ -168,7 +168,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
                 continue;
             }
             *visited.get_mut(u) = true;
-            *ord.get_mut(idx) = u;
+            *ord.get_mut(idx) = Ix::new(u);
             idx += 1;
             for v in self.g.neighbours(u)?.rev() {
                 if !*visited.get(v) {

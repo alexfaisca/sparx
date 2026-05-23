@@ -2,9 +2,23 @@ use crate::trails::{bfs_visit, dfs_visit};
 
 use super::*;
 
+/// Widens a `NeighbourIter<N, E, Ix>`'s native `usize` output back into `Ix` --- `NeighbourIter`
+/// itself stays `usize`-yielding (it's `GraphMemoryMap::neighbours`'s pervasively-used public
+/// return type, far too widely relied upon crate-wide to change), so `bfs_visit`/`dfs_visit`'s
+/// `Graph::neigh` implementations adapt it locally instead, letting `BFSVisit`/`DFSVisit` and
+/// their visitor callbacks stay natively `Ix`-typed throughout.
+#[inline(always)]
+fn widen_to_ix<Ix: crate::graph::IndexType>(x: usize) -> Ix {
+    Ix::new(x)
+}
+
+type IxNeighbours<N, E, Ix> = std::iter::Map<NeighbourIter<N, E, Ix>, fn(usize) -> Ix>;
+
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_visit::Graph
     for GraphMemoryMap<N, E, Ix>
 {
+    type Ix = Ix;
+
     fn s(&self) -> usize {
         self.size()
     }
@@ -14,7 +28,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_vi
     }
 
     type Neigh<'a>
-        = NeighbourIter<N, E, Ix>
+        = IxNeighbours<N, E, Ix>
     where
         Self: 'a;
 
@@ -22,9 +36,11 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_vi
     /// offset-range lookup), not a raw `self[u..u + 1]` edge-array slice --- `u` here is a node
     /// id, not a raw position in the flat edges array, and the two only coincide by chance for a
     /// node whose neighbour range happens to start at edge-array position `u`.
-    fn neigh(&self, u: usize) -> Self::Neigh<'_> {
+    fn neigh(&self, u: Ix) -> Self::Neigh<'_> {
+        let u = u.index();
         self.neighbours(u)
             .unwrap_or_else(|e| panic!("error getting neighbours of node {u}: {e}"))
+            .map(widen_to_ix::<Ix>)
     }
 
     fn cache_file_name(
@@ -43,6 +59,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_vi
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> bfs_visit::Graph
     for GraphMemoryMap<N, E, Ix>
 {
+    type Ix = Ix;
+
     fn s(&self) -> usize {
         self.size()
     }
@@ -52,7 +70,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> bfs_vi
     }
 
     type Neigh<'a>
-        = NeighbourIter<N, E, Ix>
+        = IxNeighbours<N, E, Ix>
     where
         Self: 'a;
 
@@ -60,9 +78,11 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> bfs_vi
     /// offset-range lookup), not a raw `self[u..u + 1]` edge-array slice --- `u` here is a node
     /// id, not a raw position in the flat edges array, and the two only coincide by chance for a
     /// node whose neighbour range happens to start at edge-array position `u`.
-    fn neigh(&self, u: usize) -> Self::Neigh<'_> {
+    fn neigh(&self, u: Ix) -> Self::Neigh<'_> {
+        let u = u.index();
         self.neighbours(u)
             .unwrap_or_else(|e| panic!("error getting neighbours of node {u}: {e}"))
+            .map(widen_to_ix::<Ix>)
     }
 
     fn cache_file_name(
@@ -86,7 +106,7 @@ mod test {
     use crate::graph::test_utils::unique_test_dir;
     use crate::trails::{
         bfs_visit::{BFSVisit, BfsVisitor},
-        dfs_visit::{DFSVisit, DfsVisitor},
+        dfs_visit::{DFSVisit, DfsVisitor, NoOpDfsVisitor},
     };
     use std::ops::ControlFlow;
     use std::sync::{Arc, Mutex};
@@ -137,16 +157,16 @@ mod test {
         discovered: Arc<Mutex<Vec<usize>>>,
     }
 
-    impl DfsVisitor for RecordingVisitor {
-        fn discover_vertex(&mut self, u: usize, _time: usize, _parent: usize) -> ControlFlow<()> {
-            self.discovered.lock().unwrap().push(u);
+    impl<Ix: IndexType> DfsVisitor<Ix> for RecordingVisitor {
+        fn discover_vertex(&mut self, u: Ix, _time: Ix, _parent: Ix) -> ControlFlow<()> {
+            self.discovered.lock().unwrap().push(u.index());
             ControlFlow::Continue(())
         }
     }
 
-    impl BfsVisitor for RecordingVisitor {
-        fn discover_vertex(&mut self, u: usize, _dist: usize, _parent: usize) -> ControlFlow<()> {
-            self.discovered.lock().unwrap().push(u);
+    impl<Ix: IndexType> BfsVisitor<Ix> for RecordingVisitor {
+        fn discover_vertex(&mut self, u: Ix, _dist: Ix, _parent: Ix) -> ControlFlow<()> {
+            self.discovered.lock().unwrap().push(u.index());
             ControlFlow::Continue(())
         }
     }
@@ -187,5 +207,46 @@ mod test {
         let mut discovered = discovered_log.lock().unwrap().clone();
         discovered.sort_unstable();
         assert_eq!(discovered, vec![0, 1, 2, 3], "BFS should discover every node reachable from 0");
+    }
+
+    /// A strict chain (0 -> 1 -> 2 -> 3), where node 0 is *not* directly adjacent to 2 or 3.
+    /// Unlike `build_tiny_graph` (where source 0 happens to be adjacent to every other node,
+    /// making a "parent is always the source" bug indistinguishable from a correct result by a
+    /// mere adjacency check), this fixture forces a unique, decisive expected parent chain:
+    /// `parents == [0, 0, 1, 2]`.
+    fn build_chain_graph() -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+        let dir = unique_test_dir("impl_traits_chain_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let path = dir.join("chain.mtx");
+        std::fs::write(
+            &path,
+            "%%MatrixMarket matrix coordinate pattern general\n4 4 3\n1 2\n2 3\n3 4\n",
+        )
+        .expect("error writing chain mtx fixture");
+
+        let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
+            .expect("parse should succeed");
+        let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
+        std::fs::remove_dir_all(&dir).ok();
+        graph
+    }
+
+    /// Regression test for a real bug found while generalizing `DFSVisit` to be `Ix`-generic:
+    /// `parents[v]` was never actually written for any node but the source, so `get_parents()`
+    /// silently returned all-zeroes for everyone else --- undetected by the existing
+    /// `dfs_visit_reaches_every_node_from_source_0` test purely because that test's fixture
+    /// happens to have the source adjacent to every other node.
+    #[test]
+    fn dfs_visit_records_the_exact_parent_chain_on_a_graph_where_source_is_not_adjacent_to_all() {
+        let graph = build_chain_graph();
+        let mut visitor = NoOpDfsVisitor;
+        let dfs = DFSVisit::new(&graph, 0, &mut visitor).expect("dfs should succeed");
+
+        assert_eq!(
+            dfs.get_parents(),
+            &[0, 0, 1, 2],
+            "expected the exact chain parent assignment --- a regression here would mean \
+             parents[v] is only ever written for the source node again"
+        );
     }
 }

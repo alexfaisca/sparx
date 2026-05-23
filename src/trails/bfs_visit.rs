@@ -4,21 +4,25 @@ use crate::shared_slice::*;
 use std::mem::ManuallyDrop;
 use std::ops::ControlFlow;
 
-type ProceduralMemoryBFSParents = (
-    AbstractedProceduralMemoryMut<usize>,
+type ProceduralMemoryBFSParents<I> = (
+    AbstractedProceduralMemoryMut<I>,
     AbstractedProceduralMemoryMut<bool>,
 );
 
 // ----- Minimal graph trait -----
 pub trait Graph {
+    /// Width-matched node/edge index type --- threaded through `neigh`'s item type,
+    /// [`BfsVisitor`]'s callback parameters, and `BFSVisit`'s own internal scratch arrays, so
+    /// nothing in this traversal ever needs to round-trip through `usize`.
+    type Ix: crate::graph::IndexType;
     fn s(&self) -> usize;
     fn w(&self) -> usize;
     /// Iterator type returned by [`neigh`](Graph::neigh); borrows no allocation --- implementors
     /// are expected to walk the graph's adjacency representation directly, in place.
-    type Neigh<'a>: Iterator<Item = usize>
+    type Neigh<'a>: Iterator<Item = Self::Ix>
     where
         Self: 'a;
-    fn neigh(&self, u: usize) -> Self::Neigh<'_>;
+    fn neigh(&self, u: Self::Ix) -> Self::Neigh<'_>;
     fn cache_file_name(
         &self,
         target: CacheFile,
@@ -29,36 +33,36 @@ pub trait Graph {
 
 /// BFSVisitor methods have defaults (no-ops), so users can override only what they need.
 /// Returning `ControlFlow::Break(())` from any hook stops the traversal early.
-pub trait BfsVisitor {
+pub trait BfsVisitor<Ix: crate::graph::IndexType> {
     #[inline]
-    fn start_vertex(&mut self, _s: usize) -> ControlFlow<()> {
+    fn start_vertex(&mut self, _s: Ix) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
     #[inline]
-    fn discover_vertex(&mut self, _u: usize, _dist: usize, _parent: usize) -> ControlFlow<()> {
+    fn discover_vertex(&mut self, _u: Ix, _dist: Ix, _parent: Ix) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
     #[inline]
-    fn examine_edge(&mut self, _u: usize, _v: usize) -> ControlFlow<()> {
+    fn examine_edge(&mut self, _u: Ix, _v: Ix) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
     #[inline]
-    fn tree_edge(&mut self, _u: usize, _v: usize) -> ControlFlow<()> {
+    fn tree_edge(&mut self, _u: Ix, _v: Ix) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
     #[inline]
-    fn non_tree_edge(&mut self, _u: usize, _v: usize) -> ControlFlow<()> {
+    fn non_tree_edge(&mut self, _u: Ix, _v: Ix) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
     #[inline]
-    fn finish_vertex(&mut self, _u: usize) -> ControlFlow<()> {
+    fn finish_vertex(&mut self, _u: Ix) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
 }
 
 /// A no-op visitor (handy default)
 pub struct NoOpBFSVisitor;
-impl BfsVisitor for NoOpBFSVisitor {}
+impl<Ix: crate::graph::IndexType> BfsVisitor<Ix> for NoOpBFSVisitor {}
 
 macro_rules! cf_chain {
     ($first:expr, $second:expr) => {
@@ -71,26 +75,28 @@ macro_rules! cf_chain {
 
 /// A composite visitor for infinite customization :)
 pub struct BundleVisitor<A, B>(A, B);
-impl<A: BfsVisitor, B: BfsVisitor> BfsVisitor for BundleVisitor<A, B> {
-    fn start_vertex(&mut self, s: usize) -> ControlFlow<()> {
+impl<Ix: crate::graph::IndexType, A: BfsVisitor<Ix>, B: BfsVisitor<Ix>> BfsVisitor<Ix>
+    for BundleVisitor<A, B>
+{
+    fn start_vertex(&mut self, s: Ix) -> ControlFlow<()> {
         cf_chain!(self.0.start_vertex(s), self.1.start_vertex(s))
     }
-    fn discover_vertex(&mut self, u: usize, d: usize, p: usize) -> ControlFlow<()> {
+    fn discover_vertex(&mut self, u: Ix, d: Ix, p: Ix) -> ControlFlow<()> {
         cf_chain!(
             self.0.discover_vertex(u, d, p),
             self.1.discover_vertex(u, d, p)
         )
     }
-    fn examine_edge(&mut self, u: usize, v: usize) -> ControlFlow<()> {
+    fn examine_edge(&mut self, u: Ix, v: Ix) -> ControlFlow<()> {
         cf_chain!(self.0.examine_edge(u, v), self.1.examine_edge(u, v))
     }
-    fn tree_edge(&mut self, u: usize, v: usize) -> ControlFlow<()> {
+    fn tree_edge(&mut self, u: Ix, v: Ix) -> ControlFlow<()> {
         cf_chain!(self.0.tree_edge(u, v), self.1.tree_edge(u, v))
     }
-    fn non_tree_edge(&mut self, u: usize, v: usize) -> ControlFlow<()> {
+    fn non_tree_edge(&mut self, u: Ix, v: Ix) -> ControlFlow<()> {
         cf_chain!(self.0.non_tree_edge(u, v), self.1.non_tree_edge(u, v))
     }
-    fn finish_vertex(&mut self, u: usize) -> ControlFlow<()> {
+    fn finish_vertex(&mut self, u: Ix) -> ControlFlow<()> {
         cf_chain!(self.0.finish_vertex(u), self.1.finish_vertex(u))
     }
 }
@@ -105,9 +111,9 @@ pub struct BFSVisit<'a, G: Graph> {
     /// BFS source node.
     source: usize,
     /// Memmapped slice containing each nodes' distance to the source node.
-    distances: AbstractedProceduralMemoryMut<usize>,
+    distances: AbstractedProceduralMemoryMut<G::Ix>,
     /// Visit functions.
-    visit: &'a mut dyn BfsVisitor,
+    visit: &'a mut dyn BfsVisitor<G::Ix>,
 }
 
 #[allow(dead_code)]
@@ -118,7 +124,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     pub fn new(
         g: &'a G,
         source: usize,
-        visitors: &'a mut dyn BfsVisitor,
+        visitors: &'a mut dyn BfsVisitor<G::Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bfs = Self::new_no_compute(g, source, visitors)?;
         let proc_mem = bfs.init_cache_mem()?;
@@ -129,7 +135,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     }
 
     /// Returns all nodes' distance to the source node as determined by the BFS.
-    pub fn get_distances(&'a self) -> &'a [usize] {
+    pub fn get_distances(&'a self) -> &'a [G::Ix] {
         self.distances.as_slice()
     }
 
@@ -149,7 +155,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     pub fn new_no_compute(
         g: &'a G,
         source: usize,
-        visitors: &'a mut dyn BfsVisitor,
+        visitors: &'a mut dyn BfsVisitor<G::Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source, visitors)
     }
@@ -159,14 +165,14 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     pub(crate) fn new_no_compute(
         g: &'a G,
         source: usize,
-        visitors: &'a mut dyn BfsVisitor,
+        visitors: &'a mut dyn BfsVisitor<G::Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source, visitors)
     }
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBFSParents, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBFSParents<G::Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -174,7 +180,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryBFSParents, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryBFSParents<G::Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -182,7 +188,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBFSParents,
+        proc_mem: ProceduralMemoryBFSParents<G::Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -191,7 +197,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBFSParents,
+        proc_mem: ProceduralMemoryBFSParents<G::Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -213,7 +219,7 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
     fn new_no_compute_impl(
         g: &'a G,
         source: usize,
-        visit: &'a mut dyn BfsVisitor,
+        visit: &'a mut dyn BfsVisitor<G::Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if source >= g.s() {
             return Err(format!(
@@ -226,20 +232,20 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
         Ok(Self {
             g,
             source,
-            distances: SharedSliceMut::<usize>::abst_mem_mut(&out_fn, g.s(), true)?,
+            distances: SharedSliceMut::<G::Ix>::abst_mem_mut(&out_fn, g.s(), true)?,
             visit,
         })
     }
 
     fn init_cache_mem_impl(
         &self,
-    ) -> Result<ProceduralMemoryBFSParents, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryBFSParents<G::Ix>, Box<dyn std::error::Error>> {
         let node_count = self.g.s();
 
         let q_fn = self.build_cache_filename(CacheFile::BFS, Some(0))?;
         let v_fn = self.build_cache_filename(CacheFile::BFS, Some(1))?;
 
-        let queue = SharedSliceMut::<usize>::abst_mem_mut(&q_fn, node_count, true)?;
+        let queue = SharedSliceMut::<G::Ix>::abst_mem_mut(&q_fn, node_count, true)?;
         let visited = SharedSliceMut::<bool>::abst_mem_mut(&v_fn, node_count, true)?;
 
         Ok((queue, visited))
@@ -247,37 +253,38 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
 
     fn compute_with_proc_mem_impl(
         &mut self,
-        proc_mem: ProceduralMemoryBFSParents,
+        proc_mem: ProceduralMemoryBFSParents<G::Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (queue, mut visited) = proc_mem;
         let mut next = SharedQueueMut::from_shared_slice(queue.shared_slice());
 
+        let source = G::Ix::new(self.source);
+
         // Start vertex
-        if let ControlFlow::Break(()) = self.visit.start_vertex(self.source) {
+        if let ControlFlow::Break(()) = self.visit.start_vertex(source) {
             return Ok(());
         }
-        next.push(self.source);
+        next.push(source);
         // mark the source visited up front --- otherwise a back-edge cycling to the source (a
         // perfectly normal case in any non-trivial/cyclic graph) would be mistaken for an
         // undiscovered node and re-processed as a fresh tree edge.
         *visited.get_mut(self.source) = true;
 
         while let Some(u) = next.pop() {
-            let dist_u = *self.distances.get(u);
+            let dist_u = *self.distances.get(u.index());
             for v in self.g.neigh(u) {
                 if let ControlFlow::Break(()) = self.visit.examine_edge(u, v) {
                     return Ok(());
                 }
 
-                if !*visited.get(v) {
+                if !*visited.get(v.index()) {
                     if let ControlFlow::Break(()) = self.visit.tree_edge(u, v) {
                         return Ok(());
                     }
-                    *visited.get_mut(v) = true;
-                    *self.distances.get_mut(v) = dist_u + 1;
-                    if let ControlFlow::Break(()) =
-                        self.visit.discover_vertex(v, *self.distances.get(v), u)
-                    {
+                    *visited.get_mut(v.index()) = true;
+                    let dist_v = G::Ix::new(dist_u.index() + 1);
+                    *self.distances.get_mut(v.index()) = dist_v;
+                    if let ControlFlow::Break(()) = self.visit.discover_vertex(v, dist_v, u) {
                         return Ok(());
                     }
                     next.push(v);

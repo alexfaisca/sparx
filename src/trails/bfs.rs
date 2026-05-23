@@ -4,8 +4,8 @@ use crate::shared_slice::*;
 
 use std::mem::ManuallyDrop;
 
-type ProceduralMemoryBFSDists = (
-    AbstractedProceduralMemoryMut<usize>,
+type ProceduralMemoryBFSDists<Ix> = (
+    AbstractedProceduralMemoryMut<Ix>,
     AbstractedProceduralMemoryMut<bool>,
 );
 
@@ -19,7 +19,7 @@ pub struct BFSDists<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     g: &'a GraphMemoryMap<N, E, Ix>,
     source: usize,
     /// Memmapped slice containing each nodes' distance to the source node.
-    distances: AbstractedProceduralMemoryMut<usize>,
+    distances: AbstractedProceduralMemoryMut<Ix>,
     /// Array containing the starting position of each euler trail.
     reacheable: usize,
     /// Sum of all nodes' distance to the source node.
@@ -55,7 +55,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
         let mut bfs = Self {
             g,
             source,
-            distances: SharedSliceMut::<usize>::abst_mem_mut(&out_fn, g.size(), true)?,
+            distances: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
             reacheable: 0,
             total_distances: 0.,
         };
@@ -64,7 +64,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
         let q_fn = bfs.build_cache_filename(CacheFile::BFS, Some(3 * thread))?;
         let v_fn = bfs.build_cache_filename(CacheFile::BFS, Some(3 * thread + 1))?;
 
-        let queue = SharedSliceMut::<usize>::abst_mem_mut(&q_fn, node_count, true)?;
+        let queue = SharedSliceMut::<Ix>::abst_mem_mut(&q_fn, node_count, true)?;
         let visited = SharedSliceMut::<bool>::abst_mem_mut(&v_fn, node_count, true)?;
         bfs.compute_with_proc_mem((queue, visited))?;
         std::fs::remove_file(q_fn)?;
@@ -84,7 +84,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     }
 
     /// Returns all nodes' distance to the source node as determined by the BFS.
-    pub fn get_distances(&'a self) -> &'a [usize] {
+    pub fn get_distances(&'a self) -> &'a [Ix] {
         self.distances.as_slice()
     }
 
@@ -119,7 +119,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBFSDists, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -127,7 +127,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryBFSDists, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -135,7 +135,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBFSDists,
+        proc_mem: ProceduralMemoryBFSDists<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -144,7 +144,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBFSDists,
+        proc_mem: ProceduralMemoryBFSDists<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -178,19 +178,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
         Ok(Self {
             g,
             source,
-            distances: SharedSliceMut::<usize>::abst_mem_mut(&out_fn, g.size(), true)?,
+            distances: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
             reacheable: 0,
             total_distances: 0.,
         })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBFSDists, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
         let q_fn = self.build_cache_filename(CacheFile::BFS, Some(0))?;
         let v_fn = self.build_cache_filename(CacheFile::BFS, Some(1))?;
 
-        let queue = SharedSliceMut::<usize>::abst_mem_mut(&q_fn, node_count, true)?;
+        let queue = SharedSliceMut::<Ix>::abst_mem_mut(&q_fn, node_count, true)?;
         let visited = SharedSliceMut::<bool>::abst_mem_mut(&v_fn, node_count, true)?;
 
         Ok((queue, visited))
@@ -198,7 +198,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
 
     fn compute_with_proc_mem_impl(
         &mut self,
-        proc_mem: ProceduralMemoryBFSDists,
+        proc_mem: ProceduralMemoryBFSDists<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (queue, mut visited) = proc_mem;
         let mut dist = self.distances.shared_slice();
@@ -207,19 +207,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
         let mut reacheable = 0;
         let mut sum: f64 = 0.;
 
-        next.push(self.source);
+        next.push(Ix::new(self.source));
 
         // find cycles until no unused edges remain
         while let Some(u) = next.pop() {
-            let du = *dist.get(u);
+            let u = u.index();
+            let du = dist.get(u).index();
             let dup1 = (du + 1) as f64;
             for v in self.g.neighbours(u)? {
                 if !*visited.get(v) {
                     *visited.get_mut(v) = true;
-                    *dist.get_mut(v) = du + 1;
+                    *dist.get_mut(v) = Ix::new(du + 1);
                     sum += dup1;
                     reacheable += 1;
-                    next.push(v);
+                    next.push(Ix::new(v));
                 }
             }
         }
