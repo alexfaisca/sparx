@@ -3463,7 +3463,7 @@ struct GrowableIdBuffer<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::g
     target: CacheFile,
     instance_id: usize,
     generation: usize,
-    mem: AbstractedProceduralMemoryMut<usize>,
+    mem: AbstractedProceduralMemoryMut<Ix>,
     file_name: String,
     cap: usize,
     len: usize,
@@ -3484,7 +3484,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
         // buffer, +1 per growth generation) so concurrently-alive instances never collide;
         // see `grow`'s doc comment for why 16 is comfortably more headroom than ever needed.
         let file_name = graph.build_cache_filename(target.clone(), Some(instance_id * 16 + 1))?;
-        let mem = SharedSliceMut::<usize>::abst_mem_mut(&file_name, cap, true)?;
+        let mem = SharedSliceMut::<Ix>::abst_mem_mut(&file_name, cap, true)?;
         Ok(Self {
             graph,
             target,
@@ -3512,7 +3512,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
             self.target.clone(),
             Some(self.instance_id * 16 + 1 + self.generation),
         )?;
-        let mut new_mem = SharedSliceMut::<usize>::abst_mem_mut(&new_file_name, new_cap, true)?;
+        let mut new_mem = SharedSliceMut::<Ix>::abst_mem_mut(&new_file_name, new_cap, true)?;
         new_mem.as_mut_slice()[..self.len].copy_from_slice(&self.mem.as_slice()[..self.len]);
         let old_file_name = std::mem::replace(&mut self.file_name, new_file_name);
         self.mem = new_mem;
@@ -3526,7 +3526,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
         if self.len == self.cap {
             self.grow()?;
         }
-        *self.mem.get_mut(self.len) = v;
+        *self.mem.get_mut(self.len) = Ix::new(v);
         self.len += 1;
         Ok(())
     }
@@ -3537,12 +3537,12 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
             return None;
         }
         self.len -= 1;
-        Some(*self.mem.get(self.len))
+        Some(self.mem.get(self.len).index())
     }
 
     #[inline]
     fn get(&self, idx: usize) -> usize {
-        *self.mem.get(idx)
+        self.mem.get(idx).index()
     }
 
     #[inline]

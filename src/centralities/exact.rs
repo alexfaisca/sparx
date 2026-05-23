@@ -395,7 +395,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                                         .get_distances()
                                         .iter()
                                         .map(|&d| {
-                                            if d > 0 { W::one() / W::from_usize(d) } else { W::zero() }
+                                            if d.index() > 0 { W::one() / W::from_usize(d.index()) } else { W::zero() }
                                         })
                                         .fold(W::zero(), |a, b| a + b);
                                     *e.get_mut(u) = inv_dist;
@@ -416,7 +416,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                                         .get_distances()
                                         .iter()
                                         .map(|&d| {
-                                            if d > 0 { W::one() / W::from_usize(d) } else { W::zero() }
+                                            if d.index() > 0 { W::one() / W::from_usize(d.index()) } else { W::zero() }
                                         })
                                         .fold(W::zero(), |a, b| a + b);
                                     *e.get_mut(u) = norm / inv_dist;
@@ -436,7 +436,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                                         .get_distances()
                                         .iter()
                                         .map(|&d| {
-                                            if d > 0 { W::one() / W::from_usize(d) } else { W::zero() }
+                                            if d.index() > 0 { W::one() / W::from_usize(d.index()) } else { W::zero() }
                                         })
                                         .fold(W::zero(), |a, b| a + b);
                                     *e.get_mut(u) = W::from_usize(bfs.recheable()) / inv_dist;
