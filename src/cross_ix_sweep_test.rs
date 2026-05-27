@@ -176,7 +176,12 @@ fn run_all_algorithms<Ix: IndexType>(
 
     let hierholzer = AlgoHierholzer::new(&graph)?;
     let hierholzer_trail_count = hierholzer.trail_number();
-    let hierholzer_trails_concat = hierholzer.get_all_trails().0.to_vec();
+    let hierholzer_trails_concat = hierholzer
+        .get_all_trails()
+        .0
+        .iter()
+        .map(|d| d.index())
+        .collect::<Vec<usize>>();
 
     let louvain = AlgoGVELouvain::<_, _, _, f64>::new(&graph)?;
     let louvain_community_count = louvain.community_count();
