@@ -11,17 +11,17 @@ use _verify::verify_trails;
 mod _verify {
     use crate::{
         graph::{
-            GraphMemoryMap,
+            self, GraphMemoryMap,
             cache::utils::{FileType, H, cache_file_name},
         },
         shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut},
     };
 
     #[allow(dead_code)]
-    pub(super) fn verify_trails(
-        graph: &GraphMemoryMap,
-        euler_trails: AbstractedProceduralMemoryMut<usize>,
-        euler_index: AbstractedProceduralMemoryMut<usize>,
+    pub(super) fn verify_trails<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+        graph: &GraphMemoryMap<N, E, Ix>,
+        euler_trails: AbstractedProceduralMemoryMut<Ix>,
+        euler_index: AbstractedProceduralMemoryMut<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // trails length == graph width
         if euler_trails.len() != graph.width() {
@@ -74,9 +74,9 @@ mod _verify {
             .enumerate()
             .map(|(idx, end)| {
                 if idx == 0 {
-                    (0, *end)
+                    (0, end.index())
                 } else {
-                    (*euler_index.get(idx - 1), *end)
+                    (euler_index.get(idx - 1).index(), end.index())
                 }
             })
             .collect();
@@ -90,13 +90,13 @@ mod _verify {
                 } else {
                     curr_node + 1
                 };
-                let c_node = euler_trails.get(curr_node);
-                let n_node = euler_trails.get(next_node);
-                let c_neighbours = graph.neighbours(*c_node)?;
+                let c_node = euler_trails.get(curr_node).index();
+                let n_node = euler_trails.get(next_node).index();
+                let c_neighbours = graph.neighbours(c_node)?;
                 let mut found = false;
                 for (idx, dest_node) in c_neighbours.enumerate() {
-                    if dest_node == *n_node {
-                        let b_idx = unsafe { edge_indexes.add(*c_node).read() };
+                    if dest_node == n_node {
+                        let b_idx = unsafe { edge_indexes.add(c_node).read() }.index();
                         let e_idx = b_idx + idx;
                         if !*check.get(e_idx) {
                             // print!(
