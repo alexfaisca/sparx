@@ -697,7 +697,7 @@ impl<T: Debug + Copy + Clone + Eq> SharedQueueMut<T> {
     pub(crate) fn pop(&mut self) -> Option<T> {
         let idx = self
             .read
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
                 if x < self.len.load(Ordering::SeqCst) {
                     Some(x + 1)
                 } else {
