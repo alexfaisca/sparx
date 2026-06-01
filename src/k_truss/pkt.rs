@@ -13,9 +13,9 @@ use std::sync::{Arc, Barrier};
 
 use super::triangles::Triangles;
 
-type ProceduralMemoryPKT = (
-    AbstractedProceduralMemoryMut<usize>,
-    AbstractedProceduralMemoryMut<usize>,
+type ProceduralMemoryPKT<Ix> = (
+    AbstractedProceduralMemoryMut<Ix>,
+    AbstractedProceduralMemoryMut<Ix>,
     AbstractedProceduralMemoryMut<bool>,
     AbstractedProceduralMemoryMut<bool>,
     AbstractedProceduralMemoryMut<bool>,
@@ -144,13 +144,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
-    pub(crate) fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT, Box<dyn std::error::Error>> {
+    pub(crate) fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -158,7 +158,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryPKT,
+        proc_mem: ProceduralMemoryPKT<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -167,7 +167,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryPKT,
+        proc_mem: ProceduralMemoryPKT<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -191,7 +191,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryPKT, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
         let edge_count = self.g.width();
 
         let c_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(0))?;
@@ -200,8 +200,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         let ic_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(3))?;
         let in_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(4))?;
 
-        let curr = SharedSliceMut::<usize>::abst_mem_mut(&c_fn, edge_count, true)?;
-        let next = SharedSliceMut::<usize>::abst_mem_mut(&n_fn, edge_count, true)?;
+        let curr = SharedSliceMut::<Ix>::abst_mem_mut(&c_fn, edge_count, true)?;
+        let next = SharedSliceMut::<Ix>::abst_mem_mut(&n_fn, edge_count, true)?;
         let processed = SharedSliceMut::<bool>::abst_mem_mut(&p_fn, edge_count, true)?;
         let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&ic_fn, edge_count, true)?;
         let in_next = SharedSliceMut::<bool>::abst_mem_mut(&in_fn, edge_count, true)?;
@@ -215,7 +215,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
 
     fn compute_with_proc_mem_impl(
         &self,
-        proc_mem: ProceduralMemoryPKT,
+        proc_mem: ProceduralMemoryPKT<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
@@ -249,8 +249,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                 scope.spawn(move |_| {
                     // initialize edge_out, x, curr, next, in_curr, in_next & processed
                     for edge_offset in begin..end {
-                        *curr.get_mut(edge_offset) = 0;
-                        *next.get_mut(edge_offset) = 0;
+                        *curr.get_mut(edge_offset) = Ix::new(0);
+                        *next.get_mut(edge_offset) = Ix::new(0);
                         *in_curr.get_mut(edge_offset) = false;
                         *in_next.get_mut(edge_offset) = false;
                         *processed.get_mut(edge_offset) = false;
@@ -266,8 +266,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         let mut l: u8 = 1;
         let buff_size = 4096;
         let total_duds = Arc::new(AtomicUsize::new(0));
-        let curr = SharedQueueMut::from_shared_slice(curr.shared_slice());
-        let next = SharedQueueMut::from_shared_slice(next.shared_slice());
+        let curr = SharedQueueMut::<Ix>::from_shared_slice(curr.shared_slice());
+        let next = SharedQueueMut::<Ix>::from_shared_slice(next.shared_slice());
 
         thread::scope(|scope| {
             let mut res = Vec::new();
@@ -292,7 +292,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                 res.push(scope.spawn(
                     move |_| -> Result<Box<[usize]>, Box<dyn std::error::Error + Send + Sync>> {
                         let mut res = vec![0usize; u8::MAX as usize];
-                        let mut buff = vec![0; buff_size];
+                        let mut buff = vec![Ix::new(0); buff_size];
                         let mut i = 0;
 
                         // Remove 0-triangle edges
@@ -324,7 +324,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                         while todo > 0 {
                             for e in begin..end {
                                 if s.get(e).load(Ordering::Relaxed) == l {
-                                    buff[i] = e;
+                                    buff[i] = Ix::new(e);
                                     *in_curr.get_mut(e) = true;
                                     i += 1;
                                 }
@@ -364,6 +364,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                 let end = std::cmp::min(begin + thread_load, curr.len());
 
                                 while let Some(u_v) = curr.pop() {
+                                    let u_v = u_v.index();
                                     let u = neighbours_ptr.get(er.get(u_v).index()).index();
                                     let v = neighbours_ptr.get(u_v).index();
 
@@ -418,7 +419,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                                     s.get(v_w).fetch_sub(1, Ordering::Relaxed);
                                                 if prev_l_v_w == l + 1 {
                                                     *in_next.get_mut(v_w) = true;
-                                                    buff[i] = v_w;
+                                                    buff[i] = Ix::new(v_w);
                                                     i += 1;
                                                     if i == buff_size {
                                                         next.push_slice(&buff[..]);
@@ -432,7 +433,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                                     s.get(w_u).fetch_sub(1, Ordering::Relaxed);
                                                 if prev_l_w_u == l + 1 {
                                                     *in_next.get_mut(w_u) = true;
-                                                    buff[i] = w_u;
+                                                    buff[i] = Ix::new(w_u);
                                                     i += 1;
                                                     if i == buff_size {
                                                         next.push_slice(&buff[..]);
@@ -449,7 +450,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                                     s.get(v_w).fetch_sub(1, Ordering::Relaxed);
                                                 if prev_l_v_w == l + 1 {
                                                     *in_next.get_mut(v_w) = true;
-                                                    buff[i] = v_w;
+                                                    buff[i] = Ix::new(v_w);
                                                     i += 1;
                                                     if i == buff_size {
                                                         next.push_slice(&buff[..]);
@@ -466,7 +467,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                                     s.get(w_u).fetch_sub(1, Ordering::Relaxed);
                                                 if prev_l_w_u == l + 1 {
                                                     *in_next.get_mut(w_u) = true;
-                                                    buff[i] = w_u;
+                                                    buff[i] = Ix::new(w_u);
                                                     i += 1;
                                                     if i == buff_size {
                                                         next.push_slice(&buff[..]);
@@ -487,7 +488,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                     i = 0;
                                 }
                                 for e_idx in begin..end {
-                                    let edge = *to_process.get(e_idx);
+                                    let edge = to_process.get(e_idx).index();
                                     *processed.get_mut(edge) = true;
                                     *in_curr.get_mut(e_idx) = false;
                                     // println
