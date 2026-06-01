@@ -14,10 +14,10 @@ use crate::utils::OneOrMany;
 
 use super::triangles::Triangles;
 
-type ProceduralMemoryBurkhardtEtAl = (
-    AbstractedProceduralMemoryMut<usize>,
-    AbstractedProceduralMemoryMut<usize>,
-    AbstractedProceduralMemoryMut<(usize, usize)>,
+type ProceduralMemoryBurkhardtEtAl<Ix> = (
+    AbstractedProceduralMemoryMut<Ix>,
+    AbstractedProceduralMemoryMut<Ix>,
+    AbstractedProceduralMemoryMut<(Ix, Ix)>,
 );
 
 /// For the computation of a [`GraphMemoryMap`] instance's k-truss decomposition as described in ["Bounds and algorithms for graph trusses"](https://doi.org/10.48550/arXiv.1806.05523) by Burkhardt P. et al.
@@ -119,7 +119,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
     #[inline(always)]
     pub fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryBurkhardtEtAl, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -127,7 +127,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryBurkhardtEtAl, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -135,7 +135,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBurkhardtEtAl,
+        proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -144,7 +144,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBurkhardtEtAl,
+        proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -164,7 +164,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
 
     fn init_cache_mem_impl(
         &self,
-    ) -> Result<ProceduralMemoryBurkhardtEtAl, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
         let edge_count = self.g.width();
         let edge_count2 = self.g.width() * 2;
 
@@ -172,9 +172,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
         let ei_fn = self.g.build_cache_filename(CacheFile::KTrussBEA, Some(1))?;
         let s_fn = self.g.build_cache_filename(CacheFile::KTrussBEA, Some(2))?;
 
-        let edge_list = SharedSliceMut::<usize>::abst_mem_mut(&el_fn, edge_count, true)?;
-        let edge_index = SharedSliceMut::<usize>::abst_mem_mut(&ei_fn, edge_count, true)?;
-        let stack = SharedSliceMut::<(usize, usize)>::abst_mem_mut(&s_fn, edge_count2, true)?;
+        let edge_list = SharedSliceMut::<Ix>::abst_mem_mut(&el_fn, edge_count, true)?;
+        let edge_index = SharedSliceMut::<Ix>::abst_mem_mut(&ei_fn, edge_count, true)?;
+        let stack = SharedSliceMut::<(Ix, Ix)>::abst_mem_mut(&s_fn, edge_count2, true)?;
 
         // pre-initialize the memmapped files if they don't exist
         let _edge_reciprocal = self.g.edge_reciprocal()?;
@@ -185,7 +185,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
 
     fn compute_with_proc_mem_impl(
         &self,
-        proc_mem: ProceduralMemoryBurkhardtEtAl,
+        proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let edge_count = self.g.width();
 
@@ -214,8 +214,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                     for idx in begin..end {
                         // minimum possible trussness
                         *trussness.get_mut(idx) = 2;
-                        *edges.get_mut(idx) = idx;
-                        *edge_index.get_mut(idx) = idx;
+                        *edges.get_mut(idx) = Ix::new(idx);
+                        *edge_index.get_mut(idx) = Ix::new(idx);
                     }
                 });
             }
@@ -225,7 +225,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
         // Algorithm 1 - adjusted for directed scheme, computed by Triangles
         let mut triangles = Triangles::new(self.g)?;
         let tris = triangles.triangles_shares_slice();
-        let mut stack = SharedQueueMut::<(usize, usize)>::from_shared_slice(e_stack.shared_slice());
+        let mut stack = SharedQueueMut::<(Ix, Ix)>::from_shared_slice(e_stack.shared_slice());
 
         // Algorithm 2 - sentinel value is 0
         // blank (u64, usize) value
@@ -241,11 +241,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
             }
             let mut idx = 0;
             while idx < edge_count {
-                let edge_offset = *edge_index.get(idx);
+                let edge_offset = edge_index.get(idx).index();
                 let t_count = tris.get(edge_offset).load(Ordering::Relaxed);
                 if t_count == k {
                     let u = neighbours_ptr.get(er.get(edge_offset).index()).index();
-                    stack.push((u, edge_offset));
+                    stack.push((Ix::new(u), Ix::new(edge_offset)));
                     idx = match idx.overflowing_add(1) {
                         (r, false) => r,
                         _ => {
@@ -263,12 +263,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                         }
                     };
 
-                    let e_index = *edge_index.get(edge_count);
-                    let r_index = *edges.get(edge_offset);
+                    let e_index = edge_index.get(edge_count).index();
+                    let r_index = edges.get(edge_offset).index();
                     *edge_index.get_mut(edge_count) = *edge_index.get(r_index);
-                    *edge_index.get_mut(r_index) = e_index;
-                    *edges.get_mut(edge_offset) = edge_count;
-                    *edges.get_mut(e_index) = r_index;
+                    *edge_index.get_mut(r_index) = Ix::new(e_index);
+                    *edges.get_mut(edge_offset) = Ix::new(edge_count);
+                    *edges.get_mut(e_index) = Ix::new(r_index);
                     // store edge trussness
                     *trussness.get_mut(edge_offset) = k + 1;
                     if k == 1 {
@@ -288,6 +288,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
             let mut neighbours = HashMap::<usize, OneOrMany<usize>>::new();
 
             while let Some((u, offset)) = stack.pop() {
+                let u = u.index();
+                let offset = offset.index();
                 tris.get(offset).store(0, Ordering::Relaxed);
                 // by definition any non-trivial subgraph is at least a 2-truss: other
                 // values go up from there.
@@ -328,10 +330,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                                     && tris.get(w_u).load(Ordering::Relaxed) != 0
                                 {
                                     if tris.get(w_u).fetch_sub(1, Ordering::Relaxed) == k + 1 {
-                                        stack.push((w, w_u));
+                                        stack.push((Ix::new(w), Ix::new(w_u)));
                                     }
                                     if tris.get(v_w).fetch_sub(1, Ordering::Relaxed) == k + 1 {
-                                        stack.push((v, v_w));
+                                        stack.push((Ix::new(v), Ix::new(v_w)));
                                     }
                                 }
                             }
@@ -342,10 +344,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
                                         && tris.get(w_u).load(Ordering::Relaxed) != 0
                                     {
                                         if tris.get(w_u).fetch_sub(1, Ordering::Relaxed) == k + 1 {
-                                            stack.push((w, w_u));
+                                            stack.push((Ix::new(w), Ix::new(w_u)));
                                         }
                                         if tris.get(v_w).fetch_sub(1, Ordering::Relaxed) == k + 1 {
-                                            stack.push((v, v_w));
+                                            stack.push((Ix::new(v), Ix::new(v_w)));
                                         }
                                     }
                                 }
