@@ -23,18 +23,29 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Manually Linking *SparX*](#manually-linking-sparx)
   - [Load & inspect](#loading--inspecting-a-graph)
   - [Run algorithms](#running-algorithms)
+  - [Narrow index types & accumulators](#narrow-index-types--accumulators)
+  - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
 - [Reproducibility](#reproducibility)
   - [Memory Benchmarks](#memory-benchmarks)
   - [Wall-Time Benchmarks](#wall-time-benchmarks)
-- [Plotting results](#plotting-results)
-- [Performance notes](#performance-notes)
 
 ---
 
 ## Features
 
 - Zero-copy, **memory-mapped** graph store: `GraphMemoryMap<N, E, Ix>`
-- Pluggable index types and optional node/edge labels
+- Pluggable index types (`usize`/`u32`/`u16`/`u8`) and optional node/edge labels
+- **Narrow-`Ix` throughout**: every algorithm's internal scratch arrays (not just the graph's own
+  CSR storage) use the graph's chosen `Ix` width, so picking e.g. `u32` on a sub-4-billion-edge
+  graph reduces memory traffic for every traversal, decomposition, and centrality in the crate,
+  not just storage size
+- **Configurable accumulator width** during parsing (`AccumulatorAtomic`: `AtomicUsize`/`AtomicU32`/
+  `AtomicU16`/`AtomicU8`), independent of the final `Ix` --- lets the (hot, streamed-through-once)
+  degree/edge-position accumulation itself run narrower, not just the resulting CSR
+- Cache-entry **`Ix` conversion**: re-encode an existing cache at a different index width without
+  re-parsing the original dataset
+- **Configurable edge/community weight precision** (`Weight`: `f32`/`f64`) for GVE-Louvain,
+  HyperBall, and the exact centralities, independent of `Ix`
 - Cache files + rich **metadata** (`Display` implemented)
 - Algorithms expose summaries and can **drop** local caches
 - Minimal, dependency-free **CSV appenders** to `results/`
@@ -253,27 +264,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GraphMemoryMap::from_file(path, None, Some(32))?;
 
 
-    let mut pkt = AlgoPKT::new(&graph_mmaped)?;
+    let mut pkt = AlgoPKT::new(&g)?;
     // get trussness of edge 0
     let kt = pkt.trussness(0);
     pkt.drop_cache()?;
 
-    let mut burkhardt_et_al = AlgoBurkhardtEtAl::new(&graph_mmaped)?;
+    let mut burkhardt_et_al = AlgoBurkhardtEtAl::new(&g)?;
     // get trussness of all edges
     let kts = burkhardt_et_al.k_trusses();
     burkhardt_et_al.drop_cache()?;
 
-    let mut bz = AlgoBatageljZaversnik::new(&graph_mmaped)?;
+    let mut bz = AlgoBatageljZaversnik::new(&g)?;
     // get coreness of node 0
     let c = bz.coreness(0);
     bz.drop_cache()?;
 
-    let mut liu_et_al = AlgoLiuEtAl::new(&graph_mmaped)?;
+    let mut liu_et_al = AlgoLiuEtAl::new(&g)?;
     // get coreness of all nodes
     let cs = liu_et_al.k_cores();
     liu_et_al.drop_cache()?;
 
-    let mut louvain = AlgoGVELouvain::new(&graph_mmaped)?;
+    let mut louvain = AlgoGVELouvain::new(&g)?;
     let number_communities_found = louvain.community_count();
     let partition_modularity = louvain.partition_modularity();
     // get community of node 0
@@ -284,14 +295,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // hyperball
-    let mut hyperball = HyperBall4::new(&graph_mmaped)?;
+    let mut hyperball = HyperBall4::new(&g)?;
     // get estimate of total distance from node 0 to all nodes in the graph
     let g_dist_0 = hyperball.get_geodesic_distance(0);
     // get estimates of total harmonic distances for all nodes in the graph
     let hg_dists = hyperball.harmonic_geodesic_distances();
     hyperball.drop_cache()?;
     // hyperball with manual precision and word-size configuration
-    let mut hyperball_inner = HyperBallInner::<_, _, _, Precision6, 6>::new(&graph_mmaped)?;
+    let mut hyperball_inner = HyperBallInner::<_, _, _, Precision6, 6>::new(&g)?;
     //get estimates of closeness centrality for all nodes in the graph, normalized by reacheable set
     let r_closeness = hyperball_inner.get_or_compute_closeness_centrality(true)?;
     //get estimates of closeness centrality for all nodes in the graph, normalized by graph size
@@ -300,6 +311,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // drop graph's cache entry
     g.drop_cache()?;
+    Ok(())
+}
+
+```
+
+## Narrow Index Types & Accumulators
+
+`GraphMemoryMap<N, E, Ix>`'s `Ix` type parameter (`usize`, `u32`, `u16`, or `u8`) controls the
+width of *every* node/edge index stored throughout the crate --- not just the graph's own CSR
+offsets/neighbours arrays, but every algorithm's internal scratch buffers too (community
+assignments, coreness/trussness bookkeeping, traversal stacks/queues, Euler trail indices, etc.).
+Choosing a narrower `Ix` that still comfortably fits the graph's node/edge counts reduces memory
+traffic everywhere those buffers are streamed through.
+
+```rust
+use sparx::graph::GraphMemoryMap;
+use portable_atomic::AtomicU32;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = "./datasets/graphs/kmer_V2a.mtx";
+
+    // build directly with a narrower Ix (valid as long as the graph's node/edge counts fit
+    // u32::MAX --- this is checked, and parsing fails loudly otherwise)
+    let g: GraphMemoryMap<(), (), u32> = GraphMemoryMap::from_file(path, None, Some(32))?;
+
+    // the width-matched accumulator used for the (hot, streamed-once) degree/edge-position
+    // accumulation during parsing is independent of Ix, and defaults to AtomicUsize for safety
+    // --- opt into a narrower one explicitly once you know it fits, for reduced memory traffic
+    // during parsing itself:
+    let g_fast: GraphMemoryMap<(), (), u32> =
+        GraphMemoryMap::from_file_with_accumulator::<_, AtomicU32>(path, None, Some(32))?;
+
+    // convert an already-built cache (any Ix) to a narrower one without re-parsing the original
+    // dataset --- yields a new, independent cache entry; fails loudly (rather than silently
+    // truncating) if the graph's node/edge counts don't actually fit the target width
+    let g_default: GraphMemoryMap<(), (), usize> = GraphMemoryMap::from_file(path, None, Some(32))?;
+    let g_u32: GraphMemoryMap<(), (), u32> = g_default.convert_index_type::<u32>()?;
+
+    println!("{} {} {}", g.size(), g_fast.size(), g_u32.size());
+    Ok(())
+}
+
+```
+
+## Configurable Edge/Community Weight Precision
+
+GVE-Louvain, HyperBall, and the exact centralities (`ExactClosenessCentrality`,
+`ExactHarmonicCentrality`, `ExactLinCentrality`) take an additional `W: Weight` type parameter
+(`f32` or `f64`, defaulting to `f64`), independent of `Ix`, controlling the precision of their
+stored edge/community weights and accumulated distances. Narrower `f32` storage reduces memory
+traffic on large graphs; numerically sensitive comparisons (e.g. GVE-Louvain's modularity-gain
+decision) are always computed in `f64` internally regardless of `W`, so narrowing `W` doesn't
+sacrifice correctness.
+
+```rust
+use sparx::communities::gve_louvain::AlgoGVELouvain;
+use sparx::graph::GraphMemoryMap;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = "./datasets/graphs/kmer_V2a.mtx";
+    let g: GraphMemoryMap<(), (), usize> = GraphMemoryMap::from_file(path, None, Some(32))?;
+
+    // f64 weights (default) --- turbofish needed here since Rust doesn't infer defaulted
+    // generic parameters from a bare `::new(...)` call
+    let louvain_f64 = AlgoGVELouvain::<_, _, _, f64>::new(&g)?;
+
+    // f32 weights --- halves the memory traffic of the k/sigma/edge-weight accumulators
+    let louvain_f32 = AlgoGVELouvain::<_, _, _, f32>::new(&g)?;
+
+    println!(
+        "{} {}",
+        louvain_f64.partition_modularity(),
+        louvain_f32.partition_modularity()
+    );
     Ok(())
 }
 
