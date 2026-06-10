@@ -2748,7 +2748,10 @@ unsafe impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 {
 }
 
-#[cfg(feature = "rayon")]
+// Not actually rayon-specific (unlike the structs around it): `Neighbors` is the crate's base
+// sequential neighbour iterator, used unconditionally. `size_hint()` already reports exact
+// bounds (see its `Iterator` impl above), so this marker impl must not be feature-gated, or
+// `cargo build --tests`/`cargo test` fails to compile on default features (no `rayon`).
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactSizeIterator
     for Neighbors<N, E, Ix>
 {
