@@ -322,7 +322,7 @@ fn sandbox_parse<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>
     // println!();
     //
     // let time = Instant::now();
-    // let mut hyperball = HyperBallInner::<_, _, _, Precision6, 6>::new(&graph_mmaped)?;
+    // let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new(&graph_mmaped)?;
     // println!("hyperball {:?}", time.elapsed());
     // hyperball.drop_cache()?;
 
@@ -531,7 +531,7 @@ fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     _louvain.drop_cache()?;
 
     let time = Instant::now();
-    let mut hyperball = HyperBallInner::<_, _, _, Precision6, 6>::new(&graph_mmaped)?;
+    let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new(&graph_mmaped)?;
     println!("hyperball {:?}", time.elapsed());
     hyperball.drop_cache()?;
 
@@ -841,7 +841,7 @@ fn pages_profile_7<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
 
     let time = Instant::now();
-    let mut hyperball = HyperBallInner::<_, _, _, Precision6, 6>::new(&graph_mmaped)?;
+    let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new(&graph_mmaped)?;
     println!("hyperball {:?}", time.elapsed());
     hyperball.drop_cache()?;
 
@@ -910,7 +910,7 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
 
     // for i in 0..100 {
     let time = Instant::now();
-    let mut hyperball = HyperBallInner::<_, _, _, Precision4, 6>::new(&graph_mmaped)?;
+    let mut hyperball = HyperBallInner::<_, _, _, Precision4>::new(&graph_mmaped)?;
     println!("hyperball {:?}", time.elapsed());
     {
         let c = hyperball.compute_closeness_centrality(true)?;

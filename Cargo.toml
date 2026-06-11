@@ -14,9 +14,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-[patch.crates-io]
-hyperloglog-rs = { git = 'https://github.com/LucaCappelletti94/hyperloglog-rs.git', rev = '77e0350' }
-
 [features]
 default = ["mtx", "ggcat", "nodes_edges"]
 # no extra dependencies, just a switch you to pass on to `cargo`
@@ -47,7 +44,6 @@ ordered-float = "5.0.0"
 rand_distr = "0.5.1"
 num_cpus = "1.17.0"
 sys-info = "0.9.1"
-hyperloglog-rs = "0.1.56"
 paste = "1.0.15"
 sha2 = "0.10.9"
 portable-atomic = { version = "1.11.1", features = ["float"] }
@@ -57,3 +53,7 @@ smallvec = "1.15.1"
 rayon = { version = "1.11.0", optional = true }
 dashmap = "6.1.0"
 once_cell = "1.21.3"
+
+[[example]]
+name = "hyperball_timing"
+required-features = ["bench"]
