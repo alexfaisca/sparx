@@ -5,7 +5,7 @@ High-performance **Rust** library for large-scale **static sparse graphs analyti
 - **k-core decomposition** (Batagelj–Zaversnik sequential; Liu et al. parallel)
 - **k-truss decomposition** (Burkhardt et al. sequential; PKT parallel)
 - **Louvain** (GVE-Louvain variant)
-- **HyperBall** (HLL++ distance/centrality estimation)
+- **HyperBall** (HyperLogLog distance/centrality estimation)
 - **Heat Kernel PageRank** (HK-relax --- SSPR/MSPR)
 - Classic traversals/utilities (BFS/DFS, Hierholzer’s Euler trails, clustering coefficient, transitivity, triangle counting, etc.)
 
@@ -301,11 +301,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // get estimates of total harmonic distances for all nodes in the graph
     let hg_dists = hyperball.harmonic_geodesic_distances();
     hyperball.drop_cache()?;
-    // hyperball with manual precision and word-size configuration
-    let mut hyperball_inner = HyperBallInner::<_, _, _, Precision6, 6>::new(&g)?;
+    // hyperball with manual precision configuration
+    let mut hyperball_inner = HyperBallInner::<_, _, _, Precision6>::new(&g)?;
     //get estimates of closeness centrality for all nodes in the graph, normalized by reacheable set
     let r_closeness = hyperball_inner.get_or_compute_closeness_centrality(true)?;
-    //get estimates of closeness centrality for all nodes in the graph, normalized by graph size
+    //get estimates of harmonic centrality for all nodes in the graph, normalized by graph size
     let t_harmonic = hyperball_inner.get_or_compute_harmonic_centrality(false)?;
     hyperball_inner.drop_cache()?;
 
