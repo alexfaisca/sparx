@@ -1326,4 +1326,46 @@ mod test {
         }
         hb.drop_cache().expect("drop cache should succeed");
     }
+
+    /// `HyperBall`'s centralities and the exact ones (`crate::centralities::exact`) must follow
+    /// the same conventions (normalizations, reachable nodes counting the node itself, isolated
+    /// nodes): at precision 16 every value matches the exact one closely.
+    #[test]
+    fn hyperball_agrees_with_exact_centralities() {
+        use crate::centralities::exact::*;
+        let dir = unique_test_dir("hyperball_vs_exact_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+
+        for (name, (n, edges)) in [("debruijn", de_bruijn_edges(4)), ("grid", grid_edges(12))] {
+            let path = dir.join(format!("{name}.mtx"));
+            write_symmetric_mtx(&path, n, &edges);
+            let graph = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+                &path,
+                Some(format!("hb_vs_exact_{name}_{run_tag}")),
+                Some(4),
+            )
+            .expect("graph parse should succeed");
+            let mut hb =
+                HyperBallInner::<VoidLabel, VoidLabel, usize, Precision16, f64>::new(&graph)
+                    .unwrap();
+
+            let closeness = |n| ExactClosenessCentrality::<_, _, _, f64>::new(&graph, n).unwrap();
+            let harmonic = |n| ExactHarmonicCentrality::<_, _, _, f64>::new(&graph, n).unwrap();
+            let pairs: [(&str, Vec<f64>, Vec<f64>); 7] = [
+                ("distance sums", hb.geodesic_distances().to_vec(), closeness(None).centralities().to_vec()),
+                ("inverse distance sums", hb.harmonic_geodesic_distances().to_vec(), harmonic(None).centralities().to_vec()),
+                ("closeness / (|V| - 1)", hb.compute_closeness_centrality(false).unwrap().to_vec(), closeness(Some(false)).centralities().to_vec()),
+                ("closeness / (r - 1)", hb.compute_closeness_centrality(true).unwrap().to_vec(), closeness(Some(true)).centralities().to_vec()),
+                ("harmonic / (|V| - 1)", hb.compute_harmonic_centrality(false).unwrap().to_vec(), harmonic(Some(false)).centralities().to_vec()),
+                ("harmonic / (r - 1)", hb.compute_harmonic_centrality(true).unwrap().to_vec(), harmonic(Some(true)).centralities().to_vec()),
+                ("lin", hb.compute_lins_centrality().unwrap().to_vec(), ExactLinCentrality::<_, _, _, f64>::new(&graph).unwrap().centralities().to_vec()),
+            ];
+            for (what, approx, exact) in pairs {
+                let error = mean_relative_error(approx.into_iter(), exact.into_iter());
+                assert!(error < 0.02, "{name}: {what} mean relative error {error}");
+            }
+            hb.drop_cache().expect("drop cache should succeed");
+        }
+    }
 }

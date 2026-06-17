@@ -222,8 +222,10 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                                                 println!("found isolated node at {u}");
                                                 *e.get_mut(u) = 0.0;
                                             } else {
-                                                *e.get_mut(u) =
-                                                    bfs.recheable() as f64 / bfs.total_distances();
+                                                // reachable nodes other than `u` itself, as in
+                                                // `ExactClosenessCentrality` and *HyperBall*
+                                                *e.get_mut(u) = (bfs.recheable() - 1) as f64
+                                                    / bfs.total_distances();
                                             }
                                         }
                                         Ok(())
