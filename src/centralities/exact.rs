@@ -7,6 +7,15 @@ use crate::trails::bfs::BFSDists;
 
 use crossbeam::thread;
 
+/// Exact closeness centrality of every node, by one BFS per node.
+///
+/// `normalized` selects the value computed for each node `u`, from the sum `d(u)` of its
+/// distances to the nodes it reaches and the number `r(u)` of nodes it reaches (`u` included):
+/// * [`None`] --- `d(u)` itself.
+/// * `Some(false)` --- `(|V| - 1) / d(u)`.
+/// * `Some(true)` --- `(r(u) - 1) / d(u)`.
+///
+/// Nodes reaching no other node get 0.
 pub struct ExactClosenessCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
@@ -193,7 +202,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
                                 if bfs.recheable() <= 1 || bfs.total_distances() == 0. {
                                     *e.get_mut(u) = W::zero();
                                 } else {
-                                    *e.get_mut(u) = W::from_usize(bfs.recheable())
+                                    // reachable nodes other than `u` itself
+                                    *e.get_mut(u) = W::from_usize(bfs.recheable() - 1)
                                         / W::from_f64(bfs.total_distances());
                                 }
                             }
@@ -233,6 +243,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
     }
 }
 
+/// Exact harmonic centrality of every node, by one BFS per node.
+///
+/// `normalized` selects the value computed for each node `u`, from the sum `h(u)` of the inverses
+/// of its distances to the nodes it reaches and the number `r(u)` of nodes it reaches (`u`
+/// included):
+/// * [`None`] --- `h(u)` itself.
+/// * `Some(false)` --- `h(u) / (|V| - 1)`.
+/// * `Some(true)` --- `h(u) / (r(u) - 1)`.
+///
+/// Nodes reaching no other node get 0.
 pub struct ExactHarmonicCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
@@ -419,7 +439,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                                             if d.index() > 0 { W::one() / W::from_usize(d.index()) } else { W::zero() }
                                         })
                                         .fold(W::zero(), |a, b| a + b);
-                                    *e.get_mut(u) = norm / inv_dist;
+                                    *e.get_mut(u) = inv_dist / norm;
                                 }
                             }
                         } else {
@@ -439,7 +459,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
                                             if d.index() > 0 { W::one() / W::from_usize(d.index()) } else { W::zero() }
                                         })
                                         .fold(W::zero(), |a, b| a + b);
-                                    *e.get_mut(u) = W::from_usize(bfs.recheable()) / inv_dist;
+                                    // reachable nodes other than `u` itself
+                                    *e.get_mut(u) = inv_dist / W::from_usize(bfs.recheable() - 1);
                                 }
                             }
                         }
@@ -476,6 +497,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
     }
 }
 
+/// Exact Lin's centrality of every node, by one BFS per node: `r(u)^2 / d(u)`, where `r(u)` is the
+/// number of nodes `u` reaches (`u` included) and `d(u)` the sum of its distances to them, or 1
+/// if `u` reaches no other node.
 pub struct ExactLinCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
@@ -620,8 +644,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
                                     format!("error: {:?}", e).into()
                                 },
                             )?;
+                            // as defined by Boldi P. and Vigna S., a node reaching no other node has
+                            // Lin's centrality 1, and reachable nodes include the node itself
                             if bfs.total_distances() == 0. {
-                                *e.get_mut(u) = W::zero();
+                                *e.get_mut(u) = W::one();
                             } else {
                                 let r = W::from_usize(bfs.recheable());
                                 *e.get_mut(u) = (r * r) / W::from_f64(bfs.total_distances());
@@ -730,8 +756,8 @@ mod test {
         assert_eq!(l_usize, l_u32, "lin: Ix=u32 should match Ix=usize exactly");
         assert_eq!(l_usize, l_u16, "lin: Ix=u16 should match Ix=usize exactly");
 
-        // sanity: every node in a clique reaches the 3 others at distance 1, so each raw
-        // (non-normalized) closeness value should equal 3 and every value should be positive.
+        // sanity: every value should be positive (exact values are checked in
+        // `exact_centralities_match_known_values`).
         for (v, &c) in c_usize.iter().enumerate() {
             assert!(c.is_finite() && c > 0.0, "node {v}: closeness should be positive, got {c}");
         }
@@ -768,5 +794,49 @@ mod test {
                 "node {v}: f64 closeness {c64} and f32 closeness {c32} should be close"
             );
         }
+    }
+
+    /// Path `0 - 1 - 2` plus isolated node `3` (`|V| = 4`, so normalizing by `|V| - 1` and by
+    /// reachable nodes differ), with hand-computed values:
+    /// * distance sums `d = [3, 2, 3, 0]`, inverse distance sums `h = [1.5, 2, 1.5, 0]`,
+    ///   reachable nodes (themselves included) `r = [3, 3, 3, 1]`.
+    #[test]
+    fn exact_centralities_match_known_values() {
+        let dir = unique_test_dir("exact_known_values_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("path_and_isolated.mtx");
+        let mut f = std::fs::File::create(&path).expect("error creating mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "4 4 2").unwrap();
+        writeln!(f, "1 2").unwrap();
+        writeln!(f, "2 3").unwrap();
+        drop(f);
+        let graph = open_graph::<usize>(&path, &format!("exact_known_{run_tag}"));
+        assert_eq!(graph.size(), 4);
+
+        let check = |what: &str, got: &[f64], expected: [f64; 4]| {
+            for (v, (&g, e)) in got.iter().zip(expected).enumerate() {
+                assert!((g - e).abs() < 1e-12, "{what} of node {v}: {g}, expected {e}");
+            }
+        };
+        let closeness = |n| {
+            ExactClosenessCentrality::<_, _, _, f64>::new(&graph, n).unwrap().centralities().to_vec()
+        };
+        let harmonic = |n| {
+            ExactHarmonicCentrality::<_, _, _, f64>::new(&graph, n).unwrap().centralities().to_vec()
+        };
+
+        check("distance sum", &closeness(None), [3., 2., 3., 0.]);
+        check("closeness / (|V| - 1)", &closeness(Some(false)), [1., 1.5, 1., 0.]);
+        check("closeness / (r - 1)", &closeness(Some(true)), [2. / 3., 1., 2. / 3., 0.]);
+        check("inverse distance sum", &harmonic(None), [1.5, 2., 1.5, 0.]);
+        check("harmonic / (|V| - 1)", &harmonic(Some(false)), [0.5, 2. / 3., 0.5, 0.]);
+        check("harmonic / (r - 1)", &harmonic(Some(true)), [0.75, 1., 0.75, 0.]);
+        check(
+            "lin",
+            ExactLinCentrality::<_, _, _, f64>::new(&graph).unwrap().centralities(),
+            [3., 4.5, 3., 1.],
+        );
     }
 }
