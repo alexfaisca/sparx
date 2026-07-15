@@ -3,12 +3,10 @@ use crate::graph::*;
 use crate::shared_slice::*;
 
 use crossbeam::thread;
-use portable_atomic::{AtomicF64, AtomicU8, AtomicUsize, Ordering};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Barrier},
-};
+use portable_atomic::{AtomicF64, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 
+use super::count::{TriangleCount, TriangleCounter};
 use super::triangles::Triangles;
 
 type ProceduralMemoryClusteringCoefficient = ();
@@ -52,6 +50,27 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         Ok(clustering_coefficient)
     }
 
+    /// Computes a [`GraphMemoryMap`] instance's clustering coefficients from precomputed
+    /// `triangles` of `g` (e.g. counted on a GPU, with [`Triangles::new_gpu`]), which are consumed.
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    /// [`Triangles::new_gpu`]: ../triangles/struct.Triangles.html#method.new_gpu
+    pub fn new_with_triangles<Tx: TriangleCount>(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        triangles: Triangles<'a, N, E, Ix, Tx>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
+        let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let mut clustering_coefficient = Self {
+            g,
+            local,
+            transitivity: 0.,
+            local_average: 0.,
+        };
+        clustering_coefficient.compute_with_triangles(triangles)?;
+        Ok(clustering_coefficient)
+    }
+
     /// Getter for the average of clustering coefficients of all nodes.
     pub fn get_average_clustering_coefficient(&self) -> f64 {
         self.local_average
@@ -91,6 +110,23 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     /// * `mmap` --- the level of memmapping to be used during the computation (*experimental feature*).
     ///
     pub fn compute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_with_triangles(Triangles::new(self.g)?)
+    }
+
+    /// Computes the clustering coefficients from the graph's `triangles` (which are consumed).
+    fn compute_with_triangles<Tx: TriangleCount>(
+        &mut self,
+        mut triangles: Triangles<'a, N, E, Ix, Tx>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if triangles.all_triangles().len() != self.g.width() {
+            return Err(format!(
+                "error expected the triangles of a graph with {} edges, got {}",
+                self.g.width(),
+                triangles.all_triangles().len()
+            )
+            .into());
+        }
+
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
@@ -101,7 +137,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // Shared atomic & simple arrays for counts and trussness
-        let mut triangles = Triangles::new(self.g)?;
         let tris = triangles.triangles_shares_slice();
 
         // Thread syncronization
@@ -114,7 +149,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         thread::scope(|scope| {
             for tid in 0..threads {
                 let mut local = self.local.shared_slice();
-                let mut tris = tris.clone();
+                let tris = tris.clone();
 
                 let total_possible_triangles = total_possible_triangles.clone();
                 let total_triangles = total_triangles.clone();
@@ -126,24 +161,22 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                 let end = std::cmp::min(begin + thread_load, node_count);
 
                 scope.spawn(move |_| {
-                    let mut total_triangles_t = 0;
-                    // initialize triangle_count with zeroes
-                    let edge_begin = index_ptr.get(begin).index();
-                    let edge_end = index_ptr.get(end).index();
-                    for idx in edge_begin..edge_end {
-                        *tris.get_mut(idx) = AtomicU8::new(0);
-                    }
+                    // sum of the thread's edges' triangle counts
+                    let mut total_triangles_t: usize = 0;
 
-                    synchronize.wait();
-
-                    let mut all_neighbours = HashSet::<usize>::new();
                     for u in begin..end {
+                        // distinct neighbours: lists are sorted, so parallel edges are adjacent
+                        let mut n_len = 0;
+                        let mut prev = None;
                         for j in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                             let v = neighbours_ptr.get(j).index();
-                            all_neighbours.insert(v);
-                            total_triangles_t += tris.get(j).load(Ordering::Relaxed);
+                            // a self-loop doesn't make `u` its own neighbour
+                            if v != u && prev != Some(v) {
+                                n_len += 1;
+                            }
+                            prev = Some(v);
+                            total_triangles_t += tris.get(j).count();
                         }
-                        let n_len = all_neighbours.len();
                         // #possible edges between neighbours = k * (k - 1) / 2
                         let n_possible_triangles = if n_len > 1 {
                             n_len as f64 * (n_len - 1) as f64 / 2.
@@ -152,16 +185,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                         };
                         total_possible_triangles.fetch_add(n_possible_triangles, Ordering::Relaxed);
                         *local.get_mut(u) = n_possible_triangles;
-                        all_neighbours.clear();
                     }
 
-                    total_triangles.add((total_triangles_t / 3) as usize, Ordering::Relaxed);
+                    total_triangles.add(total_triangles_t, Ordering::Relaxed);
                     synchronize.wait();
 
                     for u in begin..end {
                         let mut u_triangles: usize = 0;
                         for edge_idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
-                            u_triangles += tris.get(edge_idx).load(Ordering::Relaxed) as usize;
+                            u_triangles += tris.get(edge_idx).count();
                         }
                         let undirected_triangles = u_triangles.div_ceil(2) as f64;
                         let possible_triangles = *local.get(u);
@@ -179,13 +211,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
 
         self.local_average = local_clustering_sum.load(Ordering::Relaxed) / node_count as f64;
+        // every triangle counts once for each of its 6 (directed) edges, so the sum of all
+        // edges' counts is 6 * triangles, and transitivity = 3 * triangles / connected triples
         self.transitivity = total_triangles.load(Ordering::Relaxed) as f64
             / 2.
             / total_possible_triangles.load(Ordering::Relaxed);
 
         // cleanup cache
         triangles.drop_cache()?;
-        self.g.cleanup_cache(CacheFile::ClusteringCoefficient)?;
 
         Ok(())
     }

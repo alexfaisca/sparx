@@ -339,6 +339,14 @@ pub enum CacheFile {
     Triangles,
     KTrussBEA,
     KTrussPKT,
+    /// Triangle counts of a directed graph, of a given type.
+    DirectedTriangles(crate::k_truss::directed::DirectedTriangleType),
+    /// *Burkhardt et al.*'s k-truss decomposition of a directed graph, for a given triangle type.
+    KTrussBEADirected(crate::k_truss::directed::DirectedTriangleType),
+    /// *PKT*'s k-truss decomposition of a directed graph, for a given triangle type.
+    KTrussPKTDirected(crate::k_truss::directed::DirectedTriangleType),
+    /// A directed graph's in and out neighbours, merged (working memory of directed triangles).
+    DirectedAdjacency,
     ClusteringCoefficient,
     EdgeReciprocal,
     EdgeOver,
@@ -804,6 +812,27 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         seq: Option<usize>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         self.graph_cache.build_cache_filename(file_type, seq)
+    }
+
+    /// Removes the [`GraphMemoryMap`] instance's cached `.tmp` files of a given [`CacheFile`]
+    /// with the given sequence numbers (those that exist) --- unlike [`cleanup_cache`], without
+    /// listing the whole cache directory.
+    ///
+    /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
+    /// [`CacheFile`]: ./enum.CacheFile.html#
+    /// [`cleanup_cache`]: #method.cleanup_cache
+    pub(crate) fn remove_tmp_files(
+        &self,
+        target: CacheFile,
+        seqs: std::ops::Range<usize>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for seq in seqs {
+            match std::fs::remove_file(self.build_cache_filename(target.clone(), Some(seq))?) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Remove [`GraphMemoryMap`] instance's cached `.tmp` files for a given [`CacheFile`] in the cache directory.

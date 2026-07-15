@@ -2,6 +2,13 @@
 //!
 //! cargo run --release --features bench --example hyperball_timing -- <graph> [threads] [precision]
 //!
+//! With the `gpu` feature and a 4th argument `gpu`, instead runs *HyperBall* on the CPU and on the
+//! GPU, timing both and checking they agree (`gpu-triangles` does the same for triangle counting).
+//!
+//! With a 4th argument `ktruss`, instead times triangle counting, both k-truss decompositions and
+//! the clustering coefficients on the CPU (printing checksums of their results); `ktruss-directed`
+//! does the same for directed triangles and trusses of a few types.
+//!
 //! With `<graph>` = `micro`, instead times the two per-edge/per-node counter operations of an
 //! iteration (union and cardinality estimation) in isolation, single-threaded.
 use sparx::centralities::hyper_ball::*;
@@ -40,6 +47,221 @@ fn run<P: Precision>(
         println!("  iter {i:>4}: {t:?}");
     }
     hb.drop_cache()?;
+    Ok(())
+}
+
+#[cfg(feature = "gpu")]
+fn compare_gpu<P: Precision>(
+    graph: &GraphMemoryMap<(), (), u32>,
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sparx::gpu::{GpuBackend, WgpuBackend};
+
+    let time = Instant::now();
+    let mut cpu = HyperBallInner::<(), (), u32, P, f64>::new_with_conf(graph, None, threads)?;
+    println!("CPU: {:?}, {} iterations", time.elapsed(), cpu.get_iters());
+    // both runs use the same cache files, so keep the CPU results in memory
+    let cpu_counters = cpu.counters().to_vec();
+    let cpu_distances = cpu.geodesic_distances().to_vec();
+    let cpu_iters = cpu.get_iters();
+    cpu.drop_cache()?;
+
+    let time = Instant::now();
+    let backend = WgpuBackend::new()?;
+    println!(
+        "GPU: adapter {:?} in {:?}",
+        backend.adapter_info().name,
+        time.elapsed()
+    );
+    let time = Instant::now();
+    let device_graph = backend.upload_graph(graph)?;
+    println!("GPU: graph uploaded in {:?}", time.elapsed());
+    let time = Instant::now();
+    let mut gpu =
+        HyperBallInner::<(), (), u32, P, f64>::new_gpu(graph, &backend, &device_graph, None)?;
+    println!("GPU: {:?}, {} iterations", time.elapsed(), gpu.get_iters());
+
+    let differing = cpu_counters
+        .iter()
+        .zip(gpu.counters())
+        .filter(|(c, g)| c != g)
+        .count();
+    let max_relative = cpu_distances
+        .iter()
+        .zip(gpu.geodesic_distances())
+        .map(|(&c, &g)| (g - c).abs() / c.abs().max(1.))
+        .fold(0f64, f64::max);
+    println!(
+        "same iterations: {}, differing counters: {differing}, max relative distance difference: {max_relative:e}",
+        cpu_iters == gpu.get_iters()
+    );
+    gpu.drop_cache()?;
+    Ok(())
+}
+
+#[cfg(feature = "gpu")]
+fn compare_gpu_triangles(
+    graph: &GraphMemoryMap<(), (), u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use portable_atomic::Ordering;
+    use sparx::gpu::{GpuBackend, WgpuBackend};
+    use sparx::k_truss::triangles::Triangles;
+
+    // computed (and cached) once, used by both
+    let time = Instant::now();
+    graph.edge_over()?;
+    graph.edge_reciprocal()?;
+    println!("edge over and reciprocals: {:?}", time.elapsed());
+
+    let time = Instant::now();
+    let mut cpu = Triangles::new(graph)?;
+    println!("CPU: {:?}", time.elapsed());
+    let cpu_counts: Vec<u8> = cpu
+        .all_triangles()
+        .iter()
+        .map(|c| c.load(Ordering::Relaxed))
+        .collect();
+    cpu.drop_cache()?;
+
+    let backend = WgpuBackend::new()?;
+    let time = Instant::now();
+    let device_graph = backend.upload_graph(graph)?;
+    println!(
+        "GPU ({:?}): graph uploaded in {:?}",
+        backend.adapter_info().name,
+        time.elapsed()
+    );
+    let time = Instant::now();
+    let mut gpu = Triangles::new_gpu(graph, &backend, &device_graph)?;
+    println!("GPU: {:?}", time.elapsed());
+
+    let differing = cpu_counts
+        .iter()
+        .zip(gpu.all_triangles())
+        .filter(|(c, g)| **c != g.load(Ordering::Relaxed))
+        .count();
+    let triangles: u64 = cpu_counts.iter().map(|&c| c as u64).sum::<u64>() / 6;
+    println!("triangles: {triangles}, differing edge counts: {differing}");
+    gpu.drop_cache()?;
+    Ok(())
+}
+
+fn time_ktruss(
+    graph: &GraphMemoryMap<(), (), u32>,
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use portable_atomic::Ordering;
+    use sparx::k_truss::{
+        burkhardt_et_al::AlgoBurkhardtEtAl, clustering_coefficient::ClusteringCoefficient,
+        pkt::AlgoPKT, triangles::Triangles,
+    };
+    let checksum = |values: &mut dyn Iterator<Item = u64>| {
+        values.fold(0u64, |h, v| {
+            h.wrapping_mul(0x100_0000_01B3).wrapping_add(v + 1)
+        })
+    };
+
+    // computed (and cached) once, used by all
+    let time = Instant::now();
+    graph.edge_over()?;
+    graph.edge_reciprocal()?;
+    println!("edge over and reciprocals: {:?}", time.elapsed());
+
+    let time = Instant::now();
+    let mut triangles = Triangles::new(graph)?;
+    let elapsed = time.elapsed();
+    let counts = triangles.all_triangles();
+    println!(
+        "triangles: {elapsed:?} (max per edge {}, checksum {:x})",
+        counts
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0),
+        checksum(&mut counts.iter().map(|c| c.load(Ordering::Relaxed) as u64))
+    );
+    triangles.drop_cache()?;
+
+    let time = Instant::now();
+    let mut pkt = AlgoPKT::new_with_conf(graph, threads)?;
+    let elapsed = time.elapsed();
+    println!(
+        "pkt: {elapsed:?} (max trussness {}, checksum {:x})",
+        pkt.k_trusses().iter().max().unwrap_or(&0),
+        checksum(&mut pkt.k_trusses().iter().map(|&k| k as u64))
+    );
+    let pkt_trussness = pkt.k_trusses().to_vec();
+    pkt.drop_cache()?;
+
+    let time = Instant::now();
+    let mut bea = AlgoBurkhardtEtAl::new(graph)?;
+    let elapsed = time.elapsed();
+    println!(
+        "burkhardt et al.: {elapsed:?} (agrees with pkt: {})",
+        bea.k_trusses() == pkt_trussness.as_slice()
+    );
+    bea.drop_cache()?;
+
+    let time = Instant::now();
+    let cc = ClusteringCoefficient::new(graph)?;
+    println!(
+        "clustering coefficient: {:?} (average {}, transitivity {})",
+        time.elapsed(),
+        cc.get_average_clustering_coefficient(),
+        cc.get_graph_transitivity()
+    );
+    Ok(())
+}
+
+fn time_ktruss_directed(
+    graph: &GraphMemoryMap<(), (), u32>,
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sparx::k_truss::count::TriangleCounter;
+    use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
+    use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT};
+    let checksum = |values: &mut dyn Iterator<Item = u64>| {
+        values.fold(0u64, |h, v| {
+            h.wrapping_mul(0x100_0000_01B3).wrapping_add(v + 1)
+        })
+    };
+    for t in [
+        DirectedTriangleType::Cycle,
+        DirectedTriangleType::Out,
+        DirectedTriangleType::FeedForward,
+        DirectedTriangleType::CycleFeedForward,
+    ] {
+        let time = Instant::now();
+        let mut triangles = DirectedTriangles::<_, _, _, u16>::new_tx(graph, t)?;
+        let elapsed = time.elapsed();
+        let counts = triangles.all_triangles();
+        println!(
+            "{t:?} triangles: {elapsed:?} (max per edge {}, checksum {:x})",
+            counts.iter().map(|c| c.count()).max().unwrap_or(0),
+            checksum(&mut counts.iter().map(|c| c.count() as u64))
+        );
+        triangles.drop_cache()?;
+
+        let time = Instant::now();
+        let mut pkt = AlgoPKT::<_, _, _, u16>::new_directed_tx(graph, t, threads)?;
+        let elapsed = time.elapsed();
+        println!(
+            "{t:?} pkt: {elapsed:?} (max trussness {}, checksum {:x})",
+            pkt.k_trusses().iter().max().unwrap_or(&0),
+            checksum(&mut pkt.k_trusses().iter().map(|&k| k as u64))
+        );
+        let pkt_trussness = pkt.k_trusses().to_vec();
+        pkt.drop_cache()?;
+
+        let time = Instant::now();
+        let mut bea = AlgoBurkhardtEtAl::<_, _, _, u16>::new_directed_tx(graph, t)?;
+        println!(
+            "{t:?} burkhardt et al.: {:?} (agrees with pkt: {})",
+            time.elapsed(),
+            bea.k_trusses() == pkt_trussness.as_slice()
+        );
+        bea.drop_cache()?;
+    }
     Ok(())
 }
 
@@ -114,6 +336,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph.width(),
         time.elapsed()
     );
+
+    if args.get(4).is_some_and(|a| a == "ktruss-directed") {
+        return time_ktruss_directed(&graph, threads as usize);
+    }
+    if args.get(4).is_some_and(|a| a == "ktruss") {
+        return time_ktruss(&graph, threads as usize);
+    }
+    if args.get(4).is_some_and(|a| a == "gpu-triangles") {
+        #[cfg(feature = "gpu")]
+        return compare_gpu_triangles(&graph);
+        #[cfg(not(feature = "gpu"))]
+        return Err("the gpu comparison needs the `gpu` feature".into());
+    }
+    if args.get(4).is_some_and(|a| a == "gpu") {
+        #[cfg(feature = "gpu")]
+        return match precision {
+            4 => compare_gpu::<Precision4>(&graph, threads as usize),
+            6 => compare_gpu::<Precision6>(&graph, threads as usize),
+            8 => compare_gpu::<Precision8>(&graph, threads as usize),
+            p => Err(format!("unsupported precision {p} (use 4, 6 or 8)").into()),
+        };
+        #[cfg(not(feature = "gpu"))]
+        return Err("the gpu comparison needs the `gpu` feature".into());
+    }
 
     match precision {
         4 => run::<Precision4>(&graph, threads as usize),

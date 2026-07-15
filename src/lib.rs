@@ -9,6 +9,8 @@ mod cross_ix_sweep_test;
 pub mod centralities;
 pub mod communities;
 pub mod graph;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod k_core;
 pub mod k_truss;
 pub mod trails;
