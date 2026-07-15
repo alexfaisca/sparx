@@ -147,6 +147,19 @@ impl<P: Precision> HyperLogLog<P> {
         self.registers.as_ref()
     }
 
+    /// Views `counters` as their registers, counter after counter (`REGISTERS` bytes each) ---
+    /// the layout GPU backends work on.
+    pub fn registers_of_mut(counters: &mut [Self]) -> &mut [u8] {
+        // SAFETY: `HyperLogLog` is `repr(transparent)` over a `[u8; REGISTERS]`, so a slice of
+        // counters is a contiguous, initialized, `u8` aligned run of `len * REGISTERS` bytes
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                counters.as_mut_ptr() as *mut u8,
+                counters.len() * Self::REGISTERS,
+            )
+        }
+    }
+
     /// Estimates the number of distinct elements added to the counter.
     pub fn estimate_cardinality(&self) -> f64 {
         const LANES: usize = 8;

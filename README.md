@@ -25,6 +25,8 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Run algorithms](#running-algorithms)
   - [Narrow index types & accumulators](#narrow-index-types--accumulators)
   - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
+  - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
+  - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
 - [Reproducibility](#reproducibility)
   - [Memory Benchmarks](#memory-benchmarks)
   - [Wall-Time Benchmarks](#wall-time-benchmarks)
@@ -389,6 +391,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 ```
+
+## Triangle Counts, Trussness Widths & Directed Triangles
+
+Per-edge triangle counts and trussness values are `Tx` integers (`u8`, `u16`, `u32` or `u64`), like
+the graph's `Ix`: `u8` (the default, used by `new`, `get_or_compute`, ...) keeps them small for
+large sparse graphs, while wider ones handle dense graphs and multigraphs with many parallel edges
+(the `_tx` constructors). Counts that don't fit fail with an error, never wrap around. Parallel edges
+count once per combination of edges closing a triangle.
+
+Directed graphs have their own entry points. Seen from an edge `u -> v`, a third node `w` closes a
+triangle in one of four roles: `Cycle` (`v -> w -> u`), `Out` (`u -> w`, `v -> w`), `In` (`w -> u`,
+`w -> v`) or `Middleman` (`u -> w -> v`); a feed-forward triangle holds one edge in each of the last
+three. `DirectedTriangleType` selects any combination of roles (`Cycle`, `Out`, ..., `FeedForward`,
+`CycleFeedForward`, every one of the 15), each cached in its own files (`cycle_triangles`,
+`feedforward_ktrusspkt`, ...). The k-truss decompositions of a type keep, in the `k`-truss, edges in
+at least `k - 2` triangles of the `k`-truss in a selected role (`Cycle` gives cycle trusses,
+`FeedForward` flow trusses).
+
+```rust
+use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
+use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
+
+// undirected triangles and trussness as u32s
+let triangles = Triangles::<_, _, _, u32>::new_tx(&g)?;
+let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 16)?;
+
+// directed triangles (u8 counts) and cycle trusses (u16 trussness)
+let cycles = DirectedTriangles::new(&g, DirectedTriangleType::Cycle)?;
+let cycle_trusses = AlgoPKT::<_, _, _, u16>::new_directed_tx(&g, DirectedTriangleType::Cycle, 16)?;
+let flow_trusses = AlgoBurkhardtEtAl::new_directed(&g, DirectedTriangleType::FeedForward)?;
+```
+
+## GPU HyperBall & Triangles
+
+With the `gpu` feature, *HyperBall* and per-edge triangle counting can run on a GPU through
+[wgpu](https://wgpu.rs) (Vulkan, Metal or DX12, so on GPUs of any vendor). The graph's CSR is
+uploaded once and can be reused by several runs; results (and cached files) are the same as on
+the CPU --- *HyperBall*'s counters bit for bit, while its distance accumulators are computed in
+`f32` (relative error ~`1e-6`, far below *HyperLogLog*'s own). Triangles counted on the GPU can
+feed the k-truss decompositions and clustering coefficients (`new_with_triangles`).
+
+```rust
+use sparx::centralities::hyper_ball::{HyperBallInner, Precision6};
+use sparx::gpu::{GpuBackend, WgpuBackend};
+use sparx::k_truss::{pkt::AlgoPKT, triangles::Triangles};
+
+let backend = WgpuBackend::new()?;
+let device_graph = backend.upload_graph(&g)?;
+
+let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new_gpu(&g, &backend, &device_graph, None)?;
+let closeness = hyperball.get_or_compute_closeness_centrality(true)?;
+
+let triangles = Triangles::new_gpu(&g, &backend, &device_graph)?;
+let pkt = AlgoPKT::new_with_triangles(&g, triangles)?;
+```
+
+A run's data must fit in GPU memory (*HyperBall*: `2 * |V| * 2^precision` bytes of counters,
+plus `~16 * |V| + 4 * |E|` bytes; triangles: `~12 * |E| + 8 * |V|` bytes). *HyperBall*'s
+counters are split across as many GPU buffers as needed, while each of the other arrays must fit
+in a single one (typically up to 4 GB, e.g. ~1B edges); runs that don't fit fail up front with an
+error. `WGPU_BACKEND` and `WGPU_ADAPTER_NAME` select a backend/adapter --- without a GPU, Mesa's
+lavapipe (a software Vulkan driver) runs the same kernels on the CPU, which is how the GPU tests
+(`cargo test --features gpu`) run on machines without one.
 
 # Reproducibility
 

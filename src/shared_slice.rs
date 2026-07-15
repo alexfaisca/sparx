@@ -664,7 +664,8 @@ impl<T: Debug + Copy + Clone + Eq> SharedQueueMut<T> {
 
     pub(crate) fn push_slice(&mut self, slice: &[T]) -> Option<usize> {
         let write_idx = self.write.fetch_add(slice.len(), Ordering::SeqCst);
-        if write_idx + slice.len() < self.max {
+        // `<=`: a slice filling the queue exactly fits
+        if write_idx + slice.len() <= self.max {
             unsafe {
                 std::ptr::copy_nonoverlapping(slice.as_ptr(), self.ptr.add(write_idx), slice.len());
             };
@@ -710,6 +711,25 @@ impl<T: Debug + Copy + Clone + Eq> SharedQueueMut<T> {
         } else {
             None
         }
+    }
+
+    /// Pops up to `max` elements at once (fewer contended updates than [`pop`](Self::pop)ping
+    /// them one by one), or `None` if the queue is empty.
+    pub(crate) fn pop_chunk(&mut self, max: usize) -> Option<&[T]> {
+        let start = self
+            .read
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
+                let len = self.len.load(Ordering::SeqCst);
+                if x < len {
+                    Some(std::cmp::min(x + max, len))
+                } else {
+                    None
+                }
+            })
+            .ok()?;
+        let end = std::cmp::min(start + max, self.len.load(Ordering::SeqCst));
+        // SAFETY: `start..end` was claimed (exclusively) by the update above, and was pushed
+        Some(unsafe { std::slice::from_raw_parts(self.ptr.add(start), end - start) })
     }
 
     #[inline(always)]
@@ -1305,20 +1325,36 @@ mod tests {
         assert_eq!(&buf[..7], &[1, 2, 3, 4, 5, 6, 7]);
     }
 
-    // --- push_slice exact-fit exposes off-by-one (current code uses `<`) -----
+    // --- pop_chunk claims disjoint chunks covering every element once ---------
 
     #[test]
-    fn push_slice_exact_fit_exposes_off_by_one() {
+    fn pop_chunk_claims_each_element_once() {
+        let (mut q, mut _buf) = make_queue_u64(10);
+        q.push_slice(&[1, 2, 3, 4, 5, 6, 7]).unwrap();
+        assert_eq!(q.pop_chunk(3), Some(&[1, 2, 3][..]));
+        assert_eq!(q.pop(), Some(4));
+        assert_eq!(q.pop_chunk(5), Some(&[5, 6, 7][..]));
+        assert_eq!(q.pop_chunk(5), None);
+        assert_eq!(q.pop(), None);
+    }
+
+    // --- push_slice exact fit (a full queue's worth) succeeds, one more doesn't ---
+
+    #[test]
+    fn push_slice_exact_fit_succeeds() {
         let (mut q, mut _buf) = make_queue_u64(5);
-        // Exact fit from empty
-        // Current implementation checks `write_idx + slice.len() < max` (strict),
-        // so this *fails*. If you change it to `<=`, this test should be updated.
-        let res = q.push_slice(&[1, 2, 3, 4, 5]);
-        assert!(
-            res.is_none(),
-            "Exact-fit should succeed; current '<' guard rejects it. \
-             Change to `<=` in push_slice to allow exact fits."
+        assert_eq!(
+            q.push_slice(&[1, 2, 3, 4, 5]),
+            Some(0),
+            "an exact fit should succeed"
         );
+        assert_eq!(q.len(), 5);
+        assert_eq!(
+            q.push_slice(&[6]),
+            None,
+            "a full queue should reject more elements"
+        );
+        assert_eq!(q.len(), 5);
     }
 
     // --- slice() respects read pointer (clamps to unread region) --------------

@@ -270,6 +270,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         self.inverse_distances.as_slice()
     }
 
+    /// Gets (from a previously cached result) each node's *HyperLogLog* counter of the nodes it
+    /// reaches (its ball, after the last iteration).
+    pub fn counters(&self) -> &[HyperLogLog<P>] {
+        self.counters.as_slice()
+    }
+
     /// Gets (from a previously cached result) the approximation of each node's *Closeness Centrality* from their respective distance accumulator (and if normalization was used, possibly, their respective *HyperLogLog* counter estimation).
     ///
     /// # Arguments
@@ -590,6 +596,58 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     }
 }
 
+#[cfg(feature = "gpu")]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight>
+    HyperBallInner<'a, N, E, Ix, P, W>
+{
+    /// Performs the *HyperBall Algorithm* on a GPU, with the same results (and cached files) as
+    /// [`new_with_conf`], but for accumulators computed in `f32` (relative error ~`1e-6`, far below
+    /// *HyperLogLog*'s).
+    ///
+    /// # Arguments
+    ///
+    /// * `g` --- the [`GraphMemoryMap`] instance for which the *HyperBall Algorithm* is to be performed in.
+    /// * `backend` --- the GPU backend to compute on.
+    /// * `graph` --- `g` in the backend's device memory, see [`GpuBackend::upload_graph`].
+    /// * `max_depth` --- the maximum number of iterations of the *HyperBall Algorithm* to tolerate before convergence is achieved (defaults to 100, clamped to `1..=1024`).
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    /// [`new_with_conf`]: #method.new_with_conf
+    /// [`GpuBackend::upload_graph`]: ../../gpu/trait.GpuBackend.html#tymethod.upload_graph
+    pub fn new_gpu<B: crate::gpu::GpuBackend>(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        backend: &B,
+        graph: &B::Graph,
+        max_depth: Option<usize>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let node_count = g.size();
+        let mut hb = Self::new_no_compute_impl(g, max_depth, g.thread_num())?;
+
+        let params = crate::gpu::HyperBallGpuParams {
+            registers: HyperLogLog::<P>::REGISTERS,
+            max_rank: (64 - P::EXPONENT + 1) as u8,
+            max_iterations: hb.max_t,
+        };
+        let counters = HyperLogLog::<P>::registers_of_mut(hb.counters.as_mut_slice());
+        let mut accumulators = vec![[0f32; 2]; node_count];
+        let _iters = backend.hyperball(graph, params, counters, &mut accumulators)?;
+
+        for (u, [distance, inverse_distance]) in accumulators.into_iter().enumerate() {
+            *hb.distances.get_mut(u) = W::from_f32(distance);
+            *hb.inverse_distances.get_mut(u) = W::from_f32(inverse_distance);
+        }
+        #[cfg(any(test, feature = "bench"))]
+        {
+            hb.iters = _iters;
+        }
+
+        hb.counters.flush_async()?;
+        hb.distances.flush_async()?;
+        hb.inverse_distances.flush_async()?;
+        Ok(hb)
+    }
+}
+
 #[allow(dead_code)]
 /// HyperBall engine functions.
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight>
@@ -789,7 +847,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let mut inv_t: W = W::one(); // first iteration is initialization
         let mut changed = 0;
 
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         let iters = Arc::new(AtomicUsize::new(0));
         #[cfg(feature = "bench")]
         let iter_times = std::sync::Mutex::new(Vec::<std::time::Duration>::new());
@@ -808,7 +866,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                     let global_changed = Arc::clone(&global_changed);
                     let synchronize = Arc::clone(&synchronize);
                     let failed = Arc::clone(&failed);
-                    #[cfg(feature = "bench")]
+                    #[cfg(any(test, feature = "bench"))]
                     let iters = iters.clone();
                     #[cfg(feature = "bench")]
                     let iter_times = &iter_times;
@@ -825,7 +883,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                             loop {
                                 #[cfg(feature = "bench")]
                                 let iter_start = std::time::Instant::now();
-                                #[cfg(feature = "bench")]
+                                #[cfg(any(test, feature = "bench"))]
                                 if tid == 0 {
                                     iters.add(1, Ordering::Relaxed);
                                 }
@@ -924,9 +982,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         .map_err(|e| -> Box<dyn std::error::Error> { format!("error HyperBall {:?}", e).into() })?
         .map_err(|e| -> Box<dyn std::error::Error> { format!("error HyperBall {:?}", e).into() })?;
 
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         {
             self.iters = iters.load(Ordering::Relaxed);
+        }
+        #[cfg(feature = "bench")]
+        {
             self.iter_times = iter_times.into_inner().unwrap();
         }
 
@@ -1367,5 +1428,207 @@ mod test {
             }
             hb.drop_cache().expect("drop cache should succeed");
         }
+    }
+
+    /// Writes `edges` (0-based, directed) as a general MatrixMarket file over `n` nodes.
+    #[cfg(feature = "gpu")]
+    fn write_directed_mtx(path: &std::path::Path, n: usize, edges: &[(usize, usize)]) {
+        let mut f = std::fs::File::create(path).expect("error creating mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern general").unwrap();
+        writeln!(f, "{n} {n} {}", edges.len()).unwrap();
+        for &(u, v) in edges {
+            writeln!(f, "{} {}", u + 1, v + 1).unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// `n` nodes with `out_degree` pseudo-random (fixed seed) out-neighbours each.
+    #[cfg(feature = "gpu")]
+    fn random_directed_edges(n: usize, out_degree: usize) -> Vec<(usize, usize)> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut edges = std::collections::BTreeSet::new();
+        for u in 0..n {
+            for _ in 0..out_degree {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let v = (state % n as u64) as usize;
+                if u != v {
+                    edges.insert((u, v));
+                }
+            }
+        }
+        edges.into_iter().collect()
+    }
+
+    /// The GPU backend, or `None` (skipping the test) on machines without any GPU adapter.
+    #[cfg(feature = "gpu")]
+    fn gpu_backend() -> Option<crate::gpu::WgpuBackend> {
+        match crate::gpu::WgpuBackend::new() {
+            Ok(backend) => {
+                eprintln!("GPU tests run on {:?}", backend.adapter_info().name);
+                Some(backend)
+            }
+            Err(e) => {
+                eprintln!("skipping GPU test, no GPU adapter: {e}");
+                None
+            }
+        }
+    }
+
+    /// Runs `HyperBall` on the CPU and on the GPU (separate graph ids, so separate cache files),
+    /// asserting identical counters (unions are exact) and iteration counts, and accumulators
+    /// equal up to `f32` rounding.
+    #[cfg(feature = "gpu")]
+    fn assert_gpu_matches_cpu<P: Precision>(
+        backend: &crate::gpu::WgpuBackend,
+        path: &std::path::Path,
+        id: &str,
+        max_depth: Option<usize>,
+    ) {
+        use crate::gpu::GpuBackend;
+        let open = |suffix: &str| {
+            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+                path,
+                Some(format!("{id}_{suffix}")),
+                Some(4),
+            )
+            .expect("graph parse should succeed")
+        };
+        let cpu_graph = open("cpu");
+        let gpu_graph = open("gpu");
+        let what = format!("{id} precision {}", P::EXPONENT);
+
+        let mut cpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64>::new_with_conf(
+            &cpu_graph, max_depth, 4,
+        )
+        .unwrap_or_else(|e| panic!("{what}: CPU hyperball should succeed: {e}"));
+        let device_graph = backend.upload_graph(&gpu_graph).expect("graph upload should succeed");
+        let mut gpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64>::new_gpu(
+            &gpu_graph,
+            backend,
+            &device_graph,
+            max_depth,
+        )
+        .unwrap_or_else(|e| panic!("{what}: GPU hyperball should succeed: {e}"));
+
+        assert_eq!(gpu.iters, cpu.iters, "{what}: iterations");
+        for v in 0..cpu_graph.size() {
+            assert_eq!(gpu.counters.get(v), cpu.counters.get(v), "{what}: node {v}'s counter");
+        }
+        for (name, gpu_values, cpu_values) in [
+            ("distances", gpu.geodesic_distances(), cpu.geodesic_distances()),
+            ("inverse distances", gpu.harmonic_geodesic_distances(), cpu.harmonic_geodesic_distances()),
+        ] {
+            for (v, (&g, &c)) in gpu_values.iter().zip(cpu_values).enumerate() {
+                assert!(
+                    (g - c).abs() <= 1e-4 * c.abs().max(1.),
+                    "{what}: node {v}'s {name} {g} on the GPU, {c} on the CPU"
+                );
+            }
+        }
+        cpu.drop_cache().expect("drop cache should succeed");
+        gpu.drop_cache().expect("drop cache should succeed");
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn hyperball_gpu_matches_cpu() {
+        let Some(backend) = gpu_backend() else {
+            return;
+        };
+        let dir = unique_test_dir("hyperball_gpu_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+
+        let (n, edges) = de_bruijn_edges(5);
+        let debruijn = dir.join("debruijn.mtx");
+        write_symmetric_mtx(&debruijn, n, &edges);
+        let (n, edges) = grid_edges(24);
+        let grid = dir.join("grid.mtx");
+        write_symmetric_mtx(&grid, n, &edges);
+        let directed = dir.join("directed.mtx");
+        write_directed_mtx(&directed, 2000, &random_directed_edges(2000, 2));
+        // mostly isolated nodes
+        let sparse = dir.join("sparse.mtx");
+        write_symmetric_mtx(&sparse, 50, &[(0, 1), (1, 2), (10, 11)]);
+
+        for (name, path) in [
+            ("debruijn", &debruijn),
+            ("grid", &grid),
+            ("directed", &directed),
+            ("sparse", &sparse),
+        ] {
+            macro_rules! check {
+                ($($p:ident),*) => {$(
+                    assert_gpu_matches_cpu::<$p>(
+                        &backend,
+                        path,
+                        &format!("hb_gpu_{name}_{}_{run_tag}", stringify!($p)),
+                        None,
+                    );
+                )*};
+            }
+            check!(Precision4, Precision5, Precision6, Precision8, Precision10, Precision12);
+        }
+        // capped below the grid's diameter (46), on both iteration parities
+        for max_depth in [7, 8] {
+            assert_gpu_matches_cpu::<Precision6>(
+                &backend,
+                &grid,
+                &format!("hb_gpu_grid_depth{max_depth}_{run_tag}"),
+                Some(max_depth),
+            );
+        }
+
+        // buffers of at most 16 KiB split the counters in several (unevenly sized) segments ---
+        // e.g. the grid's 576 counters in 3 at precision 6 and 9 at precision 8 --- while the
+        // graphs' other buffers still fit
+        let segmented = crate::gpu::WgpuBackend::new()
+            .expect("a GPU adapter was found above")
+            .with_max_binding(16 << 10)
+            .with_max_storage_buffers(48);
+        macro_rules! check_segmented {
+            ($name:literal, $path:expr, $($p:ident),*) => {$(
+                assert_gpu_matches_cpu::<$p>(
+                    &segmented,
+                    $path,
+                    &format!("hb_gpu_segmented_{}_{}_{run_tag}", $name, stringify!($p)),
+                    None,
+                );
+            )*};
+        }
+        check_segmented!("grid", &grid, Precision4, Precision6, Precision8);
+        check_segmented!("directed", &directed, Precision4, Precision6);
+        check_segmented!("sparse", &sparse, Precision4, Precision6, Precision8);
+
+        // more segments than the device may bind fail up front, with an error: 2000 counters of
+        // 256 B in 16 KiB buffers are 32 segments, i.e. 69 storage buffers (at most 48 here)
+        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+            &directed,
+            Some(format!("hb_gpu_too_many_segments_{run_tag}")),
+            Some(4),
+        )
+        .expect("graph parse should succeed");
+        let error = {
+            use crate::gpu::GpuBackend;
+            let device_graph = segmented.upload_graph(&graph).unwrap();
+            HyperBallInner::<VoidLabel, VoidLabel, usize, Precision8, f64>::new_gpu(
+                &graph,
+                &segmented,
+                &device_graph,
+                None,
+            )
+            .err()
+            .expect("too many segments should fail")
+            .to_string()
+        };
+        assert!(error.contains("GPU buffers are needed"), "unexpected error: {error}");
+        assert_gpu_matches_cpu::<Precision6>(
+            &segmented,
+            &grid,
+            &format!("hb_gpu_segmented_grid_depth7_{run_tag}"),
+            Some(7),
+        );
     }
 }
