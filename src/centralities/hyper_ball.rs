@@ -1057,6 +1057,7 @@ mod test {
     #[test]
     fn hyperball_cross_ix_widths_agree() {
         let dir = unique_test_dir("hyperball_cross_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("clique.mtx");
@@ -1090,6 +1091,7 @@ mod test {
     #[test]
     fn hyperball_f32_and_f64_agree_closely() {
         let dir = unique_test_dir("hyperball_cross_weight_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("clique.mtx");
@@ -1113,6 +1115,7 @@ mod test {
     #[test]
     fn hyperball_respects_max_depth() {
         let dir = unique_test_dir("hyperball_max_depth_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("path.mtx");
@@ -1277,6 +1280,7 @@ mod test {
     #[test]
     fn hyperball_matches_exact_across_precisions() {
         let dir = unique_test_dir("hyperball_precisions_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
 
@@ -1315,13 +1319,15 @@ mod test {
         }
     }
 
-    fn clique_graph(id: &str) -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+    fn clique_graph(id: &str) -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
         let dir = unique_test_dir("hyperball_clique_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{id}.mtx"));
         write_clique_mtx(&path);
-        GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id.to_string()), None)
-            .expect("graph parse should succeed")
+        let graph =
+            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id.to_string()), None)
+                .expect("graph parse should succeed");
+        crate::graph::test_utils::TestGraph::new(graph, Some(dir))
     }
 
     /// On a 4-clique every node reaches 3 others at distance 1, so: closeness (either
@@ -1395,6 +1401,7 @@ mod test {
     fn hyperball_agrees_with_exact_centralities() {
         use crate::centralities::exact::*;
         let dir = unique_test_dir("hyperball_vs_exact_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
 
@@ -1538,6 +1545,7 @@ mod test {
             return;
         };
         let dir = unique_test_dir("hyperball_gpu_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
 

@@ -347,7 +347,10 @@ pub(crate) mod test {
     use std::collections::BTreeSet;
     use std::io::Write;
 
-    pub(crate) type TestGraph = GraphMemoryMap<VoidLabel, VoidLabel, usize>;
+    /// A test graph (removing its cached files and fixture when dropped).
+    pub(crate) type TestGraph = crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize>;
+    /// The graphs the brute force references take.
+    pub(crate) type Graph = GraphMemoryMap<VoidLabel, VoidLabel, usize>;
 
     /// Parses `edges` (0-based, undirected) as a symmetric MatrixMarket graph over `n` nodes.
     pub(crate) fn undirected_graph(name: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph {
@@ -361,8 +364,13 @@ pub(crate) mod test {
             writeln!(f, "{} {}", u + 1, v + 1).unwrap();
         }
         drop(f);
-        GraphMemoryMap::from_file(&path, Some(format!("tri_{name}_{}", unique_run_tag())), Some(4))
-            .expect("graph parse should succeed")
+        let graph = GraphMemoryMap::from_file(
+            &path,
+            Some(format!("tri_{name}_{}", unique_run_tag())),
+            Some(4),
+        )
+        .expect("graph parse should succeed");
+        TestGraph::new(graph, Some(dir))
     }
 
     pub(crate) fn clique_edges(n: usize) -> Vec<(usize, usize)> {
@@ -424,7 +432,7 @@ pub(crate) mod test {
     /// Each CSR edge's triangle count by brute force: for edge `u -> v`, the sum over the
     /// endpoints' common neighbours `w` of the number of `u -- w` and `v -- w` edge combinations
     /// (so 1 per common neighbour without parallel edges), and 0 for self-loops.
-    pub(crate) fn brute_force_triangles(g: &TestGraph) -> Vec<usize> {
+    pub(crate) fn brute_force_triangles(g: &Graph) -> Vec<usize> {
         let multiplicities: Vec<std::collections::BTreeMap<usize, usize>> = (0..g.size())
             .map(|u| {
                 let mut m = std::collections::BTreeMap::new();

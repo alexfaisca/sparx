@@ -459,6 +459,7 @@ mod test {
     #[test]
     fn k_cores_batagelj_zaversnik_cross_ix_widths() {
         let dir = unique_test_dir("bz_cross_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("nested_cores.mtx");

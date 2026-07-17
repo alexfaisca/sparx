@@ -721,6 +721,7 @@ mod test {
     #[test]
     fn exact_centralities_cross_ix_widths_agree() {
         let dir = unique_test_dir("exact_cross_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("clique.mtx");
@@ -770,6 +771,7 @@ mod test {
     #[test]
     fn exact_centralities_f32_and_f64_agree_closely() {
         let dir = unique_test_dir("exact_cross_weight_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("clique.mtx");
@@ -803,6 +805,7 @@ mod test {
     #[test]
     fn exact_centralities_match_known_values() {
         let dir = unique_test_dir("exact_known_values_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("path_and_isolated.mtx");

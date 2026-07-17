@@ -258,6 +258,7 @@ fn sweep_with_opts(
     compute_exact_centralities: bool,
 ) {
     let dir = unique_test_dir(&format!("cross_ix_sweep_{tier}"));
+    let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
     std::fs::create_dir_all(&dir).expect("error creating tmp dir");
     let path = write_ring_graph_mtx(&dir, n, chords);
 
