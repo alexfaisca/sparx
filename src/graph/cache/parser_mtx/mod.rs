@@ -174,6 +174,7 @@ mod test {
     #[test]
     fn mtx_parser_round_trips_for_usize_and_u32_ix() {
         let dir = unique_test_dir("mtx_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("tiny.mtx");
@@ -250,6 +251,7 @@ mod test {
         use portable_atomic::{AtomicU16, AtomicU32};
 
         let dir = unique_test_dir("mtx_accumulator_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("tiny.mtx");
@@ -351,6 +353,7 @@ mod test {
         use portable_atomic::AtomicU16;
 
         let dir = unique_test_dir("mtx_accumulator_overflow_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("star.mtx");
@@ -394,6 +397,7 @@ mod test {
     #[test]
     fn mtx_cache_rejects_mismatched_ix_and_converts_correctly() {
         let dir = unique_test_dir("mtx_convert_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("tiny.mtx");
@@ -467,6 +471,7 @@ mod test {
     #[test]
     fn mtx_parser_rejects_graph_too_large_for_u8_ix() {
         let dir = unique_test_dir("mtx_overflow_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("overflow.mtx");
@@ -509,6 +514,7 @@ mod test {
     #[test]
     fn convert_index_type_rejects_graph_too_large_for_target_ix() {
         let dir = unique_test_dir("convert_overflow_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("overflow.mtx");

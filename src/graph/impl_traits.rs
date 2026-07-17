@@ -120,7 +120,11 @@ mod test {
     /// 1 -> 2                  (node 1 has degree 1)
     /// 2 -> (none)             (node 2 has degree 0, an isolated sink)
     /// 3 -> 0                  (node 3 has degree 1)
-    fn build_tiny_graph() -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+    /// (with a guard removing its cached files)
+    fn build_tiny_graph() -> (
+        GraphMemoryMap<VoidLabel, VoidLabel, usize>,
+        crate::graph::test_utils::CacheGuard,
+    ) {
         let dir = unique_test_dir("impl_traits_neigh_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("tiny.mtx");
@@ -134,12 +138,13 @@ mod test {
             .expect("parse should succeed");
         let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
-        graph
+        let guard = crate::graph::test_utils::CacheGuard::new(&graph, None);
+        (graph, guard)
     }
 
     #[test]
     fn neigh_matches_real_neighbours_for_every_node() {
-        let graph = build_tiny_graph();
+        let (graph, _cache) = build_tiny_graph();
         for u in 0..graph.size() {
             let real: Vec<usize> = graph.neighbours(u).unwrap().collect();
             let via_dfs_trait: Vec<usize> = dfs_visit::Graph::neigh(&graph, u).collect();
@@ -173,7 +178,7 @@ mod test {
 
     #[test]
     fn dfs_visit_reaches_every_node_from_source_0() {
-        let graph = build_tiny_graph();
+        let (graph, _cache) = build_tiny_graph();
         let discovered_log = Arc::new(Mutex::new(vec![0]));
         let mut visitor = RecordingVisitor {
             discovered: discovered_log.clone(),
@@ -197,7 +202,7 @@ mod test {
 
     #[test]
     fn bfs_visit_reaches_every_node_from_source_0() {
-        let graph = build_tiny_graph();
+        let (graph, _cache) = build_tiny_graph();
         let discovered_log = Arc::new(Mutex::new(vec![0]));
         let mut visitor = RecordingVisitor {
             discovered: discovered_log.clone(),
@@ -214,7 +219,11 @@ mod test {
     /// making a "parent is always the source" bug indistinguishable from a correct result by a
     /// mere adjacency check), this fixture forces a unique, decisive expected parent chain:
     /// `parents == [0, 0, 1, 2]`.
-    fn build_chain_graph() -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+    /// (with a guard removing its cached files)
+    fn build_chain_graph() -> (
+        GraphMemoryMap<VoidLabel, VoidLabel, usize>,
+        crate::graph::test_utils::CacheGuard,
+    ) {
         let dir = unique_test_dir("impl_traits_chain_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("chain.mtx");
@@ -228,7 +237,8 @@ mod test {
             .expect("parse should succeed");
         let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
-        graph
+        let guard = crate::graph::test_utils::CacheGuard::new(&graph, None);
+        (graph, guard)
     }
 
     /// Regression test for a real bug found while generalizing `DFSVisit` to be `Ix`-generic:
@@ -238,7 +248,7 @@ mod test {
     /// happens to have the source adjacent to every other node.
     #[test]
     fn dfs_visit_records_the_exact_parent_chain_on_a_graph_where_source_is_not_adjacent_to_all() {
-        let graph = build_chain_graph();
+        let (graph, _cache) = build_chain_graph();
         let mut visitor = NoOpDfsVisitor;
         let dfs = DFSVisit::new(&graph, 0, &mut visitor).expect("dfs should succeed");
 

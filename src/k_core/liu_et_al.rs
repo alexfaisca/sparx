@@ -604,6 +604,7 @@ mod test {
     #[test]
     fn k_cores_liu_et_al_cross_ix_widths_and_cross_algorithm() {
         let dir = unique_test_dir("liu_cross_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("nested_cores.mtx");

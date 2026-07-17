@@ -11,7 +11,7 @@ use super::pkt::AlgoPKT;
 use super::triangles::Triangles;
 use super::triangles::test::{brute_force_triangles, clique_edges, random_edges};
 use crate::graph::label::VoidLabel;
-use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
+use crate::graph::test_utils::{CacheGuard, unique_run_tag, unique_test_dir};
 use crate::graph::{GraphMemoryMap, IndexType};
 
 use std::io::Write;
@@ -19,9 +19,16 @@ use std::path::PathBuf;
 
 /// Writes `edges` (0-based) as a MatrixMarket file over `n` nodes, `symmetric` (undirected) or
 /// `general` (directed).
-fn write_mtx(name: &str, symmetric: bool, n: usize, edges: &[(usize, usize)]) -> PathBuf {
+/// The returned guard removes the fixture, and every graph opened (on this thread) while it lives.
+fn write_mtx(
+    name: &str,
+    symmetric: bool,
+    n: usize,
+    edges: &[(usize, usize)],
+) -> (PathBuf, CacheGuard) {
     let dir = unique_test_dir("k_truss_matrix_test");
     std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+    let guard = CacheGuard::dir(dir.clone());
     let path = dir.join(format!("{name}.mtx"));
     let mut f = std::fs::File::create(&path).expect("error creating mtx fixture");
     let kind = if symmetric { "symmetric" } else { "general" };
@@ -30,7 +37,7 @@ fn write_mtx(name: &str, symmetric: bool, n: usize, edges: &[(usize, usize)]) ->
     for &(u, v) in edges {
         writeln!(f, "{} {}", u + 1, v + 1).unwrap();
     }
-    path
+    (path, guard)
 }
 
 fn open<Ix: IndexType>(path: &PathBuf) -> GraphMemoryMap<VoidLabel, VoidLabel, Ix> {
@@ -122,7 +129,7 @@ fn undirected_results<Ix: IndexType>(
 #[test]
 fn undirected_graphs_match_brute_force_at_every_index_width() {
     for (name, n, edges) in undirected_graphs() {
-        let path = write_mtx(name, true, n, &edges);
+        let (path, _fixture) = write_mtx(name, true, n, &edges);
         let g = open::<usize>(&path);
         let simple = !name.contains("multi");
 
@@ -173,7 +180,7 @@ fn directed_results<Ix: IndexType>(
 #[test]
 fn directed_graphs_match_brute_force_at_every_index_width() {
     for (name, n, edges) in directed_graphs() {
-        let path = write_mtx(name, false, n, &edges);
+        let (path, _fixture) = write_mtx(name, false, n, &edges);
         let g = open::<usize>(&path);
         for triangle_type in DirectedTriangleType::ALL {
             let roles = triangle_type.roles();
@@ -253,12 +260,12 @@ fn every_count_width_agrees() {
         bea.drop_cache().unwrap();
         (triangles, pkt_k, bea_k)
     }
-    let path = write_mtx("widths", true, 25, &random_edges(25, 0.4, 5));
+    let (path, _fixture) = write_mtx("widths", true, 25, &random_edges(25, 0.4, 5));
     let expected = undirected::<u8>(&path);
     assert_eq!(undirected::<u16>(&path), expected);
     assert_eq!(undirected::<u32>(&path), expected);
     assert_eq!(undirected::<u64>(&path), expected);
-    let path = write_mtx(
+    let (path, _fixture) = write_mtx(
         "widths_directed",
         false,
         24,
@@ -284,7 +291,7 @@ fn directed_wide_counts() {
     for _ in 0..20 {
         edges.extend([(0, 1), (1, 2), (2, 0), (0, 2)]);
     }
-    let path = write_mtx("directed_parallel20", false, 3, &edges);
+    let (path, _fixture) = write_mtx("directed_parallel20", false, 3, &edges);
     let g = open::<usize>(&path);
     let t = DirectedTriangleType::CycleFeedForward;
     let error = DirectedTriangles::new(&g, t)
@@ -316,7 +323,7 @@ fn directed_wide_counts() {
 /// the same results run after run, on any number of threads.
 #[test]
 fn directed_pkt_is_deterministic_across_threads() {
-    let path = write_mtx(
+    let (path, _fixture) = write_mtx(
         "directed_race",
         false,
         60,
@@ -345,7 +352,8 @@ fn directed_pkt_is_deterministic_across_threads() {
 /// The verifier rejects decompositions that aren't.
 #[test]
 fn verifier_rejects_wrong_trussness() {
-    let g = open::<usize>(&write_mtx("verifier", true, 10, &clique_edges(10)));
+    let (path, _fixture) = write_mtx("verifier", true, 10, &clique_edges(10));
+    let g = open::<usize>(&path);
     let mut pkt = AlgoPKT::new(&g).unwrap();
     let mut wrong = pkt.k_trusses().to_vec();
     super::verify_k_trusses(&g, &wrong).unwrap();
@@ -372,7 +380,7 @@ fn gpu_triangles_at_every_count_width() {
     for _ in 0..20 {
         edges.extend([(0, 1), (1, 2), (0, 2)]);
     }
-    let path = write_mtx("gpu_parallel20", true, 3, &edges);
+    let (path, _fixture) = write_mtx("gpu_parallel20", true, 3, &edges);
     let g = open::<u32>(&path);
     let device_graph = backend.upload_graph(&g).unwrap();
     let error = Triangles::new_gpu(&g, &backend, &device_graph)
@@ -410,7 +418,7 @@ fn gpu_triangles_at_every_count_width() {
 /// edge without support is peeled), both decompositions give the same results.
 #[test]
 fn directed_k_truss_from_precomputed_triangles() {
-    let path = write_mtx(
+    let (path, _fixture) = write_mtx(
         "directed_precomputed",
         false,
         30,

@@ -3771,7 +3771,7 @@ mod test {
     /// node 3 -> {0}        (degree 1)
     /// node 4 -> {}         (degree 0, isolated)
     /// node 5 -> {0, 1}     (degree 2)
-    fn build_degree_test_graph() -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+    fn build_degree_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
         let dir = unique_test_dir("iter_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("degrees.mtx");
@@ -3785,7 +3785,7 @@ mod test {
             .expect("parse should succeed");
         let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
-        graph
+        crate::graph::test_utils::TestGraph::new(graph, None)
     }
 
     #[test]
@@ -3813,9 +3813,10 @@ mod test {
         let via_method: Vec<usize> = graph.iter_node_indices().collect();
         assert_eq!(via_into_iter, via_method);
 
-        // the idiomatic `for node in &graph` form itself.
+        // the idiomatic `for node in &graph` form itself (`graph` is a test wrapper, `*graph` the
+        // `GraphMemoryMap`).
         let mut via_for_loop = Vec::new();
-        for node in &graph {
+        for node in &*graph {
             via_for_loop.push(node);
         }
         assert_eq!(via_for_loop, via_method);
@@ -4336,7 +4337,7 @@ mod test {
 
     /// Directed, integer-weighted graph:
     /// 0 -> 1 (w=10), 0 -> 2 (w=20), 1 -> 2 (w=30), 3 -> 0 (w=40)
-    fn build_weighted_edge_test_graph() -> GraphMemoryMap<VoidLabel, TestWeight, usize> {
+    fn build_weighted_edge_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, TestWeight, usize> {
         let dir = unique_test_dir("label_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("weighted.mtx");
@@ -4350,7 +4351,7 @@ mod test {
             .expect("parse should succeed");
         let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
-        graph
+        crate::graph::test_utils::TestGraph::new(graph, None)
     }
 
     #[test]
@@ -4421,6 +4422,7 @@ mod test {
     #[test]
     fn edge_labels_survive_reopening_the_cache() {
         let dir = unique_test_dir("reopen_label_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("weighted_reopen.mtx");
         std::fs::write(
@@ -4596,7 +4598,7 @@ mod test {
     /// chain's final node (also degree 0) giving a real spread of isolated/degree-1/high-degree
     /// nodes for the degree-filter family too.
     #[cfg(feature = "rayon")]
-    fn build_large_test_graph() -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+    fn build_large_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
         let dir = unique_test_dir("large_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("large.mtx");
@@ -4624,7 +4626,7 @@ mod test {
             .expect("parse should succeed");
         let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
-        graph
+        crate::graph::test_utils::TestGraph::new(graph, None)
     }
 
     #[cfg(feature = "rayon")]

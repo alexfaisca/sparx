@@ -1243,6 +1243,7 @@ mod test {
     #[test]
     fn gve_louvain_cross_ix_and_weight_combinations() {
         let dir = unique_test_dir("gve_louvain_cross_ix_weight_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("cliques.mtx");
@@ -1294,6 +1295,7 @@ mod test {
     #[test]
     fn gve_louvain_sparse_more_nodes_than_edges_fallback() {
         let dir = unique_test_dir("gve_louvain_sparse_fallback_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("sparse.mtx");
@@ -1333,6 +1335,7 @@ mod test {
     #[test]
     fn gve_louvain_path_graph_cross_ix_and_weight() {
         let dir = unique_test_dir("gve_louvain_path_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let run_tag = unique_run_tag();
         let path = dir.join("path.mtx");

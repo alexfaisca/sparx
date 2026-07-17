@@ -657,7 +657,7 @@ pub(crate) mod test {
     use super::*;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::k_truss::triangles::Triangles;
-    use crate::k_truss::triangles::test::{TestGraph, fixtures, random_edges};
+    use crate::k_truss::triangles::test::{Graph, TestGraph, fixtures, random_edges};
     use std::collections::BTreeMap;
     use std::io::Write;
 
@@ -673,12 +673,13 @@ pub(crate) mod test {
             writeln!(f, "{} {}", u + 1, v + 1).unwrap();
         }
         drop(f);
-        GraphMemoryMap::from_file(
+        let graph = GraphMemoryMap::from_file(
             &path,
             Some(format!("dtri_{name}_{}", unique_run_tag())),
             Some(4),
         )
-        .expect("graph parse should succeed")
+        .expect("graph parse should succeed");
+        TestGraph::new(graph, Some(dir))
     }
 
     /// A directed multigraph: random arcs, some reciprocated, some tripled, and self-loops.
@@ -706,7 +707,7 @@ pub(crate) mod test {
     /// Each CSR edge's triangles of the given roles by brute force (see the module's
     /// documentation): for edge `u -> v` and every other node `w`, the products of the
     /// multiplicities of the edges putting `u -> v` in each selected role.
-    pub(crate) fn brute_force_directed(g: &TestGraph, roles: u8) -> Vec<usize> {
+    pub(crate) fn brute_force_directed(g: &Graph, roles: u8) -> Vec<usize> {
         let mut m = BTreeMap::<(usize, usize), usize>::new();
         for u in 0..g.size() {
             for v in g.neighbours(u).unwrap() {

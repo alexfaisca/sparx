@@ -12,7 +12,7 @@ use super::count::TriangleCounter;
 /// Each CSR edge's trussness (the largest `k` such that the edge is in the `k`-truss, the
 /// subgraph whose edges are each in at least `k - 2` of its triangles), by peeling the
 /// undirected simple graph (self-loops have trussness 2).
-pub(crate) fn brute_force_trussness(g: &TestGraph) -> Vec<u8> {
+pub(crate) fn brute_force_trussness(g: &Graph) -> Vec<u8> {
     let key = |u: usize, v: usize| (u.min(v), u.max(v));
     let mut adjacency: Vec<BTreeSet<usize>> = (0..g.size())
         .map(|u| g.neighbours(u).unwrap().filter(|&v| v != u).collect())
@@ -109,7 +109,7 @@ fn k_truss_algorithms_agree_on_multigraphs() {
 /// Local clustering coefficients (edges among a node's distinct neighbours over the possible
 /// ones), their average and the transitivity (`3 * triangles / connected triples`), as defined
 /// by networkx, by brute force.
-fn brute_force_clustering(g: &TestGraph) -> (Vec<f64>, f64, f64) {
+fn brute_force_clustering(g: &Graph) -> (Vec<f64>, f64, f64) {
     let adjacency: Vec<BTreeSet<usize>> = (0..g.size())
         .map(|u| g.neighbours(u).unwrap().filter(|&v| v != u).collect())
         .collect();
@@ -288,7 +288,7 @@ fn pkt_is_deterministic_across_threads() {
 /// support is the number of combinations of edges (still in the graph) on the other two sides of
 /// a triangle which put it in a selected role, and the `k`-truss is what's left after repeatedly
 /// removing edges with support below `k - 2`.
-pub(crate) fn brute_force_directed_trussness(g: &TestGraph, roles: u8) -> Vec<usize> {
+pub(crate) fn brute_force_directed_trussness(g: &Graph, roles: u8) -> Vec<usize> {
     use super::directed::role;
     let edges: Vec<(usize, usize)> = (0..g.size())
         .flat_map(|u| g.neighbours(u).unwrap().map(move |v| (u, v)))

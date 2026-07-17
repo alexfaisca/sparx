@@ -836,6 +836,7 @@ mod test {
         // overlap --- a real, confirmed source of severe flakiness under the default parallel
         // test runner.
         let scratch_dir = crate::graph::test_utils::unique_test_dir("remove_tmp_files_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(scratch_dir.clone());
         fs::create_dir_all(&scratch_dir).unwrap();
 
         let g1 = scratch_dir.join("index_9_idZ.tmp");

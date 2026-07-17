@@ -453,6 +453,10 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             return Err("error invalid cache id: id was `None`".into());
         }
 
+        // tests' graph caches are removed when the test is done with them
+        #[cfg(test)]
+        crate::graph::test_utils::register_cache_id(id_from_filename(id)?);
+
         let metadata_filename = Self::init_cache_file_from_id_or_random(id, FileType::CacheMetadata(H::H), None)?;
         let neighbors_filename =
             Self::init_cache_file_from_id_or_random(id, FileType::Edges(H::H), None)?;

@@ -253,7 +253,7 @@ mod test {
         header: &str,
         n: usize,
         edges: &[(usize, usize)],
-    ) -> GraphMemoryMap<VoidLabel, VoidLabel, usize> {
+    ) -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
         let dir = unique_test_dir("bfs_dists_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{name}.mtx"));
@@ -264,8 +264,10 @@ mod test {
             writeln!(f, "{} {}", u + 1, v + 1).unwrap();
         }
         drop(f);
-        GraphMemoryMap::from_file(&path, Some(format!("bfs_{name}_{}", unique_run_tag())), None)
-            .expect("graph parse should succeed")
+        let graph =
+            GraphMemoryMap::from_file(&path, Some(format!("bfs_{name}_{}", unique_run_tag())), None)
+                .expect("graph parse should succeed");
+        crate::graph::test_utils::TestGraph::new(graph, Some(dir))
     }
 
     /// On an undirected path every edge leads back to the source: it must keep distance 0 and be

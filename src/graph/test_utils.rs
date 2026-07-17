@@ -23,6 +23,100 @@ type ExactValueCache = DashMap<String, OnceCell<String>>;
 static TEST_CACHE: OnceCell<TestCache> = OnceCell::new();
 static EXACT_VALUE_CACHE: OnceCell<ExactValueCache> = OnceCell::new();
 
+thread_local! {
+    /// Ids of the graph caches created on this thread, one list per live fixture guard (see
+    /// [`CacheGuard::dir`]), innermost last.
+    static GUARDED_CACHE_IDS: std::cell::RefCell<Vec<Vec<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Records a graph cache's id (as in its files' names) for the innermost live fixture guard on
+/// this thread, if any.
+pub(crate) fn register_cache_id(id: String) {
+    GUARDED_CACHE_IDS.with(|ids| {
+        if let Some(innermost) = ids.borrow_mut().last_mut() {
+            innermost.push(id);
+        }
+    });
+}
+
+/// Removes, when dropped (also when a test fails), cached graphs' files --- their own and those of
+/// every algorithm run on them, all named after the graph's unique id --- and a test's fixture
+/// directory. Files in the cache's subdirectories (e.g. exact values) are left alone.
+pub(crate) struct CacheGuard {
+    ids: Vec<String>,
+    fixture_dir: Option<PathBuf>,
+    /// Whether this guard collects the ids of the graphs created on its thread while it lives.
+    collects: bool,
+}
+
+impl CacheGuard {
+    /// Guards `graph`'s cached files, and `fixture_dir` if given.
+    pub(crate) fn new<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+        graph: &GraphMemoryMap<N, E, Ix>,
+        fixture_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            ids: graph.graph_id().into_iter().collect(),
+            fixture_dir,
+            collects: false,
+        }
+    }
+
+    /// Guards a test's fixture directory and every graph cache created on this thread while the
+    /// guard lives (by the test, or the helpers it calls).
+    pub(crate) fn dir(fixture_dir: PathBuf) -> Self {
+        GUARDED_CACHE_IDS.with(|ids| ids.borrow_mut().push(Vec::new()));
+        Self {
+            ids: Vec::new(),
+            fixture_dir: Some(fixture_dir),
+            collects: true,
+        }
+    }
+}
+
+impl Drop for CacheGuard {
+    fn drop(&mut self) {
+        if self.collects {
+            let collected = GUARDED_CACHE_IDS.with(|ids| ids.borrow_mut().pop());
+            self.ids.extend(collected.into_iter().flatten());
+        }
+        for id in &self.ids {
+            if let Ok(files) = glob::glob(&format!("{CACHE_DIR}*{id}.*")) {
+                for file in files.flatten() {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
+        }
+        if let Some(dir) = &self.fixture_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// A test graph, removing its cached files and fixture directory when dropped (see
+/// [`CacheGuard`]); derefs to its [`GraphMemoryMap`].
+pub(crate) struct TestGraph<N: graph::N = (), E: graph::E = (), Ix: graph::IndexType = usize> {
+    graph: GraphMemoryMap<N, E, Ix>,
+    // dropped after the graph (whose files it removes)
+    _guard: CacheGuard,
+}
+
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType> TestGraph<N, E, Ix> {
+    pub(crate) fn new(graph: GraphMemoryMap<N, E, Ix>, fixture_dir: Option<PathBuf>) -> Self {
+        let _guard = CacheGuard::new(&graph, fixture_dir);
+        Self { graph, _guard }
+    }
+}
+
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType> std::ops::Deref for TestGraph<N, E, Ix> {
+    type Target = GraphMemoryMap<N, E, Ix>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.graph
+    }
+}
+
 pub(crate) fn mem_cache() -> &'static TestCache {
     TEST_CACHE.get_or_init(DashMap::new)
 }

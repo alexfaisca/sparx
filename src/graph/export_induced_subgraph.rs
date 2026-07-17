@@ -139,6 +139,7 @@ mod test {
     #[test]
     fn direct_write_matches_collect_then_write_for_every_scenario() {
         let dir = unique_test_dir("induced_subgraph_write_check");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
 
         let scenarios: &[(&[usize], fn(usize) -> bool)] = &[
