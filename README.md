@@ -23,12 +23,14 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Manually Linking *SparX*](#manually-linking-sparx)
   - [Load & inspect](#loading--inspecting-a-graph)
   - [Run algorithms](#running-algorithms)
+  - [Examples](#examples)
   - [Narrow index types & accumulators](#narrow-index-types--accumulators)
   - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
   - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
+  - [Scripts](#scripts)
   - [Memory Benchmarks](#memory-benchmarks)
   - [Wall-Time Benchmarks](#wall-time-benchmarks)
 
@@ -77,7 +79,7 @@ If the installation was successful, a version number ≥ 1.95 should be printed.
 ## Installation
 
 To install the *SparX* library the following steps must be followed.
-Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `build_datasets.sh` it is advisable you clone `sparx` to the same directory you have cloned `GGCAT` into if you have previously done so):
+Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `scripts/datasets/build_datasets.sh` it is advisable you clone `sparx` to the same directory you have cloned `GGCAT` into if you have previously done so):
 
 ```bash
 git clone git@github.com:alexfaisca/sparx.git
@@ -108,13 +110,13 @@ Input: **GGCAT Output Files** (`.lz4`), **Matrix Market** (`.mtx`) and cached in
 
 ## OOTB Datasets
 
-A script to build datasets out-of-the-box is provided for reproducibility and sandboxing purposes: `build_datasets.sh`. It builds all the datasets used for testing and benchmarking the library. It may be run in the following manner:
+A script to build datasets out-of-the-box is provided for reproducibility and sandboxing purposes: `scripts/datasets/build_datasets.sh`. It builds all the datasets used for testing and benchmarking the library. It may be run in the following manner:
 
 ```bash
-bash build_datasets.sh
+bash scripts/datasets/build_datasets.sh
 ```
 
-It is possible to benchmark the library with datasets outside of those built with `build_datasets.sh`, to guarantee all benching related tools', e.g. plotting scripts, preconditions entry consisting of `<dataset_name>,<V>,<E>` should be added to `datasets_size.csv` (`<dataset_name>` should be the dataset's filename without file extension):
+It is possible to benchmark the library with datasets outside of those built with `scripts/datasets/build_datasets.sh`, to guarantee all benching related tools', e.g. plotting scripts, preconditions entry consisting of `<dataset_name>,<V>,<E>` should be added to `datasets_size.csv` (`<dataset_name>` should be the dataset's filename without file extension):
 
 ```csv
 dataset,V,E
@@ -126,7 +128,7 @@ my_custom_dataset,123123,123123123
 
 # Quick Start
 
-To follow this guide it is advisable you first run the `build_datasets.sh` script. This way you will be able to follow along and use the provided code examples as they come.
+To follow this guide it is advisable you first run the `scripts/datasets/build_datasets.sh` script. This way you will be able to follow along and use the provided code examples as they come.
 
 ## Manually Linking *SparX*
 
@@ -321,6 +323,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```
 
+## Examples
+
+`examples/` has a runnable program per algorithm family. Each one runs on a small bundled graph by
+default, or on the graph you pass it:
+
+```bash
+cargo run --release --example k_core        # k-cores, sequential and parallel
+cargo run --release --example k_truss       # triangles, k-trusses, clustering coefficients
+cargo run --release --example communities   # GVE-Louvain and HK-relax
+cargo run --release --example centralities  # HyperBall vs exact closeness/harmonic centrality
+cargo run --release --example traversals    # BFS distances and Euler trails
+cargo run --release --example k_core -- ./datasets/graphs/kmer_V2a.mtx 16   # your own graph, 16 threads
+```
+
 ## Narrow Index Types & Accumulators
 
 `GraphMemoryMap<N, E, Ix>`'s `Ix` type parameter (`usize`, `u32`, `u16`, or `u8`) controls the
@@ -479,6 +495,16 @@ pytest python/tests         # checked against networkx
 ```
 
 # Reproducibility
+
+## Scripts
+
+The helper scripts live in `scripts/`. Run them from the repository's root:
+
+| Directory | Contents |
+|-----------|----------|
+| `scripts/datasets/` | `build_datasets.sh` downloads and builds the benchmark datasets into `datasets/`, using `dataset_urls.txt` and the synthetic de Bruijn generator `gen_dbg_mtx.py` |
+| `scripts/bench/` | `time_bench.sh` (wall time over thread counts) and `mem_bench.sh` (Massif memory profiles) |
+| `scripts/plot/` | Matplotlib plots and summaries of the CSVs written to `results/` (e.g. `python3 scripts/plot/plot_results.py`) |
 
 ## Memory Benchmarks
 

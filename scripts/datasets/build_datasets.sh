@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# run from the repository's root, wherever this script is invoked from
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}/../.."
+
 # Fixed configuration specs
-URLS_FILE="dataset_urls.txt"
+URLS_FILE="${SCRIPT_DIR}/dataset_urls.txt"
 OUTPUT_PREFIX="ggcat_graph"
 
 # Tunables that still make sense to keep as vars
@@ -46,17 +50,17 @@ echo "[OK] Using: $(rustc --version 2>&1)"
 
 usage() {
 	cat <<'EOF'
-Usage: build_graphs.sh [options]
+Usage: scripts/datasets/build_datasets.sh [options]
 
 Options:
-  -d DIR     Working directory (default: data)
+  -d DIR     Working directory (default: datasets)
   -j INT     Threads (default: detected cores)
   -c         Build COLORED graphs (default: off)
   -Z         Keep compressed (.gz) inputs; do not gunzip (default: off)
   -h         Show help
 
 Behavior (fixed):
-  * Read dataset URLs from "dataset_urls.txt" (one per line; '#' for comments).
+  * Read dataset URLs from "scripts/datasets/dataset_urls.txt" (one per line; '#' for comments).
   * Build per-dataset graphs:
        - k=5 and k=10 for ALL datasets
        - k=15 for the FIRST TWO datasets listed
@@ -127,7 +131,7 @@ touch ___empty_input___.contigs.fa
 FILES=("___empty_input___.contigs.fa")
 
 # Now download datasets and append to FILES
-echo "Downloading datasets listed in: ../../${URLS_FILE} for ggcat"
+echo "Downloading datasets listed in: ${URLS_FILE} for ggcat"
 while IFS= read -r url || [[ -n "$url" ]]; do
 	[[ -z "$url" || "$url" =~ ^# ]] && continue
 	fname="$(basename "${url}")"
@@ -139,7 +143,7 @@ while IFS= read -r url || [[ -n "$url" ]]; do
 	fi
 	
 	FILES+=("$fname")
-done <"../../${URLS_FILE}"
+done <"${URLS_FILE}"
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
 	echo "No files downloaded. Check your URL list." >&2
@@ -299,28 +303,28 @@ done
 
 cd "${MAINDIR}"
 
-echo "Building synthetic datasets using \`gen_dgd_mtx.py\`"
+echo "Building synthetic datasets using \`gen_dbg_mtx.py\`"
 
 # ~16k protein edges (exact 15980)
-python3 gen_dbg_mtx.py --alphabet protein20 --k 2 --out ./${WORKDIR}/graphs/synth_gen_dbg_protein20_k2_edges16k.mtx
+python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet protein20 --k 2 --out ./${WORKDIR}/graphs/synth_gen_dbg_protein20_k2_edges16k.mtx
 
 # ~130k DNA edges (exact 131068)
-python3 gen_dbg_mtx.py --alphabet dna --k 7 --out ./${WORKDIR}/graphs/synth_gen_dbg_dna_k7_edges130k.mtx
+python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet dna --k 7 --out ./${WORKDIR}/graphs/synth_gen_dbg_dna_k7_edges130k.mtx
 
 # ~8.4M DNA edges (exact 8,388,604)
-python3 gen_dbg_mtx.py --alphabet dna --k 10 --out ./${WORKDIR}/graphs/synth_dna_k10_edges8_4M.mtx
+python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet dna --k 10 --out ./${WORKDIR}/graphs/synth_dna_k10_edges8_4M.mtx
 
 # ~33.5M DNA edges (exact 33,554,428)
-python3 gen_dbg_mtx.py --alphabet dna --k 11 --out ./${WORKDIR}/graphs/synth_dna_k11_edges33_5M.mtx
+python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet dna --k 11 --out ./${WORKDIR}/graphs/synth_dna_k11_edges33_5M.mtx
 
 # ~128M protein edges (exact 127,999,980)
-python3 gen_dbg_mtx.py --alphabet protein20 --k 5 --out ./${WORKDIR}/graphs/synth_prot20_k5_edges128M.mtx
+python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet protein20 --k 5 --out ./${WORKDIR}/graphs/synth_prot20_k5_edges128M.mtx
 
 # ~296M protein edges (exact 296,071,755)
-python3 gen_dbg_mtx.py --alphabet protein23 --k 5 --out ./${WORKDIR}/graphs/synth_prot23_k5_edges296M.mtx
+python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet protein23 --k 5 --out ./${WORKDIR}/graphs/synth_prot23_k5_edges296M.mtx
 
 # ~6.8B protein edges (exact 6,809,650,871) **WARNING!!!: Gigabyte A1 took 1 hour to parse the resulting file into a graph.**
-# python3 gen_dbg_mtx.py --alphabet protein23 --k 6 --out ./${WORKDIR}/graphs/synth_prot23_k6_edges6_8B.mtx
+# python3 "${SCRIPT_DIR}/gen_dbg_mtx.py" --alphabet protein23 --k 6 --out ./${WORKDIR}/graphs/synth_prot23_k6_edges6_8B.mtx
 
 echo
 echo "All graphs built under: $(pwd)/${WORKDIR}/graphs"

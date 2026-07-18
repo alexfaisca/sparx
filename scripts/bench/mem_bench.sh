@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# dataset paths are relative to the repository's root
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 shopt -s nullglob
 
 for ds in ./datasets/graphs/graph_3_10.lz4; do

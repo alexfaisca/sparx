@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# dataset paths are relative to the repository's root
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
 cargo run --features bench --release -- -t64 -v -mf ./datasets/graphs/graph_1_10.lz4 -e 2
 cargo run --features bench --release -- -t32 -v -mf ./datasets/graphs/graph_1_10.lz4 -e 2
 cargo run --features bench --release -- -t16 -v -mf ./datasets/graphs/graph_1_10.lz4 -e 2
