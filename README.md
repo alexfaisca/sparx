@@ -377,10 +377,3 @@ To bench wall-time with different thread counts the `-t16` can be altered to cha
 
     1. If `-t0` or `-t1` are supplied, the program runs single-threaded.
     2. If `-tx`, where `x > 1`, is supplied, the program runs with `x` threads.
-
-# Plotting results
-Doc still in construction...
-
-# Performance notes
-Doc still in construction...
-
