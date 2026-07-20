@@ -434,3 +434,144 @@ def test_gpu_matches_cpu():
         cpu, gpu = g.hyperball(precision=8), g.hyperball(precision=8, gpu=True)
         for key in cpu:
             assert np.allclose(gpu[key], cpu[key], rtol=1e-5), key
+
+
+# --- directed graphs ---------------------------------------------------------------------------
+
+
+def directed(G, name="d.mtx"):
+    return write_mtx(name, G.number_of_nodes(), list(G.edges()), False)
+
+
+def random_digraphs():
+    for seed, (n, p) in enumerate([(12, 0.15), (25, 0.08), (40, 0.05), (30, 0.2)]):
+        yield nx.gnp_random_graph(n, p, seed=seed, directed=True)
+
+
+def by_smallest_node(components, n):
+    """Per node component ids, components numbered by their smallest node."""
+    labels = [0] * n
+    for c, nodes in enumerate(sorted(components, key=min)):
+        for u in nodes:
+            labels[u] = c
+    return labels
+
+
+def test_direction_is_recorded(tmp_path):
+    with sparx.Graph(write_mtx("a.mtx", 3, [(0, 1), (1, 2)], False)) as g:
+        assert g.is_directed
+    with sparx.Graph(write_mtx("b.mtx", 3, [(0, 1), (1, 0)], False)) as g:
+        assert not g.is_directed
+    with sparx.Graph(write_mtx("c.mtx", 3, [(1, 0), (2, 1)], True)) as g:
+        assert not g.is_directed
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_directed_degrees_and_bfs(G):
+    n = G.number_of_nodes()
+    views = {"out": G, "in": G.reverse(), "both": G.to_undirected()}
+    with sparx.Graph(directed(G)) as g:
+        assert [g.in_degree(u) for u in range(n)] == [G.in_degree(u) for u in range(n)]
+        for direction, H in views.items():
+            for source in range(0, n, 5):
+                lengths = nx.single_source_shortest_path_length(H, source)
+                want = [lengths.get(u, -1) for u in range(n)]
+                assert g.bfs(source, direction=direction).tolist() == want, (direction, source)
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_directed_centralities_against_networkx(G):
+    n = G.number_of_nodes()
+    # networkx's closeness and harmonic centralities use distances *to* a node: "in"
+    views = {"in": G, "out": G.reverse(), "both": G.to_undirected()}
+    with sparx.Graph(directed(G)) as g:
+        for direction, H in views.items():
+            closeness = nx.closeness_centrality(H, wf_improved=False)
+            got = g.closeness(direction=direction, normalized=True)
+            np.testing.assert_allclose(got, [closeness[u] for u in range(n)], atol=1e-12)
+            harmonic = nx.harmonic_centrality(H)
+            got = g.harmonic(direction=direction, normalized=False)
+            np.testing.assert_allclose(got, [harmonic[u] / (n - 1) for u in range(n)], atol=1e-12)
+            # HyperBall estimates them
+            hb = g.hyperball(direction=direction, precision=12)
+            np.testing.assert_allclose(hb["closeness"], g.closeness(direction=direction), rtol=0.1, atol=1e-9)
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_components_against_networkx(G):
+    n = G.number_of_nodes()
+    with sparx.Graph(directed(G)) as g:
+        weak = g.components(kind="weak")
+        assert weak["components"].tolist() == by_smallest_node(nx.weakly_connected_components(G), n)
+        assert weak["count"] == nx.number_weakly_connected_components(G)
+        assert weak["sizes"].sum() == n
+        strong = g.components(kind="strong")
+        assert strong["components"].tolist() == by_smallest_node(nx.strongly_connected_components(G), n)
+        assert strong["count"] == nx.number_strongly_connected_components(G)
+        with pytest.raises(ValueError):
+            g.components(kind="semi")
+
+
+def test_components_of_undirected_graphs():
+    G = nx.gnp_random_graph(40, 0.04, seed=3)
+    with sparx.Graph(undirected(G)) as g:
+        want = by_smallest_node(nx.connected_components(G), 40)
+        assert g.components()["components"].tolist() == want
+        assert g.components(kind="strong")["components"].tolist() == want
+
+
+def brute_force_cores(G, degree):
+    """Coreness by repeated peeling, `degree(H, u)` within the remaining subgraph `H`."""
+    H, core, k = G.copy(), {}, 0
+    while H.number_of_nodes():
+        while True:
+            low = [u for u in H if degree(H, u) < k]
+            if not low:
+                break
+            H.remove_nodes_from(low)
+        for u in H:
+            core[u] = k
+        k += 1
+    return [core[u] for u in range(G.number_of_nodes())]
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_directed_k_cores(G):
+    with sparx.Graph(directed(G)) as g:
+        core = nx.core_number(G)
+        assert g.k_core(direction="both").tolist() == [core[u] for u in range(G.number_of_nodes())]
+        assert g.k_core(direction="in").tolist() == brute_force_cores(G, lambda H, u: H.in_degree(u))
+        assert g.k_core(direction="out").tolist() == brute_force_cores(G, lambda H, u: H.out_degree(u))
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_directed_clustering_against_networkx(G):
+    n = G.number_of_nodes()
+    with sparx.Graph(directed(G)) as g:
+        c = g.directed_clustering()
+        want = nx.clustering(G)
+        np.testing.assert_allclose(c["local"], [want[u] for u in range(n)], atol=1e-12)
+        assert c["average"] == pytest.approx(nx.average_clustering(G))
+
+
+def test_undirected_methods_refuse_directed_graphs():
+    with sparx.Graph(write_mtx("d.mtx", 3, [(0, 1), (1, 2), (0, 2)], False)) as g:
+        for method in (g.triangles, g.k_truss, g.k_core, g.clustering, g.louvain):
+            with pytest.raises(RuntimeError, match="needs an undirected graph"):
+                method()
+        with pytest.raises(ValueError, match="unknown direction"):
+            g.bfs(0, direction="sideways")
+        with pytest.raises(ValueError, match="unknown k-core algorithm"):
+            g.k_core(algorithm="nonsense", direction="out")
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_directed_louvain_against_networkx_modularity(G):
+    n = G.number_of_nodes()
+    with sparx.Graph(directed(G)) as g:
+        result = g.directed_louvain()
+        labels = result["communities"].tolist()
+        groups = [{u for u in range(n) if labels[u] == c} for c in range(result["count"])]
+        assert result["modularity"] == pytest.approx(nx.community.modularity(G, groups), abs=1e-12)
+        singletons = [{u} for u in range(n)]
+        assert result["modularity"] >= nx.community.modularity(G, singletons) - 1e-12

@@ -12,6 +12,19 @@ use super::{GraphCache, MTXHeader};
 
 #[allow(dead_code)]
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphCache<N, E, Ix> {
+    /// Whether a MatrixMarket file's header declares it `symmetric` or `skew-symmetric`: every
+    /// entry is then stored in both directions, so the graph is undirected by construction.
+    pub(super) fn mtx_header_is_symmetric<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let mut header = String::new();
+        BufReader::new(File::open(path.as_ref())?).read_line(&mut header)?;
+        Ok(header
+            .split_whitespace()
+            .nth(4)
+            .is_some_and(|s| !s.eq_ignore_ascii_case("general")))
+    }
+
     pub(super) fn parse_mtx_header<P: AsRef<Path>>(
         path: P,
     ) -> Result<MTXHeader, Box<dyn std::error::Error>> {

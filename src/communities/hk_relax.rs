@@ -45,6 +45,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> HKRelax<'a, N, E, Ix> {
         eps: f64,
         seed: Vec<usize>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        g.require_symmetric("HK-relax", None)?;
         let node_count = g.size();
         if node_count == 0 {
             return Err("error hk-relax invalid parameters: |V| == 0, the graph is empty".into());

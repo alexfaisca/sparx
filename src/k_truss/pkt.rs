@@ -309,6 +309,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         threads: usize,
         directed: Option<DirectedTriangleType>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        if directed.is_none() {
+            g.require_symmetric("PKT", Some("`AlgoPKT::new_directed`"))?;
+        }
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(cache_file(directed), None)?;
         let k_trusses = SharedSliceMut::<Tx>::abst_mem_mut(&out_fn, g.width(), true)?;

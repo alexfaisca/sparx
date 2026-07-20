@@ -1,4 +1,6 @@
 pub(crate) mod utils;
+mod impl_derive;
+pub(crate) use impl_derive::drop_derived_of;
 mod impl_metadata;
 mod impl_sort;
 #[cfg(feature = "nodes_edges")]
@@ -51,6 +53,9 @@ pub struct CacheMetadata {
     pub edge_label_size: usize,    // 0 if not labeled
     pub created_unix_secs: u64,    // book keeping
     pub tool_version: Option<String>,
+    /// Whether some arc `u -> v` lacks a reverse `v -> u` (see `GraphMemoryMap::is_directed`),
+    /// recorded when the entry is built. [`None`] for entries built before it was recorded.
+    pub directed: Option<bool>,
 }
 
 const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
@@ -130,6 +135,11 @@ pub unsafe trait AccumulatorAtomic: Default + Send + Sync + 'static {
     /// Atomically loads the current value, widened to `usize`. Unchecked: see the trait's
     /// documentation for why this is sound.
     fn load_widened(&self, order: portable_atomic::Ordering) -> usize;
+
+    /// Atomically replaces `current` with `new` if it's the value held, returning whether it
+    /// was. Both values must fit in `Self::Plain`'s range (callers only ever store values read
+    /// from the same width, e.g. node ids of an `Ix`-wide graph).
+    fn compare_exchange_widened(&self, current: usize, new: usize, order: portable_atomic::Ordering) -> bool;
 }
 
 macro_rules! impl_accumulator_atomic {
@@ -166,6 +176,17 @@ macro_rules! impl_accumulator_atomic {
             #[inline(always)]
             fn load_widened(&self, order: portable_atomic::Ordering) -> usize {
                 self.load(order) as usize
+            }
+
+            #[inline(always)]
+            fn compare_exchange_widened(
+                &self,
+                current: usize,
+                new: usize,
+                order: portable_atomic::Ordering,
+            ) -> bool {
+                self.compare_exchange(current as $plain, new as $plain, order, portable_atomic::Ordering::Relaxed)
+                    .is_ok()
             }
         }
     };
@@ -233,6 +254,9 @@ pub(crate) struct GraphCache<N: super::N, E: super::E, Ix: IndexType> {
     pub graph_bytes: usize,
     pub index_bytes: usize,
     pub readonly: bool,
+    /// Whether the graph is directed, when known before it's checked (e.g. MatrixMarket
+    /// `symmetric` inputs aren't): recorded in the metadata by `finish`, which checks it if not.
+    pub directed: Option<bool>,
     batch: Option<usize>,
     _marker1: PhantomData<N>,
     _marker2: PhantomData<E>,
@@ -466,6 +490,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         // tests' graph caches are removed when the test is done with them
         #[cfg(test)]
         crate::graph::test_utils::register_cache_id(id_from_filename(id)?);
+        // graphs derived from an earlier version of this entry are stale
+        impl_derive::drop_derived_of(&id_from_filename(id)?)?;
 
         let metadata_filename = Self::init_cache_file_from_id_or_random(id, FileType::CacheMetadata(H::H), None)?;
         let neighbors_filename =
@@ -541,6 +567,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             graph_bytes: 0,
             index_bytes: 0,
             readonly: false,
+            directed: None,
             batch: batch.map(|b| std::cmp::max(b, Self::DEFAULT_BATCHING_SIZE)),
             _marker1: PhantomData::<N>,
             _marker2: PhantomData::<E>,
@@ -585,9 +612,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         let metalabel_filename =
             Self::build_graph_filename(filename, GraphFile::MetaLabels, None)?;
 
-        println!("reading metadata from {metadata_filename} {neighbors_filename} {filename}");
         let metadata = CacheMetadata::read_file(&metadata_filename)?;
-        println!("Metadata for cache entry is: {}", metadata);
 
         // validate entry open request
         if metadata.index_size != std::mem::size_of::<Ix>() {
@@ -735,6 +760,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             graph_bytes: edges,
             index_bytes: nodes,
             readonly: true,
+            directed: None,
             batch,
             _marker1: PhantomData::<N>,
             _marker2: PhantomData::<E>,
@@ -802,6 +828,15 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             (None, _) => p.as_ref().to_str().map(str::to_owned),
         };
 
+        // an earlier version of this entry's files, algorithms' results included, are stale
+        // (before parsing: parsers create temporary files under the entry's id)
+        if let Some(key) = &key {
+            impl_derive::drop_derived_of(&id_from_filename(key)?)?;
+            let pattern = format!("{CACHE_DIR}*{}.*", id_from_filename(key)?);
+            for f in glob::glob(&pattern)?.flatten() {
+                let _ = std::fs::remove_file(f);
+            }
+        }
         let result = Self::from_file_type::<P, D>(p, input_type, id, batch, in_fst);
         // a failed parse leaves no partial cache entry behind
         if result.is_err()
@@ -1365,6 +1400,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         cache_id: &str,
         has_fst: bool,
         tool_version: Option<String>,
+        directed: bool,
     ) -> Result<CacheMetadata, Box<dyn std::error::Error>> {
         let edges = self.neighbors_file.metadata()?.len() as usize / size_of::<Ix>();
         let nodes = self.offsets_file.metadata()?.len() as usize / size_of::<Ix>();
@@ -1384,6 +1420,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             if N::is_labeled() { size_of::<N>() } else { 0 },
             if E::is_labeled() { size_of::<E>() } else { 0 },
             tool_version,
+            Some(directed),
         ))
     }
 
@@ -1391,6 +1428,19 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         let mut permissions = file.metadata()?.permissions();
         permissions.set_readonly(true);
         Ok(file.set_permissions(permissions)?)
+    }
+
+    /// Checks whether the (complete, sorted) graph is directed: whether some arc lacks a reverse.
+    fn check_directed(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.graph_bytes == 0 {
+            return Ok(false);
+        }
+        let offsets = AbstractedProceduralMemory::<Ix>::from_file_name(&self.offsets_filename)?;
+        let neighbors = AbstractedProceduralMemory::<Ix>::from_file_name(&self.neighbors_filename)?;
+        let offsets = offsets.as_slice().get(..self.index_bytes).ok_or("error offsets file is too short")?;
+        let neighbors = neighbors.as_slice().get(..self.graph_bytes).ok_or("error neighbors file is too short")?;
+        let threads = num_cpus::get_physical().max(1);
+        Ok(crate::graph::direction::find_asymmetric_arc(offsets, neighbors, threads)?.is_some())
     }
 
     fn finish<P: AsRef<Path>>(&mut self, dataset: P) -> Result<(), Box<dyn std::error::Error>> {
@@ -1409,12 +1459,18 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
     // Write metadata (text, no external deps)
     let has_fst = self.metalabel_file.metadata()?.len() > 0;
+    let directed = match self.directed {
+        Some(directed) => directed,
+        None => self.check_directed()?,
+    };
+    self.directed = Some(directed);
 
     let meta = self.build_metadata_simple(
         dataset.as_ref(),                 // store these when creating the cache
         &self.cache_id()?,
         has_fst,
         Some(env!("CARGO_PKG_VERSION").to_string()),
+        directed,
     )?;
 
     meta.write_file(self.metadata_filename())?;
@@ -1547,6 +1603,11 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             CacheFile::ExactCloseness => FileType::ExactClosenessCentrality(H::H),
             CacheFile::ExactHarmonic => FileType::ExactHarmonicCentrality(H::H),
             CacheFile::ExactLin => FileType::ExactLinCentrality(H::H),
+            CacheFile::ConnectedComponents => FileType::ConnectedComponents(H::H),
+            CacheFile::StronglyConnectedComponents => FileType::StronglyConnectedComponents(H::H),
+            CacheFile::KCoreDirected(d) => FileType::KCoreDirected(H::H, d),
+            CacheFile::DirectedClusteringCoefficient => FileType::DirectedClusteringCoefficient(H::H),
+            CacheFile::DirectedLouvain => FileType::DirectedLouvain(H::H),
         }
     }
 
@@ -1773,6 +1834,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         new_neighbors.flush()?;
         new_cache.index_bytes = offset_size;
         new_cache.graph_bytes = edge_count;
+        // same arcs: no need to check again
+        new_cache.directed = metadata.directed;
 
         // node/edge labels are `Ix`-independent and keep a stable (non-tmp) filename: copy
         // verbatim.
@@ -1857,6 +1920,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> Clone for GraphCache<N, E, Ix> {
             graph_bytes: self.graph_bytes,
             index_bytes: self.index_bytes,
             readonly: true,
+            directed: self.directed,
             batch: self.batch,
             _marker1: self._marker1,
             _marker2: self._marker2,

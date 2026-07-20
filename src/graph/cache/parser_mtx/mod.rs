@@ -139,6 +139,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         std::fs::remove_file(&d_fn)?;
 
         cache.merge_fsts(&[])?;
+        // mirrored entries make symmetric inputs undirected: no need to check
+        if Self::mtx_header_is_symmetric(path.as_ref())? {
+            cache.directed = Some(false);
+        }
+
         Ok(cache)
     }
 }
@@ -149,7 +154,7 @@ type MTXHeader = (usize, usize, usize);
 mod test {
     use super::GraphCache;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
-    use crate::graph::{GraphMemoryMap, label::VoidLabel};
+    use crate::graph::{GraphMemoryMap, IndexType, label::VoidLabel};
     use std::io::Write;
 
     fn write_tiny_mtx(path: &std::path::Path) {
@@ -315,18 +320,23 @@ mod test {
 
         // sanity check that algorithms operating directly on the CSR offsets/neighbors arrays
         // (not just the higher level iterator API exercised above) also agree between Ix widths
-        use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
-        let k_cores_usize = AlgoBatageljZaversnik::new(&graph_usize)
-            .expect("usize k-core computation should succeed")
-            .k_cores()
-            .to_vec();
-        let k_cores_u32 = AlgoBatageljZaversnik::new(&graph_u32)
-            .expect("u32 k-core computation should succeed")
-            .k_cores()
-            .to_vec();
+        // (BFS rather than an undirected-only algorithm: the fixture is a directed graph)
+        use crate::trails::bfs::BFSDists;
+        let distances_usize: Vec<usize> = BFSDists::new(&graph_usize, 0)
+            .expect("usize bfs should succeed")
+            .get_distances()
+            .iter()
+            .map(|d| d.index())
+            .collect();
+        let distances_u32: Vec<usize> = BFSDists::new(&graph_u32, 0)
+            .expect("u32 bfs should succeed")
+            .get_distances()
+            .iter()
+            .map(|d| d.index())
+            .collect();
         assert_eq!(
-            k_cores_usize, k_cores_u32,
-            "k-core numbers differ between usize and u32 Ix"
+            distances_usize, distances_u32,
+            "bfs distances differ between usize and u32 Ix"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -335,7 +345,7 @@ mod test {
     /// Regression test for the `AccumulatorAtomic`-generic degree/edge-position accumulation
     /// pipeline: parsing the same `.mtx` input with `AtomicUsize` (default), `AtomicU32`, and
     /// `AtomicU16` as the accumulator type --- with `Ix` fixed to `usize` --- must produce
-    /// identical graphs (same neighbour lists and k-core numbers), regardless of which width was
+    /// identical graphs (same neighbour lists and BFS distances), regardless of which width was
     /// used internally during construction.
     #[test]
     fn mtx_parser_round_trips_across_accumulators() {
@@ -410,26 +420,24 @@ mod test {
             );
         }
 
-        use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
-        let k_cores_default = AlgoBatageljZaversnik::new(&graph_default)
-            .expect("default accumulator k-core computation should succeed")
-            .k_cores()
-            .to_vec();
-        let k_cores_u32 = AlgoBatageljZaversnik::new(&graph_u32)
-            .expect("AtomicU32 accumulator k-core computation should succeed")
-            .k_cores()
-            .to_vec();
-        let k_cores_u16 = AlgoBatageljZaversnik::new(&graph_u16)
-            .expect("AtomicU16 accumulator k-core computation should succeed")
-            .k_cores()
-            .to_vec();
+        // (BFS rather than an undirected-only algorithm: the fixture is a directed graph)
+        use crate::trails::bfs::BFSDists;
+        let distances = |g: &GraphMemoryMap<VoidLabel, VoidLabel, usize>, what: &str| -> Vec<usize> {
+            BFSDists::new(g, 0)
+                .unwrap_or_else(|e| panic!("{what} accumulator bfs should succeed: {e}"))
+                .get_distances()
+                .to_vec()
+        };
+        let distances_default = distances(&graph_default, "default");
         assert_eq!(
-            k_cores_default, k_cores_u32,
-            "k-core numbers differ between AtomicUsize and AtomicU32 accumulators"
+            distances_default,
+            distances(&graph_u32, "AtomicU32"),
+            "bfs distances differ between AtomicUsize and AtomicU32 accumulators"
         );
         assert_eq!(
-            k_cores_default, k_cores_u16,
-            "k-core numbers differ between AtomicUsize and AtomicU16 accumulators"
+            distances_default,
+            distances(&graph_u16, "AtomicU16"),
+            "bfs distances differ between AtomicUsize and AtomicU16 accumulators"
         );
 
         std::fs::remove_dir_all(&dir).ok();

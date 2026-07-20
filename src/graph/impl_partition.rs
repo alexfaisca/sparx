@@ -17,6 +17,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         communities: &[Ix],
         comms_cardinality: usize,
     ) -> Result<f64, Box<dyn std::error::Error>> {
+        // the directed modularity is a different formula (k_out * k_in rather than k^2)
+        self.require_symmetric("modularity", None)?;
         let m2 = match self.width() {
             0 => return Ok(0.),
             edge_count => edge_count as f64,
@@ -171,6 +173,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         target_size: Option<usize>,
         target_volume: Option<usize>,
     ) -> Result<Community<usize>, Box<dyn std::error::Error>> {
+        self.require_symmetric("the conductance sweep cut", None)?;
         diffusion.sort_unstable_by_key(|(_, mass)| std::cmp::Reverse(OrderedFloat(*mass)));
         let target_size = target_size.map_or(self.size(), |s| s);
         let target_volume = target_volume.map_or(self.width(), |s| s);

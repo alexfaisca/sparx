@@ -20,10 +20,14 @@ use sparx::centralities::exact::{
 };
 use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::Precision;
+use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
-use sparx::graph::{GraphMemoryMap, IndexType};
-use sparx::k_core::{batagelj_zaversnik::AlgoBatageljZaversnik, liu_et_al::AlgoLiuEtAl};
-use sparx::k_truss::clustering_coefficient::ClusteringCoefficient;
+use sparx::components::{strong::StronglyConnectedComponents, weak::ConnectedComponents};
+use sparx::graph::{Direction, GraphMemoryMap, IndexType};
+use sparx::k_core::{
+    batagelj_zaversnik::AlgoBatageljZaversnik, directed::DirectedKCores, liu_et_al::AlgoLiuEtAl,
+};
+use sparx::k_truss::clustering_coefficient::{ClusteringCoefficient, DirectedClusteringCoefficient};
 use sparx::k_truss::count::TriangleCount;
 use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
 use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
@@ -146,6 +150,17 @@ macro_rules! with_precision {
     };
 }
 
+fn direction(name: &str) -> PyResult<Direction> {
+    match name {
+        "out" => Ok(Direction::Out),
+        "in" => Ok(Direction::In),
+        "both" => Ok(Direction::Both),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown direction {name:?}: expected 'out', 'in' or 'both'"
+        ))),
+    }
+}
+
 fn triangle_type(name: &str) -> PyResult<DirectedTriangleType> {
     let key: String = name
         .chars()
@@ -232,6 +247,41 @@ fn k_core<I: Ix>(g: &G<I>, bz: bool) -> Res<Out> {
     Ok(array(v))
 }
 
+fn k_core_directed<I: Ix>(g: &G<I>, direction: Direction) -> Res<Out> {
+    let mut a = DirectedKCores::new(g, direction)?;
+    let v = ix_array(a.k_cores());
+    a.drop_cache()?;
+    Ok(v)
+}
+
+fn components<I: Ix>(g: &G<I>, strong: bool) -> Res<Out> {
+    let (components, count, sizes) = if strong {
+        let mut c = StronglyConnectedComponents::new(g)?;
+        let r = (ix_array(c.components()), c.count(), c.sizes());
+        c.drop_cache()?;
+        r
+    } else {
+        let mut c = ConnectedComponents::new(g)?;
+        let r = (ix_array(c.components()), c.count(), c.sizes());
+        c.drop_cache()?;
+        r
+    };
+    let sizes: Vec<i64> = sizes.into_iter().map(|s| s as i64).collect();
+    Ok(dict(vec![
+        ("components", components),
+        ("count", number(count)),
+        ("sizes", array(sizes)),
+    ]))
+}
+
+fn directed_clustering<I: Ix>(g: &G<I>) -> Res<Out> {
+    let mut c = DirectedClusteringCoefficient::new(g)?;
+    let local = c.local_clustering_coefficients().to_vec();
+    let average = c.get_average_clustering_coefficient();
+    c.drop_cache()?;
+    Ok(dict(vec![("local", array(local)), ("average", number(average))]))
+}
+
 fn clustering<I: Ix>(g: &G<I>) -> Res<Out> {
     let mut c = ClusteringCoefficient::new(g)?;
     let local: Vec<f64> = (0..g.size())
@@ -261,6 +311,18 @@ fn louvain<I: Ix>(g: &G<I>) -> Res<Out> {
     ]))
 }
 
+fn directed_louvain<I: Ix>(g: &G<I>) -> Res<Out> {
+    let mut l = DirectedLouvain::new(g)?;
+    let communities = ix_array(l.communities());
+    let (count, modularity) = (l.community_count(), l.partition_modularity());
+    l.drop_cache()?;
+    Ok(dict(vec![
+        ("communities", communities),
+        ("count", number(count)),
+        ("modularity", number(modularity)),
+    ]))
+}
+
 fn hyperball_results<I: Ix, P: Precision>(
     mut hb: HyperBallInner<'_, (), (), I, P>,
     normalized: bool,
@@ -280,21 +342,26 @@ fn hyperball_results<I: Ix, P: Precision>(
     ]))
 }
 
-fn hyperball<I: Ix, P: Precision>(g: &G<I>, normalized: bool) -> Res<Out> {
-    hyperball_results(HyperBallInner::<_, _, _, P>::new(g)?, normalized)
+fn hyperball<I: Ix, P: Precision>(g: &G<I>, normalized: bool, direction: Direction) -> Res<Out> {
+    hyperball_results(HyperBallInner::<_, _, _, P>::new_directed(g, direction)?, normalized)
 }
 
 #[cfg(feature = "gpu")]
-fn hyperball_gpu<I: Ix, P: Precision>(g: &G<I>, normalized: bool) -> Res<Out> {
+fn hyperball_gpu<I: Ix, P: Precision>(
+    g: &G<I>,
+    normalized: bool,
+    direction: Direction,
+) -> Res<Out> {
     use sparx::gpu::{GpuBackend, WgpuBackend};
+    let g = g.view(direction)?;
     let backend = WgpuBackend::new()?;
     let device_graph = backend.upload_graph(g)?;
     let hb = HyperBallInner::<_, _, _, P>::new_gpu(g, &backend, &device_graph, None)?;
     hyperball_results(hb, normalized)
 }
 
-fn bfs<I: Ix>(g: &G<I>, source: usize) -> Res<Out> {
-    let mut b = BFSDists::new(g, source)?;
+fn bfs<I: Ix>(g: &G<I>, source: usize, direction: Direction) -> Res<Out> {
+    let mut b = BFSDists::new_directed(g, source, direction)?;
     // unreachable nodes are left at distance 0, like the source
     let v: Vec<i64> = b
         .get_distances()
@@ -542,6 +609,20 @@ impl Graph {
         }
     }
 
+    /// Whether the graph is directed: whether some arc `u -> v` has no reverse `v -> u`
+    /// (counting parallel arcs). Recorded when the graph is built. Undirected-only methods
+    /// (`triangles`, `k_truss()`, `k_core()`, `clustering`, `louvain()`) refuse directed graphs.
+    #[getter]
+    fn is_directed(&self) -> PyResult<bool> {
+        self.with(|g| Ok(with_graph!(g, g => g.is_directed()?)))
+    }
+
+    /// In-degree of node `u` (its degree, on undirected graphs).
+    fn in_degree(&self, u: usize) -> PyResult<usize> {
+        self.check_node(u)?;
+        self.with(|g| Ok(with_graph!(g, g => g.in_degree(u)?)))
+    }
+
     /// Out-degree of node `u`.
     fn degree(&self, u: usize) -> PyResult<usize> {
         self.check_node(u)?;
@@ -639,9 +720,17 @@ impl Graph {
         )
     }
 
-    /// Coreness of each node, by `"bz"` (Batagelj–Zaversnik) or `"liu"` (Liu et al.).
-    #[pyo3(signature = (*, algorithm = "bz"))]
-    fn k_core<'py>(&self, py: Python<'py>, algorithm: &str) -> PyResult<Bound<'py, PyAny>> {
+    /// Coreness of each node, by `"bz"` (Batagelj–Zaversnik) or `"liu"` (Liu et al.), of an
+    /// undirected graph. With a `direction`, the cores of a directed graph by in-degree
+    /// (`"in"`), out-degree (`"out"`) or both (`"both"`, networkx's `core_number`), whatever
+    /// `algorithm`.
+    #[pyo3(signature = (*, algorithm = "bz", direction = None))]
+    fn k_core<'py>(
+        &self,
+        py: Python<'py>,
+        algorithm: &str,
+        direction: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let bz = match algorithm {
             "bz" => true,
             "liu" => false,
@@ -651,6 +740,10 @@ impl Graph {
                 )));
             }
         };
+        if let Some(d) = direction {
+            let d = self::direction(d)?;
+            return self.run(py, |g| with_graph!(g, g => k_core_directed(g, d)));
+        }
         self.run(py, |g| with_graph!(g, g => k_core(g, bz)))
     }
 
@@ -659,38 +752,82 @@ impl Graph {
         self.run(py, |g| with_graph!(g, g => clustering(g)))
     }
 
+    /// Fagiolo's clustering coefficients of a directed graph (networkx's `clustering` on
+    /// directed graphs): `{"local": per node, "average": ...}`. On undirected graphs, the same as
+    /// `clustering`'s.
+    fn directed_clustering<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.run(py, |g| with_graph!(g, g => directed_clustering(g)))
+    }
+
+    /// Connected components, `"weak"` (ignoring arc directions) or `"strong"`:
+    /// `{"components": per node, "count": ..., "sizes": per component}`, components numbered by
+    /// their smallest node. The same on undirected graphs.
+    #[pyo3(signature = (*, kind = "weak"))]
+    fn components<'py>(&self, py: Python<'py>, kind: &str) -> PyResult<Bound<'py, PyAny>> {
+        let strong = match kind {
+            "weak" => false,
+            "strong" => true,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown kind of components {kind:?}: expected 'weak' or 'strong'"
+                )));
+            }
+        };
+        self.run(py, |g| with_graph!(g, g => components(g, strong)))
+    }
+
     /// GVE-Louvain communities: `{"communities": per node, "count": ..., "modularity": ...}`.
     fn louvain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.run(py, |g| with_graph!(g, g => louvain(g)))
+    }
+
+    /// Louvain communities of a directed graph, by Leicht and Newman's directed modularity (the
+    /// modularity networkx computes on directed graphs): `{"communities": per node, numbered by
+    /// smallest node, "count": ..., "modularity": ...}`. Also works on undirected graphs, where
+    /// `louvain` is faster.
+    fn directed_louvain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.run(py, |g| with_graph!(g, g => directed_louvain(g)))
     }
 
     /// HyperBall estimates (per node): `distances` and `harmonic_distances` (sums of distances
     /// and of their inverses to reachable nodes), and `closeness`, `harmonic` and `lin`
     /// centralities. `normalized` normalizes closeness and harmonic centralities by each node's
     /// reachable set rather than by `|V|`. `precision` (4 to 16) trades memory (`2^precision`
-    /// bytes per node) for accuracy.
-    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false))]
+    /// bytes per node) for accuracy. On directed graphs, distances follow arcs in `direction`:
+    /// `"out"` (the default) from each node, `"in"` to it (networkx's convention), `"both"`
+    /// ignoring directions.
+    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, direction = "out"))]
     fn hyperball<'py>(
         &self,
         py: Python<'py>,
         precision: u8,
         normalized: bool,
         gpu: bool,
+        direction: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let d = self::direction(direction)?;
         if gpu {
-            return self.hyperball_gpu(py, precision, normalized);
+            return self.hyperball_gpu(py, precision, normalized, d);
         }
         with_precision!(precision, P => self.run(py, |g| {
-            with_graph!(g, g => hyperball::<_, P>(g, normalized))
+            with_graph!(g, g => hyperball::<_, P>(g, normalized, d))
         }))?
     }
 
-    /// Exact closeness centrality of each node.
-    #[pyo3(signature = (*, normalized = true))]
-    fn closeness<'py>(&self, py: Python<'py>, normalized: bool) -> PyResult<Bound<'py, PyAny>> {
+    /// Exact closeness centrality of each node. On directed graphs, distances follow arcs in
+    /// `direction` (see `hyperball`).
+    #[pyo3(signature = (*, normalized = true, direction = "out"))]
+    fn closeness<'py>(
+        &self,
+        py: Python<'py>,
+        normalized: bool,
+        direction: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let d = self::direction(direction)?;
         self.run(py, |g| {
             with_graph!(g, g => {
-                let mut c = ExactClosenessCentrality::<_, _, _, f64>::new(g, Some(normalized))?;
+                let mut c =
+                    ExactClosenessCentrality::<_, _, _, f64>::new_directed(g, Some(normalized), d)?;
                 let v = c.centralities().to_vec();
                 c.drop_cache()?;
                 Ok(array(v))
@@ -698,12 +835,20 @@ impl Graph {
         })
     }
 
-    /// Exact harmonic centrality of each node.
-    #[pyo3(signature = (*, normalized = true))]
-    fn harmonic<'py>(&self, py: Python<'py>, normalized: bool) -> PyResult<Bound<'py, PyAny>> {
+    /// Exact harmonic centrality of each node. On directed graphs, distances follow arcs in
+    /// `direction` (see `hyperball`).
+    #[pyo3(signature = (*, normalized = true, direction = "out"))]
+    fn harmonic<'py>(
+        &self,
+        py: Python<'py>,
+        normalized: bool,
+        direction: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let d = self::direction(direction)?;
         self.run(py, |g| {
             with_graph!(g, g => {
-                let mut c = ExactHarmonicCentrality::<_, _, _, f64>::new(g, Some(normalized))?;
+                let mut c =
+                    ExactHarmonicCentrality::<_, _, _, f64>::new_directed(g, Some(normalized), d)?;
                 let v = c.centralities().to_vec();
                 c.drop_cache()?;
                 Ok(array(v))
@@ -711,11 +856,14 @@ impl Graph {
         })
     }
 
-    /// Exact Lin's centrality of each node.
-    fn lin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// Exact Lin's centrality of each node. On directed graphs, distances follow arcs in
+    /// `direction` (see `hyperball`).
+    #[pyo3(signature = (*, direction = "out"))]
+    fn lin<'py>(&self, py: Python<'py>, direction: &str) -> PyResult<Bound<'py, PyAny>> {
+        let d = self::direction(direction)?;
         self.run(py, |g| {
             with_graph!(g, g => {
-                let mut c = ExactLinCentrality::<_, _, _, f64>::new(g)?;
+                let mut c = ExactLinCentrality::<_, _, _, f64>::new_directed(g, d)?;
                 let v = c.centralities().to_vec();
                 c.drop_cache()?;
                 Ok(array(v))
@@ -723,10 +871,19 @@ impl Graph {
         })
     }
 
-    /// BFS distance of each node from `source` (`-1` for nodes it doesn't reach).
-    fn bfs<'py>(&self, py: Python<'py>, source: usize) -> PyResult<Bound<'py, PyAny>> {
+    /// BFS distance of each node from `source` (`-1` for nodes it doesn't reach). On directed
+    /// graphs it follows arcs in `direction`: `"out"` (the default) gives distances from
+    /// `source`, `"in"` to it, `"both"` ignores directions.
+    #[pyo3(signature = (source, *, direction = "out"))]
+    fn bfs<'py>(
+        &self,
+        py: Python<'py>,
+        source: usize,
+        direction: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
         self.check_node(source)?;
-        self.run(py, |g| with_graph!(g, g => bfs(g, source)))
+        let d = self::direction(direction)?;
+        self.run(py, |g| with_graph!(g, g => bfs(g, source, d)))
     }
 }
 
@@ -760,9 +917,10 @@ impl Graph {
         py: Python<'py>,
         precision: u8,
         normalized: bool,
+        direction: Direction,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_precision!(precision, P => self.run(py, |g| {
-            with_graph!(g, g => hyperball_gpu::<_, P>(g, normalized))
+            with_graph!(g, g => hyperball_gpu::<_, P>(g, normalized, direction))
         }))?
     }
 
@@ -772,6 +930,7 @@ impl Graph {
         _py: Python<'py>,
         _precision: u8,
         _normalized: bool,
+        _direction: Direction,
     ) -> PyResult<Bound<'py, PyAny>> {
         Err(no_gpu())
     }

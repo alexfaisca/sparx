@@ -11,6 +11,14 @@ type ProceduralMemoryDFS = (AbstractedProceduralMemoryMut<bool>,);
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
+/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
+/// it visits the nodes `source` reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] visits the nodes that reach `source`, [`Direction::Both`] ignores their directions.
+///
+/// [`Direction`]: ../../graph/direction/enum.Direction.html
+/// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
+/// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
+/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
 pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     /// Graph in which the DFS is to be performed.
     g: &'a GraphMemoryMap<N, E, Ix>,
@@ -22,6 +30,19 @@ pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
 
 #[allow(dead_code)]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
+    /// Performs a depth first search from `source`, following arcs in a given [`Direction`] (see the type's documentation):
+    /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
+    /// results are then of (its node ids are the graph's).
+    ///
+    /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
+    pub fn new_directed(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        source: usize,
+        direction: Direction,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(g.view(direction)?, source)
+    }
+
     /// Performs DFS in a [`GraphMemoryMap`] instance.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#

@@ -36,9 +36,8 @@ fn run(graph: &GraphMemoryMap<(), (), u32>) -> Result<(), Box<dyn std::error::Er
 
     let degeneracy = cores.iter().copied().max().unwrap_or(0);
     println!("degeneracy (max coreness): {degeneracy}");
-    // edges are indexed by their position in the CSR, so look an edge's coreness up by index
     println!(
-        "coreness of edge 0: {}",
+        "coreness of node 0: {}",
         cores.first().copied().unwrap_or(0)
     );
     let mut histogram = vec![0usize; degeneracy as usize + 1];
@@ -46,7 +45,7 @@ fn run(graph: &GraphMemoryMap<(), (), u32>) -> Result<(), Box<dyn std::error::Er
         histogram[k as usize] += 1;
     }
     for (k, count) in histogram.iter().enumerate().filter(|(_, c)| **c > 0) {
-        println!("  coreness {k:>3}: {count} edges");
+        println!("  coreness {k:>3}: {count} nodes");
     }
     Ok(())
 }

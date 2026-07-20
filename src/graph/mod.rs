@@ -1,4 +1,7 @@
 pub(crate) mod cache;
+pub mod direction;
+#[cfg(test)]
+mod direction_regression_test;
 mod export_induced_subgraph;
 mod impl_algos;
 mod impl_csc;
@@ -20,6 +23,7 @@ use crate::graph::cache::{AccumulatorAtomic, GraphCache};
 use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut};
 use cache::CacheMetadata;
 pub use weight::{Weight, WeightAtomic};
+pub use direction::Direction;
 pub use graph_derive::{GenericEdge, GenericEdgeType};
 
 use label::VoidLabel;
@@ -360,6 +364,14 @@ pub enum CacheFile {
     ExactCloseness,
     ExactHarmonic,
     ExactLin,
+    /// Weakly connected components (connected components, for undirected graphs).
+    ConnectedComponents,
+    StronglyConnectedComponents,
+    /// k-core decomposition of a directed graph, by in-, out- or total degree.
+    KCoreDirected(direction::Direction),
+    DirectedClusteringCoefficient,
+    /// Louvain partition of a directed graph (by Leicht and Newman's directed modularity).
+    DirectedLouvain,
 }
 
 enum GraphFile {
@@ -386,6 +398,12 @@ pub struct GraphMemoryMap<
     edge_size: usize,
     thread_count: u8,
     exports: u8,
+    /// Whether the graph is directed: recorded in its metadata, or else checked on first use.
+    directed: std::sync::OnceLock<bool>,
+    /// The graph's transpose and underlying undirected graph, once built (directed graphs only).
+    transpose: std::sync::OnceLock<Box<Self>>,
+    undirected: std::sync::OnceLock<Box<Self>>,
+    derive_lock: Arc<std::sync::Mutex<()>>,
     _marker: PhantomData<Ix>,
 }
 
@@ -423,6 +441,13 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
             let edge_size = std::mem::size_of::<Ix>();
             let thread_count = thread_count.unwrap_or(1).max(1);
             let exports = 0u8;
+            let directed = std::sync::OnceLock::new();
+            if let Some(d) = graph_cache
+                .directed
+                .or_else(|| graph_cache.metadata().ok().and_then(|m| m.directed))
+            {
+                let _ = directed.set(d);
+            }
 
             return Ok(Self {
                 graph,
@@ -434,6 +459,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 edge_size,
                 thread_count,
                 exports,
+                directed,
+                transpose: std::sync::OnceLock::new(),
+                undirected: std::sync::OnceLock::new(),
+                derive_lock: Arc::new(std::sync::Mutex::new(())),
                 _marker: PhantomData::<Ix>,
             });
         }
@@ -605,7 +634,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         self.graph_cache.fst_filename()
     }
 
-    /// Returns the given (by id) node's degree.
+    /// Returns the given (by id) node's degree: its number of arcs out, on directed graphs
+    /// (see [`in_degree`](Self::in_degree) for arcs in).
     #[inline(always)]
     pub fn node_degree(&self, node_id: usize) -> usize {
         assert!(node_id < self.size());
@@ -639,7 +669,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         }
     }
 
-    /// Returns a [`NeighbourIter`] iterator over the given (by id) node's neighbours.
+    /// Returns a [`NeighbourIter`] iterator over the given (by id) node's neighbours, sorted: its
+    /// out-neighbours, on directed graphs (see [`in_neighbours`](Self::in_neighbours) and
+    /// [`view`](Self::view) for others).
     ///
     /// [`NeighbourIter`]: ./struct.NeighbourIter.html#
     pub fn neighbours(
@@ -681,6 +713,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     }
 
     /// Computes the modularity over a given partition over the [`GraphMemoryMap`] instance's nodes.
+    ///
+    /// Undirected graphs only (directed ones are refused): see
+    /// [`directed_modularity`](crate::communities::directed_louvain::directed_modularity) for
+    /// Leicht and Newman's directed modularity.
     ///
     /// # Arguments
     ///
@@ -765,6 +801,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// This is equivalent to each edge's reciprocal edge in the `Compressed Sparse Row (CSR)`
     /// representation of the graph, i.e., if `e_i = (u, v)` then it's reciprocal `e_i' = (v, u)`.
     ///
+    /// Errors if the graph is directed (see [`is_directed`]), as edges would lack reciprocals.
+    ///
+    /// [`is_directed`]: ./struct.GraphMemoryMap.html#method.is_directed
     pub fn edge_reciprocal(
         &self,
     ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
@@ -852,6 +891,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
     /// Export the [`GraphMemoryMap`] instance to petgraph's [`DiGraph`](https://docs.rs/petgraph/latest/petgraph/graph/type.DiGraph.html) format stripping any edge or node labelings whatsoever.
     ///
+    /// Every stored arc becomes one petgraph edge: an undirected graph's edges become a pair of
+    /// opposite edges each.
+    ///
     /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
     #[cfg(feature = "petgraph")]
     pub fn export_petgraph_stripped(
@@ -915,6 +957,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         ParEdgeIndices::new(0, self.width())
     }
 
+    /// Iterates over the nodes without neighbours: on directed graphs, without arcs out (sinks
+    /// included; nodes without arcs in or out are isolated in [`to_undirected`](Self::to_undirected)).
     pub fn iter_isolated_nodes(&self) -> NodesWithDegree<N, E, Ix> {
         NodesWithDegree::new(self.offsets_ptr(), self.size(), 0)
     }
@@ -928,6 +972,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         ParNodesWithDegree::new(self.offsets_ptr(), self.size(), 0)
     }
 
+    /// Iterates over the nodes of a given [degree](Self::node_degree) (out-degree, on directed
+    /// graphs).
     pub fn iter_nodes_with_degree(&self, degree: usize) -> NodesWithDegree<N, E, Ix> {
         NodesWithDegree::new(self.offsets_ptr(), self.size(), degree)
     }
@@ -944,6 +990,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         ParNodesWithDegree::new(self.offsets_ptr(), self.size(), degree)
     }
 
+    /// Iterates over the nodes of [degree](Self::node_degree) below a given one (out-degree, on
+    /// directed graphs).
     pub fn iter_nodes_with_degree_lt(&self, degree: usize) -> NodesWithDegreeLT<N, E, Ix> {
         NodesWithDegreeLT::new(self.offsets_ptr(), self.size(), degree)
     }
@@ -960,6 +1008,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         ParNodesWithDegreeLT::new(self.offsets_ptr(), self.size(), degree)
     }
 
+    /// Iterates over the nodes of [degree](Self::node_degree) at least a given one (out-degree, on
+    /// directed graphs).
     pub fn iter_nodes_with_degree_ge(&self, degree: usize) -> NodesWithDegreeGE<N, E, Ix> {
         NodesWithDegreeGE::new(self.offsets_ptr(), self.size(), degree)
     }
@@ -1059,7 +1109,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         )
     }
 
-    /// Returns a [`Dfs`] iterator yielding every node reachable from `source`, in depth-first
+    /// Returns a [`Dfs`] iterator yielding every node reachable from `source` (along arcs out of
+    /// nodes, on directed graphs: run it on a [`view`](Self::view) for others), in depth-first
     /// discovery order (`source` itself first) --- a lazy, pull-based alternative to
     /// [`DFSVisit`](crate::trails::dfs_visit::DFSVisit)'s full callback-based traversal, for
     /// callers that just want nodes in DFS order (e.g. `graph.dfs(0)?.take(5).collect()`)
@@ -1076,7 +1127,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         Dfs::new(self, source)
     }
 
-    /// Returns a [`Bfs`] iterator yielding every node reachable from `source`, in breadth-first
+    /// Returns a [`Bfs`] iterator yielding every node reachable from `source` (along arcs out of
+    /// nodes, on directed graphs: run it on a [`view`](Self::view) for others), in breadth-first
     /// discovery order (`source` itself first). See [`GraphMemoryMap::dfs`] for the rationale.
     pub fn bfs(&self, source: usize) -> Result<Bfs<'_, N, E, Ix>, Box<dyn std::error::Error>> {
         if source >= self.size() {
@@ -1103,6 +1155,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
         let er_fn = this.build_cache_filename(CacheFile::EdgeReciprocal, None)?;
         let eo_fn = this.build_cache_filename(CacheFile::EdgeOver, None)?;
+        // the graphs derived from it (its transpose, underlying undirected graph, theirs...),
+        // whether built in this process or an earlier one, with their algorithms' results
+        cache::drop_derived_of(&id)?;
 
         let _r = std::fs::remove_file(er_fn);
         let _r = std::fs::remove_file(eo_fn);

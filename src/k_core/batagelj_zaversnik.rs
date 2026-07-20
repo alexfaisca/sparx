@@ -60,6 +60,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     pub fn get_or_compute(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("Batagelj and Zaversnik's k-core decomposition", None)?;
         let c_fn = g.build_cache_filename(CacheFile::KCoreBZ, None)?;
         if Path::new(&c_fn).exists() {
             if let Ok(k_cores) = AbstractedProceduralMemoryMut::from_file_name(&c_fn) {
@@ -154,6 +155,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     fn new_no_compute_impl(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("Batagelj and Zaversnik's k-core decomposition", None)?;
         let out_fn = g.build_cache_filename(CacheFile::KCoreBZ, None)?;
         let k_cores = SharedSliceMut::<u8>::abst_mem_mut(&out_fn, g.size(), true)?;
         Ok(Self { g, k_cores })

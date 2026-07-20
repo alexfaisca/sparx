@@ -12,8 +12,12 @@ pub mod test_common;
 #[cfg(test)]
 mod cross_ix_sweep_test;
 
+#[cfg(test)]
+mod directed_algorithms_test;
+
 pub mod centralities;
 pub mod communities;
+pub mod components;
 pub mod graph;
 #[cfg(feature = "gpu")]
 pub mod gpu;

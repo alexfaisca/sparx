@@ -65,6 +65,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let handle = s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let mut idx = Vec::with_capacity(u16::MAX as usize);
+                        let mut destination: Vec<usize> = Vec::new();
                         for node in begin..end {
                             let begin = D::widen(*offsets.get(node));
                             let end = D::widen(*offsets.get(node + 1));
@@ -83,8 +84,15 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                                         .into()
                                 },
                             )?;
+                            // idx[k]: the edge that goes to position k; applying it needs each edge's
+                            // position instead
                             idx.sort_by_key(|&i| node_edges[i]);
-                            apply_permutation_in_place(idx.as_mut_slice(), node_edges, edge_labels);
+                            destination.clear();
+                            destination.resize(idx.len(), 0);
+                            for (position, &edge) in idx.iter().enumerate() {
+                                destination[edge] = position;
+                            }
+                            apply_permutation_in_place(destination.as_mut_slice(), node_edges, edge_labels);
                         }
                         Ok(())
                 });

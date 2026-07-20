@@ -39,6 +39,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("the clustering coefficient", None)?;
         let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
         let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut clustering_coefficient = Self {
@@ -60,6 +61,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         g: &'a GraphMemoryMap<N, E, Ix>,
         triangles: Triangles<'a, N, E, Ix, Tx>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("the clustering coefficient", None)?;
         let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
         let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut clustering_coefficient = Self {
@@ -230,5 +232,207 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         triangles.drop_cache()?;
 
         Ok(())
+    }
+}
+
+/// For the computation of a directed [`GraphMemoryMap`] instance's local clustering
+/// coefficients and their average, as defined by Fagiolo in ["Clustering in complex directed
+/// networks"](https://doi.org/10.1103/PhysRevE.76.026107) (and computed by networkx's
+/// `clustering` on directed graphs):
+///
+/// `C(i) = t(i) / (d(i) (d(i) - 1) - 2 d↔(i))`
+///
+/// where `t(i)` counts the directed triangles through `i`, of any orientation, `d(i)` is `i`'s
+/// in- plus out-degree and `d↔(i)` the number of its reciprocated arcs (with multiplicity: the
+/// product of the arcs each way). Self-loops are ignored. On undirected graphs it's the usual
+/// clustering coefficient ([`ClusteringCoefficient`]).
+///
+/// Built on the counts of [`DirectedTriangles`] of every type
+/// ([`DirectedTriangleType::CycleFeedForward`]): an arc `u -> v`'s count is
+/// `Σ_w (a(u,w) + a(w,u)) (a(v,w) + a(w,v))`, and summing it over a node's arcs, in and out,
+/// gives `2 t(i)`.
+///
+/// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+/// [`DirectedTriangles`]: ../directed/struct.DirectedTriangles.html
+/// [`DirectedTriangleType::CycleFeedForward`]: ../directed/enum.DirectedTriangleType.html#variant.CycleFeedForward
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct DirectedClusteringCoefficient<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+    /// Graph for which the clustering coefficients are computed.
+    g: &'a GraphMemoryMap<N, E, Ix>,
+    /// Memmapped slice containing each node's local clustering coefficient.
+    local: AbstractedProceduralMemoryMut<f64>,
+    /// Average of the local clustering coefficients.
+    local_average: f64,
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoefficient<'a, N, E, Ix> {
+    /// Computes the directed clustering coefficients of a [`GraphMemoryMap`] instance,
+    /// counting triangles as `u32`s (see [`new_tx`](Self::new_tx) for other widths).
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_tx::<u32>(g)
+    }
+
+    /// Computes the directed clustering coefficients of a [`GraphMemoryMap`] instance,
+    /// counting each arc's triangles as `Tx` integers.
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    pub fn new_tx<Tx: TriangleCount>(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        use super::directed::{DirectedTriangleType, DirectedTriangles};
+
+        // what can fail first, so that failing leaves no result file behind
+        let transpose = g.transpose()?;
+        let mut triangles =
+            DirectedTriangles::<_, _, _, Tx>::new_tx(g, DirectedTriangleType::CycleFeedForward)?;
+        let out_fn = g.build_cache_filename(CacheFile::DirectedClusteringCoefficient, None)?;
+        let mut local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
+
+        let node_count = g.size();
+        let index_ptr = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width());
+
+        // 2 t(i): every arc's triangles, at both of its ends
+        let t = local.as_mut_slice();
+        let counts = triangles.all_triangles();
+        for u in 0..node_count {
+            for e in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                let v = neighbours_ptr.get(e).index();
+                let c = counts[e].count() as f64;
+                t[u] += c;
+                t[v] += c;
+            }
+        }
+
+        let mut sum = 0f64;
+        for (i, t_i) in t.iter_mut().enumerate() {
+            let outs: Vec<usize> = g.neighbours(i)?.filter(|&j| j != i).collect();
+            let ins: Vec<usize> = transpose.neighbours(i)?.filter(|&j| j != i).collect();
+            let degree = (outs.len() + ins.len()) as f64;
+            // d↔(i): the product of the runs of each neighbour in both sorted lists
+            let mut reciprocated = 0usize;
+            let (mut a, mut b) = (0, 0);
+            while a < outs.len() && b < ins.len() {
+                match outs[a].cmp(&ins[b]) {
+                    std::cmp::Ordering::Less => a += 1,
+                    std::cmp::Ordering::Greater => b += 1,
+                    std::cmp::Ordering::Equal => {
+                        let j = outs[a];
+                        let run_out = outs[a..].iter().take_while(|&&x| x == j).count();
+                        let run_in = ins[b..].iter().take_while(|&&x| x == j).count();
+                        reciprocated += run_out * run_in;
+                        a += run_out;
+                        b += run_in;
+                    }
+                }
+            }
+            let possible = degree * (degree - 1.) - 2. * reciprocated as f64;
+            *t_i = if possible > 0. { *t_i / 2. / possible } else { 0. };
+            sum += *t_i;
+        }
+        triangles.drop_cache()?;
+        local.flush()?;
+
+        Ok(Self {
+            g,
+            local,
+            local_average: if node_count > 0 { sum / node_count as f64 } else { 0. },
+        })
+    }
+
+    /// Returns the average of the local clustering coefficients (nodes without triangles
+    /// included, as zeros).
+    pub fn get_average_clustering_coefficient(&self) -> f64 {
+        self.local_average
+    }
+
+    /// Returns a node's local clustering coefficient.
+    pub fn get_node_clustering_coefficient(&self, id: usize) -> f64 {
+        assert!(id < self.g.size());
+        *self.local.get(id)
+    }
+
+    /// Returns a slice containing each node's local clustering coefficient.
+    pub fn local_clustering_coefficients(&self) -> &[f64] {
+        self.local.as_slice()
+    }
+
+    /// Removes all cached files pertaining to this algorithm's execution's results.
+    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let this = ManuallyDrop::new(self);
+        let out_fn = this.g.build_cache_filename(CacheFile::DirectedClusteringCoefficient, None)?;
+        std::fs::remove_file(out_fn)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod directed_test {
+    use super::*;
+    use crate::components::test_utils::{graph, random_arcs};
+
+    /// Fagiolo's formula, with adjacency matrices (`a[i][j]`: arcs `i -> j`, self-loops ignored).
+    fn brute_force(n: usize, arcs: &[(usize, usize)]) -> Vec<f64> {
+        let mut a = vec![vec![0f64; n]; n];
+        for &(u, v) in arcs {
+            if u != v {
+                a[u][v] += 1.;
+            }
+        }
+        let s = |i: usize, j: usize| a[i][j] + a[j][i];
+        (0..n)
+            .map(|i| {
+                let mut t = 0.;
+                for j in 0..n {
+                    for h in 0..n {
+                        t += s(i, j) * s(i, h) * s(j, h);
+                    }
+                }
+                t /= 2.;
+                let degree: f64 = (0..n).map(|j| s(i, j)).sum();
+                let reciprocated: f64 = (0..n).map(|j| a[i][j] * a[j][i]).sum();
+                let possible = degree * (degree - 1.) - 2. * reciprocated;
+                if possible > 0. { t / possible } else { 0. }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn directed_clustering_coefficients_match_brute_force() {
+        for (name, n, arcs) in [
+            // networkx: clustering(nx.DiGraph([(0,1),(0,2),(1,2)])) == {0: 1, 1: 1, 2: 1}
+            ("feed_forward", 3, vec![(0, 1), (0, 2), (1, 2)]),
+            ("cycle_with_reciprocal", 4, vec![(0, 1), (1, 2), (2, 0), (1, 0), (2, 3)]),
+            ("multi_and_loops", 5, vec![(0, 1), (0, 1), (1, 2), (2, 0), (3, 3), (2, 4), (4, 0)]),
+            ("random", 30, random_arcs(30, 160, 9)),
+        ] {
+            let g = graph(name, "general", n, &arcs);
+            let cc = DirectedClusteringCoefficient::new(&g).unwrap();
+            let want = brute_force(n, &arcs);
+            for (i, (got, want)) in cc.local_clustering_coefficients().iter().zip(&want).enumerate() {
+                assert!((got - want).abs() < 1e-12, "{name}: node {i}: {got} != {want}");
+            }
+            let average = want.iter().sum::<f64>() / n as f64;
+            assert!((cc.get_average_clustering_coefficient() - average).abs() < 1e-12, "{name}");
+        }
+    }
+
+    #[test]
+    fn directed_clustering_coefficients_of_undirected_graphs_are_the_usual_ones() {
+        let edges = random_arcs(30, 120, 4).into_iter().filter(|(u, v)| u < v).collect::<Vec<_>>();
+        let mut simple = edges.clone();
+        simple.sort();
+        simple.dedup();
+        let g = graph("undirected", "symmetric", 30, &simple);
+        let directed = DirectedClusteringCoefficient::new(&g).unwrap();
+        let undirected = ClusteringCoefficient::new(&g).unwrap();
+        for i in 0..30 {
+            let (d, u) = (directed.get_node_clustering_coefficient(i), undirected.get_node_clusteringcoefficient(i));
+            assert!((d - u).abs() < 1e-12, "node {i}: {d} != {u}");
+        }
     }
 }

@@ -103,6 +103,11 @@ impl<Ix: crate::graph::IndexType, A: BfsVisitor<Ix>, B: BfsVisitor<Ix>> BfsVisit
 
 /// For the computation of BFS with visitor pattern on a [`GraphMemoryMap`] instance.
 ///
+/// It follows arcs out of nodes, on directed graphs: pass it a [`view`] of the graph to follow
+/// them in another [`Direction`].
+///
+/// [`view`]: ../../graph/struct.GraphMemoryMap.html#method.view
+/// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 pub struct BFSVisit<'a, G: Graph> {

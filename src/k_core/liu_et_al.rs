@@ -64,6 +64,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
     pub fn get_or_compute(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("Liu et al.'s k-core decomposition", None)?;
         let c_fn = g.build_cache_filename(CacheFile::KCoreLEA, None)?;
         if Path::new(&c_fn).exists() {
             if let Ok(k_cores) = AbstractedProceduralMemoryMut::from_file_name(&c_fn) {
@@ -191,6 +192,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("Liu et al.'s k-core decomposition", None)?;
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::KCoreLEA, None)?;
         let k_cores = SharedSliceMut::<u8>::abst_mem_mut(&out_fn, g.size(), true)?;

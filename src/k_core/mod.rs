@@ -1,4 +1,5 @@
 pub mod batagelj_zaversnik;
+pub mod directed;
 pub mod liu_et_al;
 
 #[cfg(test)]

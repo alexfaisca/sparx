@@ -19,6 +19,11 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_vi
 {
     type Ix = Ix;
 
+    fn directed(&self) -> bool {
+        // recorded with the graph; if it can't be told, report every back edge
+        self.is_directed().unwrap_or(true)
+    }
+
     fn s(&self) -> usize {
         self.size()
     }

@@ -63,6 +63,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
         eps: f64,
         target_conductance: f64,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        g.require_symmetric("approximate Dirichlet heat kernel PageRank", None)?;
         let node_count = g.size();
         if node_count == 0 {
             return Err(

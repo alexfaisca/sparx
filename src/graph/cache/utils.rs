@@ -293,6 +293,11 @@ pub enum FileType {
     ExactClosenessCentrality(H),
     ExactHarmonicCentrality(H),
     ExactLinCentrality(H),
+    ConnectedComponents(H),
+    StronglyConnectedComponents(H),
+    KCoreDirected(H, crate::graph::direction::Direction),
+    DirectedClusteringCoefficient(H),
+    DirectedLouvain(H),
     #[cfg(any(test, feature = "bench"))]
     Test(H),
 }
@@ -424,6 +429,13 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::ExactClosenessCentrality(_) => SUFFIX_FOR_EXACT_CLOSENESS_CENTRALITY,
         FileType::ExactHarmonicCentrality(_) => SUFFIX_FOR_EXACT_HARMONIC_CENTRALITY,
         FileType::ExactLinCentrality(_) => SUFFIX_FOR_EXACT_LIN_CENTRALITY,
+        FileType::ConnectedComponents(_) => "components",
+        FileType::StronglyConnectedComponents(_) => "strongcomponents",
+        FileType::KCoreDirected(_, crate::graph::direction::Direction::Out) => "kcoreout",
+        FileType::KCoreDirected(_, crate::graph::direction::Direction::In) => "kcorein",
+        FileType::KCoreDirected(_, crate::graph::direction::Direction::Both) => "kcoreboth",
+        FileType::DirectedClusteringCoefficient(_) => "directedclustering",
+        FileType::DirectedLouvain(_) => "directedlouvain",
         #[cfg(any(test, feature = "bench"))]
         FileType::Test(_) => SUFFIX_FOR_TEST,
     }
@@ -520,6 +532,11 @@ impl std::fmt::Display for FileType {
             FileType::ExactClosenessCentrality(_) => "ExactClosenessCentrality",
             FileType::ExactHarmonicCentrality(_) => "ExactHarmonicCentrality",
             FileType::ExactLinCentrality(_) => "ExactLinCentrality",
+            FileType::ConnectedComponents(_) => "ConnectedComponents",
+            FileType::StronglyConnectedComponents(_) => "StronglyConnectedComponents",
+            FileType::KCoreDirected(_, _) => "KCoreDirected",
+            FileType::DirectedClusteringCoefficient(_) => "DirectedClusteringCoefficient",
+            FileType::DirectedLouvain(_) => "DirectedLouvain",
             #[cfg(any(test, feature = "bench"))]
             FileType::Test(_) => "Test",
         };

@@ -28,6 +28,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
   - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
+  - [Directed graphs](#directed-graphs)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -473,6 +474,45 @@ in a single one (typically up to 4 GB, e.g. ~1B edges); runs that don't fit fail
 error. `WGPU_BACKEND` and `WGPU_ADAPTER_NAME` select a backend/adapter --- without a GPU, Mesa's
 lavapipe (a software Vulkan driver) runs the same kernels on the CPU, which is how the GPU tests
 (`cargo test --features gpu`) run on machines without one.
+
+## Directed Graphs
+
+A graph is *directed* when some arc `u -> v` has no reverse `v -> u` (counting parallel arcs). This
+is recorded once, when the graph's cache entry is built, so checking it is free: MatrixMarket
+`symmetric` files and graphs listing every arc both ways are undirected, `general` files with an
+unreciprocated arc are directed.
+
+```rust
+use sparx::graph::{Direction, GraphMemoryMap};
+
+let g: GraphMemoryMap<(), (), u32> = GraphMemoryMap::from_file("web.mtx", None, Some(16))?;
+assert!(g.is_directed()?);
+g.in_degree(0)?;                    // arcs into node 0 (`node_degree` counts arcs out)
+let t = g.transpose()?;             // every arc reversed
+let u = g.to_undirected()?;         // the underlying undirected graph
+let v = g.view(Direction::In)?;     // `Out` (the graph), `In` (its transpose), `Both` (undirected)
+```
+
+The transpose and the underlying undirected graph are built once (in `O(|V| + |E|)`), cached next to
+the graph and dropped with it. They keep node ids, so per-node results computed on them are results
+of the graph. `to_undirected` keeps multiplicity: arcs both ways between two nodes become parallel
+edges, which triangle based algorithms count separately. On undirected graphs every view is the
+graph itself, so undirected graphs never pay for any of this.
+
+What each algorithm does with direction:
+
+| Algorithm | On directed graphs |
+|---|---|
+| Triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut | Refused, with an error naming an unreciprocated arc: run them on `g.to_undirected()?` |
+| `DirectedTriangles`, PKT/Burkhardt et al. `new_directed*` | Directed triangles of any combination of roles (cycle, out, in, middleman) |
+| `DirectedClusteringCoefficient` | Fagiolo's clustering coefficient (networkx's `clustering` on directed graphs) |
+| `DirectedKCores::new(g, direction)` | k-cores by in-degree (`In`), out-degree (`Out`) or both (`Both`, networkx's `core_number`) |
+| `ConnectedComponents`, `StronglyConnectedComponents` | Weakly and strongly connected components |
+| `DirectedLouvain`, `directed_modularity` | Louvain communities by Leicht and Newman's directed modularity (networkx's `modularity` on directed graphs) |
+| BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall, exact closeness/harmonic/Lin centralities | Follow arcs out of nodes by default (`Direction::Out`: distances *from* a node); `new_directed(.., direction)` follows them in (`In`: distances *to* a node, networkx's convention) or both ways |
+| Hierholzer's Euler trails | Requires as many arcs in as out of every node (checked) |
+
+Algorithms that work on any graph give the usual results on undirected ones.
 
 ## Python
 

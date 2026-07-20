@@ -9,12 +9,18 @@ use std::path::Path;
 
 type ProceduralMemoryHierholzers<Ix> = (
     AbstractedProceduralMemoryMut<Ix>,
-    AbstractedProceduralMemoryMut<u8>,
+    // each node's arcs left to walk: a degree, which `Ix` holds
+    AbstractedProceduralMemoryMut<Ix>,
 );
 
 type AllEulerTrailsConcatenatedWithBounds<'a, Ix> = (&'a [Ix], Box<[(usize, usize)]>);
 
 /// For the computation of the euler trail(s) of a [`GraphMemoryMap`] instance using *Hierholzer's Algorithm*.
+///
+/// Each trail is a closed walk using every arc of a connected component once, following arcs
+/// out of nodes: undirected graphs' edges are walked once each way. A directed graph must
+/// therefore have, at every node, as many arcs in as out (be Eulerian), which is checked: other
+/// directed graphs have no closed trails covering their arcs.
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
@@ -239,6 +245,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     fn new_no_compute_impl(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // closed trails need as many arcs in as out of every node (free for undirected graphs)
+        if g.is_directed()? {
+            for v in 0..g.size() {
+                let (arcs_in, arcs_out) = (g.in_degree(v)?, g.node_degree(v));
+                if arcs_in != arcs_out {
+                    return Err(format!(
+                        "error Hierholzer's algorithm needs every node of a directed graph to have \
+                         as many arcs in as out, but node {v} has {arcs_in} in and {arcs_out} out"
+                    )
+                    .into());
+                }
+            }
+        }
         let i_fn = g.build_cache_filename(CacheFile::EulerIndex, None)?;
         let t_fn = g.build_cache_filename(CacheFile::EulerTrail, None)?;
         Ok(Self {
@@ -259,7 +278,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
         let c_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(1))?;
 
         let edges = SharedSliceMut::<Ix>::abst_mem_mut(&e_fn, node_count, true)?;
-        let count = SharedSliceMut::<u8>::abst_mem_mut(&c_fn, node_count, true)?;
+        let count = SharedSliceMut::<Ix>::abst_mem_mut(&c_fn, node_count, true)?;
 
         thread::scope(|scope| {
             // initializations always uses at least two threads per core
@@ -275,7 +294,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
                 scope.spawn(move |_| {
                     for k in begin..end {
                         *edges.get_mut(k) = *index_ptr.get(k);
-                        *count.get_mut(k) = (index_ptr.get(k + 1).index() - index_ptr.get(k).index()) as u8;
+                        *count.get_mut(k) = Ix::new(index_ptr.get(k + 1).index() - index_ptr.get(k).index());
                     }
                 });
             }
@@ -315,7 +334,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
                 if idx >= node_count {
                     break None;
                 }
-                if *edge_count.get(idx) > 0 {
+                if edge_count.get(idx).index() > 0 {
                     break Some(idx);
                 }
                 start_vertex_counter += 1;
@@ -333,8 +352,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
 
             stack.push(start_v);
             while let Some(&v) = stack.last() {
-                if *edge_count.get(v) > 0 {
-                    *edge_count.get_mut(v) -= 1;
+                if edge_count.get(v).index() > 0 {
+                    *edge_count.get_mut(v) = Ix::new(edge_count.get(v).index() - 1);
                     let next_node = neighbours_ptr.get(edges.get(v).index()).index();
                     stack.push(next_node);
                     *edges.get_mut(v) = Ix::new(edges.get(v).index() + 1);

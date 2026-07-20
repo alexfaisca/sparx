@@ -284,6 +284,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        g.require_symmetric("GVE-Louvain", None)?;
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::GVELouvain, None)?;
         let coms = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;

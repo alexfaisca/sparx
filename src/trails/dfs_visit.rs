@@ -32,6 +32,11 @@ pub trait Graph {
         seq: Option<usize>,
     ) -> Result<String, Box<dyn std::error::Error>>;
     fn cleanup(&self, target: CacheFile) -> Result<(), Box<dyn std::error::Error>>;
+    /// Whether the graph is directed: if not, the edge back to a node's parent is the tree edge
+    /// walked the other way, rather than a back edge.
+    fn directed(&self) -> bool {
+        false
+    }
 }
 
 /// DFS visitor with default no-ops. Return Break(()) to stop early.
@@ -115,6 +120,11 @@ impl<Ix: crate::graph::IndexType, A: DfsVisitor<Ix>, B: DfsVisitor<Ix>> DfsVisit
 
 /// For the computation of DFS with visitor pattern on a [`GraphMemoryMap`] instance.
 ///
+/// It follows arcs out of nodes, on directed graphs: pass it a [`view`] of the graph to follow
+/// them in another [`Direction`].
+///
+/// [`view`]: ../../graph/struct.GraphMemoryMap.html#method.view
+/// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 pub struct DFSVisit<'a, G: Graph> {
@@ -264,6 +274,8 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
         let mut par = self.parents.shared_slice();
 
         let source = G::Ix::new(self.source);
+        // in undirected graphs, the edge back to a node's parent is the tree edge reversed
+        let skip_parent_edge = !self.g.directed();
 
         // explicit DFS stack: pairs each pending node with an in-place, resumable neighbour
         // iterator (no per-node allocation/copy of its adjacency list).
@@ -305,8 +317,8 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
                     next.push((v, self.g.neigh(v)));
                     continue 'outer;
                 } else if !finished.get(v.index()) {
-                    // back edge; in UNDIRECTED graphs, ignore the edge to parent
-                    if *par.get(u.index()) != v {
+                    // back edge (except, in undirected graphs, the tree edge reversed)
+                    if !(skip_parent_edge && u != v && *par.get(u.index()) == v) {
                         if let ControlFlow::Break(()) = self.visit.back_edge(u, v) {
                             return Ok(());
                         }

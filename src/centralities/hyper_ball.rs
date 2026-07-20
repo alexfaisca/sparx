@@ -55,6 +55,14 @@ enum Centrality {
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
+/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
+/// a node's distances are to the nodes it reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"), [`Direction::Both`] ignores their directions.
+///
+/// [`Direction`]: ../../graph/direction/enum.Direction.html
+/// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
+/// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
+/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
 pub struct HyperBallInner<
     'a,
     N: graph::N,
@@ -93,6 +101,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 {
     const DEAFULT_MAX_DEPTH: usize = 100;
     const MAX_MAX_DEPTH: usize = 1024;
+
+    /// Runs *HyperBall*, following arcs in a given [`Direction`] (see the type's documentation):
+    /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
+    /// results are then of (its node ids are the graph's).
+    ///
+    /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
+    pub fn new_directed(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        direction: Direction,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(g.view(direction)?)
+    }
 
     /// Performs the *HyperBall Algorithm* as described in ["In-Core Computation of Geometric Centralities with HyperBall: A Hundred Billion Nodes and Beyond"](https://doi.org/10.48550/arXiv.1308.2144) by Boldi P. and Vigna S.
     ///
