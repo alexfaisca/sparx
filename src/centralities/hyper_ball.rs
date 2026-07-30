@@ -20,19 +20,19 @@ type ProceduralMemoryHB<P, W> = (
     AbstractedProceduralMemoryMut<W>,
 );
 
-pub type HyperBall4<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision4>;
-pub type HyperBall5<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision5>;
-pub type HyperBall6<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision6>;
-pub type HyperBall7<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision7>;
-pub type HyperBall8<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision8>;
-pub type HyperBall9<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision9>;
-pub type HyperBall10<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision10>;
-pub type HyperBall11<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision11>;
-pub type HyperBall12<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision12>;
-pub type HyperBall13<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision13>;
-pub type HyperBall14<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision14>;
-pub type HyperBall15<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision15>;
-pub type HyperBall16<'a, N, E, Ix> = HyperBallInner<'a, N, E, Ix, Precision16>;
+pub type HyperBall4<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision4, f64, Dir>;
+pub type HyperBall5<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision5, f64, Dir>;
+pub type HyperBall6<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision6, f64, Dir>;
+pub type HyperBall7<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision7, f64, Dir>;
+pub type HyperBall8<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision8, f64, Dir>;
+pub type HyperBall9<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision9, f64, Dir>;
+pub type HyperBall10<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision10, f64, Dir>;
+pub type HyperBall11<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision11, f64, Dir>;
+pub type HyperBall12<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision12, f64, Dir>;
+pub type HyperBall13<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision13, f64, Dir>;
+pub type HyperBall14<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision14, f64, Dir>;
+pub type HyperBall15<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision15, f64, Dir>;
+pub type HyperBall16<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision16, f64, Dir>;
 
 /// Enum for centralities' caching filenames' creation manager logic.
 #[allow(dead_code)]
@@ -55,14 +55,15 @@ enum Centrality {
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
-/// a node's distances are to the nodes it reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
-/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"), [`Direction::Both`] ignores their directions.
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): a node's distances are to the nodes it reaches.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"). To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
 ///
 /// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
-/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
 pub struct HyperBallInner<
     'a,
     N: graph::N,
@@ -70,9 +71,10 @@ pub struct HyperBallInner<
     Ix: graph::IndexType,
     P: Precision = Precision8,
     W: Weight = f64,
+    Dir: Directedness = Undirected,
 > {
     /// Graph for which *HyperBall* is computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's *HyperLogLog* counter.
     counters: AbstractedProceduralMemoryMut<HyperLogLog<P>>,
     /// Memmapped slice containing each node's distance accumulator.
@@ -97,22 +99,27 @@ pub struct HyperBallInner<
 
 #[allow(dead_code)]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight>
-    HyperBallInner<'a, N, E, Ix, P, W>
+    HyperBallInner<'a, N, E, Ix, P, W, Directed>
 {
-    const DEAFULT_MAX_DEPTH: usize = 100;
-    const MAX_MAX_DEPTH: usize = 1024;
-
     /// Runs *HyperBall*, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
     ///
     /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
     pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         direction: Direction,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(g.view(direction)?)
     }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight, Dir: Directedness>
+    HyperBallInner<'a, N, E, Ix, P, W, Dir>
+{
+    const DEAFULT_MAX_DEPTH: usize = 100;
+    const MAX_MAX_DEPTH: usize = 1024;
 
     /// Performs the *HyperBall Algorithm* as described in ["In-Core Computation of Geometric Centralities with HyperBall: A Hundred Billion Nodes and Beyond"](https://doi.org/10.48550/arXiv.1308.2144) by Boldi P. and Vigna S.
     ///
@@ -121,7 +128,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     /// * `g` --- the [`GraphMemoryMap`] instance for which the *HyperBall Algorithm* is to be performed in.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut hyper_ball = Self::new_no_compute(g, None, g.thread_num())?;
 
         let proc_mem = hyper_ball.init_cache_mem()?;
@@ -142,7 +149,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new_with_conf(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -163,7 +170,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn get_or_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
         let h_fn = g.build_cache_filename(CacheFile::HyperBall, None)?;
@@ -589,27 +596,27 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let out_fn = this.build_cache_filename(CacheFile::HyperBall, None)?;
         let d_fn = this.build_cache_filename(CacheFile::HyperBallDistances, None)?;
         let i_fn = this.build_cache_filename(CacheFile::HyperBallInvDistances, None)?;
-        std::fs::remove_file(out_fn)?;
-        std::fs::remove_file(d_fn)?;
-        std::fs::remove_file(i_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
+        crate::shared_slice::remove_if_exists(d_fn)?;
+        crate::shared_slice::remove_if_exists(i_fn)?;
 
         // remove any closeness centralities' cached values
         for (i, t) in [(0, Centrality::NCloseness), (1, Centrality::NCCloseness)] {
             if this.closeness[i].is_some() {
-                std::fs::remove_file(this.centrality_cache_file_name(t)?)?;
+                crate::shared_slice::remove_if_exists(this.centrality_cache_file_name(t)?)?;
             }
         }
 
         // remove any harmonic centralities' cached values
         for (i, t) in [(0, Centrality::NHarmonic), (1, Centrality::NCHarmonic)] {
             if this.harmonic[i].is_some() {
-                std::fs::remove_file(this.centrality_cache_file_name(t)?)?;
+                crate::shared_slice::remove_if_exists(this.centrality_cache_file_name(t)?)?;
             }
         }
 
         // remove any lin's centrality's cached values
         if this.lin.is_some() {
-            std::fs::remove_file(this.centrality_cache_file_name(Centrality::Lin)?)?;
+            crate::shared_slice::remove_if_exists(this.centrality_cache_file_name(Centrality::Lin)?)?;
         }
 
         Ok(())
@@ -617,8 +624,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 }
 
 #[cfg(feature = "gpu")]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight>
-    HyperBallInner<'a, N, E, Ix, P, W>
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight, Dir: Directedness>
+    HyperBallInner<'a, N, E, Ix, P, W, Dir>
 {
     /// Performs the *HyperBall Algorithm* on a GPU, with the same results (and cached files) as
     /// [`new_with_conf`], but for accumulators computed in `f32` (relative error ~`1e-6`, far below
@@ -635,7 +642,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     /// [`new_with_conf`]: #method.new_with_conf
     /// [`GpuBackend::upload_graph`]: ../../gpu/trait.GpuBackend.html#tymethod.upload_graph
     pub fn new_gpu<B: crate::gpu::GpuBackend>(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         backend: &B,
         graph: &B::Graph,
         max_depth: Option<usize>,
@@ -670,13 +677,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight>
-    HyperBallInner<'a, N, E, Ix, P, W>
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight, Dir: Directedness>
+    HyperBallInner<'a, N, E, Ix, P, W, Dir>
 {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -686,7 +693,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -757,7 +764,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     }
 
     fn init_cache(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<ProceduralMemoryHB<P, W>, Box<dyn std::error::Error>> {
         let node_count = g.size();
 
@@ -775,7 +782,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -1515,7 +1522,8 @@ mod test {
     ) {
         use crate::gpu::GpuBackend;
         let open = |suffix: &str| {
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+            // any graph, directed or not: HyperBall follows arcs out of nodes
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::from_file(
                 path,
                 Some(format!("{id}_{suffix}")),
                 Some(4),
@@ -1526,12 +1534,12 @@ mod test {
         let gpu_graph = open("gpu");
         let what = format!("{id} precision {}", P::EXPONENT);
 
-        let mut cpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64>::new_with_conf(
+        let mut cpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64, _>::new_with_conf(
             &cpu_graph, max_depth, 4,
         )
         .unwrap_or_else(|e| panic!("{what}: CPU hyperball should succeed: {e}"));
         let device_graph = backend.upload_graph(&gpu_graph).expect("graph upload should succeed");
-        let mut gpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64>::new_gpu(
+        let mut gpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64, _>::new_gpu(
             &gpu_graph,
             backend,
             &device_graph,
@@ -1632,7 +1640,7 @@ mod test {
 
         // more segments than the device may bind fail up front, with an error: 2000 counters of
         // 256 B in 16 KiB buffers are 32 segments, i.e. 69 storage buffers (at most 48 here)
-        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+        let graph = crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::from_file(
             &directed,
             Some(format!("hb_gpu_too_many_segments_{run_tag}")),
             Some(4),
@@ -1641,7 +1649,7 @@ mod test {
         let error = {
             use crate::gpu::GpuBackend;
             let device_graph = segmented.upload_graph(&graph).unwrap();
-            HyperBallInner::<VoidLabel, VoidLabel, usize, Precision8, f64>::new_gpu(
+            HyperBallInner::<VoidLabel, VoidLabel, usize, Precision8, f64, _>::new_gpu(
                 &graph,
                 &segmented,
                 &device_graph,

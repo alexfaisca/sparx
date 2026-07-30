@@ -415,9 +415,9 @@ const HYPERBALL_FIXED_BINDINGS: usize = 6;
 impl GpuBackend for WgpuBackend {
     type Graph = WgpuGraph;
 
-    fn upload_graph<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    fn upload_graph<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>(
         &self,
-        g: &GraphMemoryMap<N, E, Ix>,
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<WgpuGraph, Box<dyn std::error::Error>> {
         let nodes = g.size();
         let edges = g.width();

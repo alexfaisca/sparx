@@ -95,7 +95,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.g.build_cache_filename(CacheFile::Triangles, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
@@ -161,7 +161,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("triangle counting", Some("`k_truss::directed::DirectedTriangles`"))?;
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::Triangles, None)?;
         let triangles = SharedSliceMut::<Tx::Atomic>::abst_mem_mut(&out_fn, g.width(), true)?;
@@ -352,6 +351,10 @@ pub(crate) mod test {
     pub(crate) type TestGraph = crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize>;
     /// The graphs the brute force references take.
     pub(crate) type Graph = GraphMemoryMap<VoidLabel, VoidLabel, usize>;
+    /// The directed graphs the brute force references take, and the test graphs that deref to them.
+    pub(crate) type DiGraph = crate::graph::DiGraph<VoidLabel, VoidLabel, usize>;
+    pub(crate) type DiTestGraph =
+        crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed>;
 
     /// Parses `edges` (0-based, undirected) as a symmetric MatrixMarket graph over `n` nodes.
     pub(crate) fn undirected_graph(name: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph {

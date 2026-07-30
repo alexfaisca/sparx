@@ -17,9 +17,9 @@ use std::path::Path;
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct StronglyConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+pub struct StronglyConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
     /// Graph whose components are computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the component of each node.
     components: AbstractedProceduralMemoryMut<Ix>,
     /// Number of components.
@@ -27,7 +27,7 @@ pub struct StronglyConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> StronglyConnectedComponents<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> StronglyConnectedComponents<'a, N, E, Ix, Dir> {
     /// Computes the strongly connected components of the graph.
     ///
     /// The resulting component of each node is stored in memory (in a memmapped file).
@@ -37,7 +37,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> StronglyConnectedCompon
     /// * `g` --- the [`GraphMemoryMap`] instance whose components are to be computed.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
         let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut scc = Self {
@@ -52,7 +52,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> StronglyConnectedCompon
     /// Searches for a previously cached result, and if not found computes the strongly
     /// connected components of the graph.
     pub fn get_or_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let c_fn = g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
         if Path::new(&c_fn).exists()
@@ -99,13 +99,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> StronglyConnectedCompon
         let this = ManuallyDrop::new(self);
         this.g.cleanup_cache(CacheFile::StronglyConnectedComponents)?;
         let out_fn = this.g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 
     fn compute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // undirected graphs' strong components are their weak ones: found in parallel
-        if !self.g.is_directed()? {
+        // symmetric graphs' strong components are their weak ones: found in parallel
+        if self.g.is_symmetric()? {
             self.count = super::weak::label_components(
                 self.g,
                 &self.components,

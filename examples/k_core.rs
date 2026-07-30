@@ -2,7 +2,8 @@
 //!
 //! cargo run --release --example k_core -- [graph] [threads]
 //!
-//! `[graph]` defaults to a small bundled fixture.
+//! `[graph]` defaults to a small bundled fixture. Coreness is stored as `u32`s here, so that any
+//! graph's degrees fit: the default (`new`) stores `u8`s, erroring on degrees above 255.
 use sparx::graph::GraphMemoryMap;
 use sparx::k_core::{batagelj_zaversnik::AlgoBatageljZaversnik, liu_et_al::AlgoLiuEtAl};
 
@@ -23,11 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run(graph: &GraphMemoryMap<(), (), u32>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut bz = AlgoBatageljZaversnik::new(graph)?;
+    let mut bz = AlgoBatageljZaversnik::<_, _, _, u32>::new_cx(graph)?;
     let cores = bz.k_cores().to_vec();
     bz.drop_cache()?;
 
-    let mut liu = AlgoLiuEtAl::new(graph)?;
+    let mut liu = AlgoLiuEtAl::<_, _, _, u32>::new_cx(graph, graph.thread_num())?;
     println!(
         "both algorithms agree: {}",
         liu.k_cores() == cores.as_slice()

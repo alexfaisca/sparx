@@ -6,11 +6,16 @@ use crate::components::test_utils::{graph, label, random_arcs, reachability};
 use crate::components::weak::ConnectedComponents;
 use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
 use crate::graph::{Direction, GraphMemoryMap, IndexType};
-use crate::k_core::directed::DirectedKCores;
+use crate::k_core::directed::{CoreDegree, DirectedKCores};
 use crate::k_truss::clustering_coefficient::{ClusteringCoefficient, DirectedClusteringCoefficient};
 use std::io::Write;
 
-pub(crate) fn graph_ix<Ix: IndexType>(name: &str, header: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph<(), (), Ix> {
+pub(crate) fn graph_ix<Ix: IndexType>(
+    name: &str,
+    header: &str,
+    n: usize,
+    edges: &[(usize, usize)],
+) -> TestGraph<(), (), Ix, crate::graph::Directed> {
     let dir = unique_test_dir("review_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.mtx"));
@@ -22,7 +27,7 @@ pub(crate) fn graph_ix<Ix: IndexType>(name: &str, header: &str, n: usize, edges:
     }
     drop(f);
     let id = format!("review_{name}_{}", unique_run_tag());
-    let g = GraphMemoryMap::<(), (), Ix>::from_file(&path, Some(id), Some(4)).expect("parse");
+    let g = crate::graph::DiGraph::<(), (), Ix>::from_file(&path, Some(id), Some(4)).expect("parse");
     TestGraph::new(g, Some(dir))
 }
 
@@ -67,7 +72,7 @@ fn dcc_undirected_with_loops_matches_usual() {
     // simple undirected triangle plus a self-loop at 0
     let g = graph("rv_dcc_und_loop", "symmetric", 4, &[(1, 0), (2, 1), (2, 0), (0, 0), (3, 0)]);
     let d = DirectedClusteringCoefficient::new(&g).unwrap();
-    let u = ClusteringCoefficient::new(&g).unwrap();
+    let u = ClusteringCoefficient::new(g.to_undirected().unwrap()).unwrap();
     let dv: Vec<f64> = d.local_clustering_coefficients().to_vec();
     let uv: Vec<f64> = (0..4).map(|i| u.get_node_clusteringcoefficient(i)).collect();
     assert_eq!(dv, uv);
@@ -114,14 +119,13 @@ fn strong_u8_full_edges() {
 }
 
 #[test]
-#[ignore = "0-node MatrixMarket files don't parse yet (a parser limitation, not these algorithms')"]
 fn empty_graphs() {
     let g = graph("rv_empty", "general", 0, &[]);
     let cc = ConnectedComponents::new(&g);
     println!("weak empty: {:?}", cc.as_ref().map(|c| c.count()).map_err(|e| e.to_string()));
     let scc = StronglyConnectedComponents::new(&g);
     println!("strong empty: {:?}", scc.as_ref().map(|c| c.count()).map_err(|e| e.to_string()));
-    let k = DirectedKCores::new(&g, Direction::Both);
+    let k = DirectedKCores::new(&g, CoreDegree::Total);
     println!("kcore empty: {:?}", k.as_ref().map(|_| ()).map_err(|e| e.to_string()));
     let d = DirectedClusteringCoefficient::new(&g);
     println!("dcc empty: {:?}", d.as_ref().map(|_| ()).map_err(|e| e.to_string()));
@@ -133,7 +137,7 @@ fn kcores_u8_both() {
     // directed graph with 200 arcs on u8: undirected view has 400 > 255
     let arcs = random_arcs(30, 200, 11).into_iter().filter(|(u, v)| u != v).collect::<Vec<_>>();
     let g = graph_ix::<u8>("rv_kcore_u8", "general", 30, &arcs);
-    let r = DirectedKCores::new(&g, Direction::Both);
+    let r = DirectedKCores::new(&g, CoreDegree::Total);
     println!("{:?}", r.as_ref().map(|c| c.k_cores().to_vec()).map_err(|e| e.to_string()));
 }
 
@@ -166,24 +170,24 @@ fn write_mtx(dir: &std::path::Path, name: &str, header: &str, n: usize, edges: &
     path
 }
 
-/// The same cache id (e.g. the default one: the input file's path) rebuilt from a directed
-/// file: the undirected-only guard is bypassed by get_or_compute.
+/// The same cache id (e.g. the default one: the input file's path) rebuilt from another graph:
+/// get_or_compute must not hand back the old graph's cached results.
 #[test]
 fn stale_cached_results_are_not_reused() {
+    use crate::graph::Graph;
     use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
     let dir = unique_test_dir("rv_stale");
     let id = format!("rv_stale_{}", unique_run_tag());
+    // a triangle with a pendant node, then a path
     let p1 = write_mtx(&dir, "a", "symmetric", 4, &[(1, 0), (2, 1), (2, 0), (3, 2)]);
     {
-        let g1 = GraphMemoryMap::<(), (), usize>::from_file(&p1, Some(id.clone()), Some(2)).unwrap();
-        let _ = AlgoBatageljZaversnik::new(&g1).unwrap();
+        let g1 = Graph::<(), (), usize>::from_file(&p1, Some(id.clone()), Some(2)).unwrap();
+        assert_eq!(AlgoBatageljZaversnik::new(&g1).unwrap().k_cores(), &[2, 2, 2, 1]);
     }
-    let p2 = write_mtx(&dir, "b", "general", 4, &[(0, 1), (1, 2), (2, 3)]);
-    let g2 = TestGraph::new(GraphMemoryMap::<(), (), usize>::from_file(&p2, Some(id), Some(2)).unwrap(), Some(dir));
-    assert!(g2.is_directed().unwrap());
-    assert!(AlgoBatageljZaversnik::new(&g2).is_err());
-    let r = AlgoBatageljZaversnik::get_or_compute(&g2);
-    assert!(r.is_err(), "get_or_compute returned stale cores {:?} for a directed graph", r.map(|c| c.k_cores().to_vec()).ok());
+    let p2 = write_mtx(&dir, "b", "symmetric", 4, &[(1, 0), (2, 1), (3, 2)]);
+    let g2 = TestGraph::new(Graph::<(), (), usize>::from_file(&p2, Some(id), Some(2)).unwrap(), Some(dir));
+    let cached = AlgoBatageljZaversnik::get_or_compute(&g2).unwrap();
+    assert_eq!(cached.k_cores(), &[1, 1, 1, 1], "stale cores of the old graph");
 }
 
 /// Components read back from a stale cache entry of the same id, with another node count.
@@ -193,12 +197,12 @@ fn cached_components_of_another_graph_are_not_reused() {
     let id = format!("rv_stale_cc_{}", unique_run_tag());
     let p1 = write_mtx(&dir, "a", "general", 4, &[(0, 1), (2, 3)]);
     {
-        let g1 = GraphMemoryMap::<(), (), usize>::from_file(&p1, Some(id.clone()), Some(2)).unwrap();
+        let g1 = crate::graph::DiGraph::<(), (), usize>::from_file(&p1, Some(id.clone()), Some(2)).unwrap();
         let _ = ConnectedComponents::new(&g1).unwrap();
         let _ = StronglyConnectedComponents::new(&g1).unwrap();
     }
     let p2 = write_mtx(&dir, "b", "general", 7, &[(0, 1), (1, 2), (2, 0), (4, 5)]);
-    let g2 = TestGraph::new(GraphMemoryMap::<(), (), usize>::from_file(&p2, Some(id), Some(2)).unwrap(), Some(dir));
+    let g2 = TestGraph::new(crate::graph::DiGraph::<(), (), usize>::from_file(&p2, Some(id), Some(2)).unwrap(), Some(dir));
     let cc = ConnectedComponents::get_or_compute(&g2).unwrap();
     let scc = StronglyConnectedComponents::get_or_compute(&g2).unwrap();
     assert_eq!((cc.components().len(), scc.components().len()), (7, 7), "stale results of the old 4-node graph");
@@ -257,13 +261,13 @@ fn kcores_parallel_reciprocal() {
     // reciprocal pairs and parallel arcs, Both = total degree with multiplicity
     let arcs = vec![(0, 1), (1, 0), (0, 1), (1, 2), (2, 1), (2, 0), (0, 2), (3, 0), (3, 3), (0, 3), (0, 3)];
     let g = graph("rv_kc_rec", "general", 4, &arcs);
-    for d in [Direction::In, Direction::Out, Direction::Both] {
+    for d in [CoreDegree::In, CoreDegree::Out, CoreDegree::Total] {
         let mut c = DirectedKCores::new(&g, d).unwrap();
         println!("{d:?}: {:?}", c.k_cores());
     }
     // drop caches of one direction leaves the others intact
-    let a = DirectedKCores::new(&g, Direction::In).unwrap();
-    let mut b = DirectedKCores::new(&g, Direction::Out).unwrap();
+    let a = DirectedKCores::new(&g, CoreDegree::In).unwrap();
+    let mut b = DirectedKCores::new(&g, CoreDegree::Out).unwrap();
     b.drop_cache().unwrap();
     assert_eq!(a.k_cores().len(), 4);
 }
@@ -306,8 +310,8 @@ fn error_paths_leave_no_files() {
 
     let arcs = random_arcs(30, 200, 11).into_iter().filter(|(u, v)| u != v).collect::<Vec<_>>();
     let g8 = graph_ix::<u8>("rv_leak_kc", "general", 30, &arcs);
-    assert!(DirectedKCores::new(&g8, Direction::Both).is_err());
-    let f = g8.build_cache_filename(CacheFile::KCoreDirected(Direction::Both), None).unwrap();
+    assert!(DirectedKCores::new(&g8, CoreDegree::Total).is_err());
+    let f = g8.build_cache_filename(CacheFile::KCoreDirected(CoreDegree::Total), None).unwrap();
     let leaked_kc = std::path::Path::new(&f).exists();
     assert!(!leaked_dcc && !leaked_kc, "leaked: dcc {leaked_dcc}, kcore {leaked_kc}");
 }
@@ -326,7 +330,8 @@ fn dfs_visit_directed_back_edge_to_parent() {
     assert_eq!(rec.0, vec![(1, 0)]);
     let u = graph("rv_dfsv_u", "symmetric", 3, &[(1, 0), (2, 1)]);
     let mut rec = Rec(vec![]);
-    { let _ = DFSVisit::new(&*u, 0, &mut rec).unwrap(); }
+    // as an undirected graph: the arc back to the parent is the tree edge reversed
+    { let _ = DFSVisit::new(u.to_undirected().unwrap(), 0, &mut rec).unwrap(); }
     assert_eq!(rec.0, vec![]);
 }
 
@@ -342,4 +347,20 @@ fn hierholzer_degree_256() {
     // a closed trail over k arcs is stored as its k nodes (the closing one dropped)
     assert_eq!(h.trail_number(), 1);
     assert_eq!(total, 512, "the trail covers {total} of 512 arcs");
+}
+
+/// `DFS::drop_cache` used to remove the BFS result's file rather than its own.
+#[test]
+fn dfs_and_bfs_drop_their_own_results() {
+    use crate::graph::CacheFile;
+    use crate::trails::{bfs::BFSDists, dfs::DFS};
+    let g = graph("dfs_bfs_drop", "general", 4, &[(0, 1), (1, 2), (2, 3)]);
+    let mut bfs = BFSDists::new(&g, 0).unwrap();
+    let mut dfs = DFS::new(&g, 0).unwrap();
+    dfs.drop_cache().unwrap();
+    bfs.drop_cache().unwrap();
+    for kind in [CacheFile::BFS, CacheFile::DFS] {
+        let f = g.build_cache_filename(kind.clone(), None).unwrap();
+        assert!(!std::path::Path::new(&f).exists(), "{f} left behind");
+    }
 }

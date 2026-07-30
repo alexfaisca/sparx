@@ -104,7 +104,7 @@ directed_triangle_types! {
 }
 
 use crate::graph::cache::AccumulatorAtomic;
-use crate::graph::{self, CacheFile, GraphMemoryMap, IndexType};
+use crate::graph::{self, CacheFile, DiGraph, IndexType};
 use crate::shared_slice::{AbstractedProceduralMemoryMut, SharedSlice, SharedSliceMut};
 
 use super::count::{TriangleCount, TriangleCounter};
@@ -193,7 +193,7 @@ impl Run {
 /// Every node's in and out neighbours (other than itself), merged and sorted: the undirected
 /// view of a directed graph, keeping track of each pair's edges in both directions.
 pub(crate) struct DirectedAdjacency<'a, N: graph::N, E: graph::E, Ix: IndexType> {
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a DiGraph<N, E, Ix>,
     index_ptr: SharedSlice<Ix>,
     neighbours_ptr: SharedSlice<Ix>,
     offsets: AbstractedProceduralMemoryMut<Ix>,
@@ -203,7 +203,7 @@ pub(crate) struct DirectedAdjacency<'a, N: graph::N, E: graph::E, Ix: IndexType>
 impl<'a, N: graph::N, E: graph::E, Ix: IndexType> DirectedAdjacency<'a, N, E, Ix> {
     /// Builds `g`'s merged adjacency, in temporary files (removed by [`cleanup`](Self::cleanup)).
     pub(crate) fn build(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
@@ -435,7 +435,7 @@ pub struct DirectedTriangles<
     Ix: graph::IndexType,
     Tx: TriangleCount = u8,
 > {
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a DiGraph<N, E, Ix>,
     triangle_type: DirectedTriangleType,
     /// Memmapped slice containing the number of triangles of each edge.
     triangles: AbstractedProceduralMemoryMut<Tx::Atomic>,
@@ -447,7 +447,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedTriangles<'a, N
     /// Counts every edge's triangles of type `triangle_type`, as `u8`s (see
     /// [`new_tx`](Self::new_tx) for other widths).
     pub fn new(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         triangle_type: DirectedTriangleType,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_tx(g, triangle_type)
@@ -456,7 +456,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedTriangles<'a, N
     /// Searches for previously cached `u8` triangle counts of type `triangle_type`, computing
     /// them if not found.
     pub fn get_or_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         triangle_type: DirectedTriangleType,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::get_or_compute_tx(g, triangle_type)
@@ -469,7 +469,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
 {
     /// Counts every edge's triangles of type `triangle_type`, as `Tx` integers.
     pub fn new_tx(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         triangle_type: DirectedTriangleType,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let adjacency = DirectedAdjacency::build(g, g.thread_num())?;
@@ -481,7 +481,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     /// Counts every edge's triangles of type `triangle_type`, from `g`'s merged adjacency,
     /// flagging in `in_triangle` (if given) the edges in any (directed) triangle at all.
     pub(crate) fn new_with_adjacency(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         triangle_type: DirectedTriangleType,
         adjacency: &DirectedAdjacency<'a, N, E, Ix>,
         in_triangle: Option<SharedSliceMut<AtomicBool>>,
@@ -501,7 +501,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     /// Searches for previously cached `Tx` triangle counts of type `triangle_type`, computing
     /// them if not found.
     pub fn get_or_compute_tx(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         triangle_type: DirectedTriangleType,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let t_fn = g.build_cache_filename(CacheFile::DirectedTriangles(triangle_type), None)?;
@@ -545,7 +545,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         let out_fn = this
             .g
             .build_cache_filename(CacheFile::DirectedTriangles(this.triangle_type), None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 
@@ -657,12 +657,12 @@ pub(crate) mod test {
     use super::*;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::k_truss::triangles::Triangles;
-    use crate::k_truss::triangles::test::{Graph, TestGraph, fixtures, random_edges};
+    use crate::k_truss::triangles::test::{DiGraph as TestDiGraph, DiTestGraph, fixtures, random_edges};
     use std::collections::BTreeMap;
     use std::io::Write;
 
     /// Parses `edges` (0-based, directed) as a general MatrixMarket graph over `n` nodes.
-    pub(crate) fn directed_graph(name: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph {
+    pub(crate) fn directed_graph(name: &str, n: usize, edges: &[(usize, usize)]) -> DiTestGraph {
         let dir = unique_test_dir("directed_triangles_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{name}.mtx"));
@@ -673,13 +673,13 @@ pub(crate) mod test {
             writeln!(f, "{} {}", u + 1, v + 1).unwrap();
         }
         drop(f);
-        let graph = GraphMemoryMap::from_file(
+        let graph = DiGraph::from_file(
             &path,
             Some(format!("dtri_{name}_{}", unique_run_tag())),
             Some(4),
         )
         .expect("graph parse should succeed");
-        TestGraph::new(graph, Some(dir))
+        crate::graph::test_utils::TestGraph::new(graph, Some(dir))
     }
 
     /// A directed multigraph: random arcs, some reciprocated, some tripled, and self-loops.
@@ -707,7 +707,7 @@ pub(crate) mod test {
     /// Each CSR edge's triangles of the given roles by brute force (see the module's
     /// documentation): for edge `u -> v` and every other node `w`, the products of the
     /// multiplicities of the edges putting `u -> v` in each selected role.
-    pub(crate) fn brute_force_directed(g: &Graph, roles: u8) -> Vec<usize> {
+    pub(crate) fn brute_force_directed(g: &TestDiGraph, roles: u8) -> Vec<usize> {
         let mut m = BTreeMap::<(usize, usize), usize>::new();
         for u in 0..g.size() {
             for v in g.neighbours(u).unwrap() {
@@ -772,8 +772,16 @@ pub(crate) mod test {
                 .iter()
                 .map(|c| c.count())
                 .collect();
+            // the same graph, as a directed one
+            let directed =
+                crate::graph::DiGraph::<graph::label::VoidLabel, graph::label::VoidLabel, usize>::open(
+                    g.cache_filename(),
+                    None,
+                    Some(4),
+                )
+                    .unwrap();
             let mut t = DirectedTriangles::<_, _, _, u32>::new_tx(
-                &g,
+                &directed,
                 DirectedTriangleType::CycleFeedForward,
             )
             .unwrap();

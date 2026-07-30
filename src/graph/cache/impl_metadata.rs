@@ -26,7 +26,7 @@ impl CacheMetadata {
         node_label_size: usize,
         edge_label_size: usize,
         tool_version: Option<String>,
-        directed: Option<bool>,
+        symmetric: Option<bool>,
     ) -> Self {
         let created_unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -49,7 +49,7 @@ impl CacheMetadata {
             edge_label_size,
             created_unix_secs,
             tool_version,
-            directed,
+            symmetric,
         }
     }
 
@@ -88,8 +88,8 @@ impl CacheMetadata {
         line!("edge_label_size", &self.edge_label_size.to_string());
         line!("created_unix_secs", &self.created_unix_secs.to_string());
         line!("tool_version", self.tool_version.as_deref().unwrap_or(""));
-        if let Some(directed) = self.directed {
-            line!("directed", if directed { "true" } else { "false" });
+        if let Some(symmetric) = self.symmetric {
+            line!("symmetric", if symmetric { "true" } else { "false" });
         }
         s
     }
@@ -140,7 +140,7 @@ impl CacheMetadata {
             tool_version: Some(kv.get("tool_version").copied().unwrap_or("").to_string())
                 .filter(|s| !s.is_empty()),
             // absent from entries built before format version 2
-            directed: kv.get("directed").map(|d| parse_bool(d)).transpose()?,
+            symmetric: kv.get("symmetric").map(|d| parse_bool(d)).transpose()?,
         })
     }
 
@@ -199,12 +199,12 @@ impl std::fmt::Display for CacheMetadata {
         )?;
         writeln!(f, "  created_unix_secs  : {}", self.created_unix_secs)?;
         writeln!(f, "  tool_version       : {}", tool_ver)?;
-        let directed = match self.directed {
+        let symmetric = match self.symmetric {
             Some(true) => "yes",
             Some(false) => "no",
             None => "unknown",
         };
-        writeln!(f, "  directed           : {}", directed)?;
+        writeln!(f, "  symmetric          : {}", symmetric)?;
         write!(f, "}}")
     }
 }

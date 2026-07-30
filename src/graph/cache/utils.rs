@@ -218,7 +218,8 @@ pub(crate) fn cleanup_cache(
         format!("error cleaning up cache for entries with name {match_entries_to}: {e}").into()
     })?;
     for entry in cache_entries {
-        std::fs::remove_file(entry.map_err(|e| -> Box<dyn std::error::Error> {
+        // (another instance may have removed it meanwhile)
+        crate::shared_slice::remove_if_exists(entry.map_err(|e| -> Box<dyn std::error::Error> {
             format!("error cleaning up cache entry: {e}").into()
         })?)?;
     }
@@ -295,7 +296,7 @@ pub enum FileType {
     ExactLinCentrality(H),
     ConnectedComponents(H),
     StronglyConnectedComponents(H),
-    KCoreDirected(H, crate::graph::direction::Direction),
+    KCoreDirected(H, crate::k_core::directed::CoreDegree),
     DirectedClusteringCoefficient(H),
     DirectedLouvain(H),
     #[cfg(any(test, feature = "bench"))]
@@ -431,9 +432,9 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::ExactLinCentrality(_) => SUFFIX_FOR_EXACT_LIN_CENTRALITY,
         FileType::ConnectedComponents(_) => "components",
         FileType::StronglyConnectedComponents(_) => "strongcomponents",
-        FileType::KCoreDirected(_, crate::graph::direction::Direction::Out) => "kcoreout",
-        FileType::KCoreDirected(_, crate::graph::direction::Direction::In) => "kcorein",
-        FileType::KCoreDirected(_, crate::graph::direction::Direction::Both) => "kcoreboth",
+        FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::Out) => "kcoreout",
+        FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::In) => "kcorein",
+        FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::Total) => "kcoretotal",
         FileType::DirectedClusteringCoefficient(_) => "directedclustering",
         FileType::DirectedLouvain(_) => "directedlouvain",
         #[cfg(any(test, feature = "bench"))]

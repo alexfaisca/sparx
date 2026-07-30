@@ -53,9 +53,10 @@ pub struct CacheMetadata {
     pub edge_label_size: usize,    // 0 if not labeled
     pub created_unix_secs: u64,    // book keeping
     pub tool_version: Option<String>,
-    /// Whether some arc `u -> v` lacks a reverse `v -> u` (see `GraphMemoryMap::is_directed`),
-    /// recorded when the entry is built. [`None`] for entries built before it was recorded.
-    pub directed: Option<bool>,
+    /// Whether every arc `u -> v` has a reverse `v -> u`, counting multiplicity (see
+    /// `GraphMemoryMap::is_symmetric`), recorded when the entry is built. [`None`] for entries
+    /// built before it was recorded.
+    pub symmetric: Option<bool>,
 }
 
 const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
@@ -254,9 +255,9 @@ pub(crate) struct GraphCache<N: super::N, E: super::E, Ix: IndexType> {
     pub graph_bytes: usize,
     pub index_bytes: usize,
     pub readonly: bool,
-    /// Whether the graph is directed, when known before it's checked (e.g. MatrixMarket
-    /// `symmetric` inputs aren't): recorded in the metadata by `finish`, which checks it if not.
-    pub directed: Option<bool>,
+    /// Whether the graph is symmetric, when known before it's checked (e.g. MatrixMarket
+    /// `symmetric` inputs are): recorded in the metadata by `finish`, which checks it if not.
+    pub symmetric: Option<bool>,
     batch: Option<usize>,
     _marker1: PhantomData<N>,
     _marker2: PhantomData<E>,
@@ -505,51 +506,23 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         let metalabel_filename =
             Self::init_cache_file_from_id_or_random(id, FileType::MetaLabel(H::H), Some(0))?;
 
-        ensure_file_writable(&neighbors_filename)?;
-        ensure_file_writable(&offsets_filename)?;
-        ensure_file_writable(&nodelabel_filename)?;
-        ensure_file_writable(&edgelabel_filename)?;
-        ensure_file_writable(&metalabel_filename)?;
+        // new files, rather than an earlier entry's truncated: instances still mapping those keep
+        // them, intact
 
         let neighbors_file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&neighbors_filename)?,
+            crate::shared_slice::create_new_file(&neighbors_filename)?,
         );
         let offsets_file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&offsets_filename)?,
+            crate::shared_slice::create_new_file(&offsets_filename)?,
         );
         let nodelabel_file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&nodelabel_filename)?,
+            crate::shared_slice::create_new_file(&nodelabel_filename)?,
         );
         let edgelabel_file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&edgelabel_filename)?,
+            crate::shared_slice::create_new_file(&edgelabel_filename)?,
         );
         let metalabel_file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&metalabel_filename)?,
+            crate::shared_slice::create_new_file(&metalabel_filename)?,
         );
 
         Ok(Self {
@@ -567,7 +540,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             graph_bytes: 0,
             index_bytes: 0,
             readonly: false,
-            directed: None,
+            symmetric: None,
             batch: batch.map(|b| std::cmp::max(b, Self::DEFAULT_BATCHING_SIZE)),
             _marker1: PhantomData::<N>,
             _marker2: PhantomData::<E>,
@@ -760,7 +733,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             graph_bytes: edges,
             index_bytes: nodes,
             readonly: true,
-            directed: None,
+            symmetric: None,
             batch,
             _marker1: PhantomData::<N>,
             _marker2: PhantomData::<E>,
@@ -890,6 +863,10 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             #[cfg(feature = "ggcat")]
             InputFileType::GGCAT(ext) => 
             match ext {
+                // (with metalabels when they're asked for: `in_fst` selects whose)
+                Self::EXT_COMPRESSED_LZ4 | Self::EXT_PLAINTEXT_TXT if in_fst.is_some() => {
+                    Self::from_ggcat_file_with_fst_impl::<_, D>(p.as_ref(), id, batch, in_fst)
+                }
                 Self::EXT_COMPRESSED_LZ4 => Self::from_ggcat_file_with_accumulator::<_, D>(p.as_ref(), id),
                 Self::EXT_PLAINTEXT_TXT => Self::from_ggcat_file_with_accumulator::<_, D>(p.as_ref(), id),
                 _ => Err(format!(
@@ -1400,7 +1377,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         cache_id: &str,
         has_fst: bool,
         tool_version: Option<String>,
-        directed: bool,
+        symmetric: bool,
     ) -> Result<CacheMetadata, Box<dyn std::error::Error>> {
         let edges = self.neighbors_file.metadata()?.len() as usize / size_of::<Ix>();
         let nodes = self.offsets_file.metadata()?.len() as usize / size_of::<Ix>();
@@ -1420,7 +1397,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             if N::is_labeled() { size_of::<N>() } else { 0 },
             if E::is_labeled() { size_of::<E>() } else { 0 },
             tool_version,
-            Some(directed),
+            Some(symmetric),
         ))
     }
 
@@ -1430,17 +1407,17 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         Ok(file.set_permissions(permissions)?)
     }
 
-    /// Checks whether the (complete, sorted) graph is directed: whether some arc lacks a reverse.
-    fn check_directed(&self) -> Result<bool, Box<dyn std::error::Error>> {
+    /// Checks whether the (complete, sorted) graph is symmetric: whether every arc has a reverse.
+    pub(crate) fn check_symmetric(&self) -> Result<bool, Box<dyn std::error::Error>> {
         if self.graph_bytes == 0 {
-            return Ok(false);
+            return Ok(true);
         }
         let offsets = AbstractedProceduralMemory::<Ix>::from_file_name(&self.offsets_filename)?;
         let neighbors = AbstractedProceduralMemory::<Ix>::from_file_name(&self.neighbors_filename)?;
         let offsets = offsets.as_slice().get(..self.index_bytes).ok_or("error offsets file is too short")?;
         let neighbors = neighbors.as_slice().get(..self.graph_bytes).ok_or("error neighbors file is too short")?;
         let threads = num_cpus::get_physical().max(1);
-        Ok(crate::graph::direction::find_asymmetric_arc(offsets, neighbors, threads)?.is_some())
+        Ok(crate::graph::direction::find_asymmetric_arc(offsets, neighbors, threads)?.is_none())
     }
 
     fn finish<P: AsRef<Path>>(&mut self, dataset: P) -> Result<(), Box<dyn std::error::Error>> {
@@ -1459,18 +1436,18 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
     // Write metadata (text, no external deps)
     let has_fst = self.metalabel_file.metadata()?.len() > 0;
-    let directed = match self.directed {
-        Some(directed) => directed,
-        None => self.check_directed()?,
+    let symmetric = match self.symmetric {
+        Some(symmetric) => symmetric,
+        None => self.check_symmetric()?,
     };
-    self.directed = Some(directed);
+    self.symmetric = Some(symmetric);
 
     let meta = self.build_metadata_simple(
         dataset.as_ref(),                 // store these when creating the cache
         &self.cache_id()?,
         has_fst,
         Some(env!("CARGO_PKG_VERSION").to_string()),
-        directed,
+        symmetric,
     )?;
 
     meta.write_file(self.metadata_filename())?;
@@ -1644,6 +1621,41 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         seq: Option<usize>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         cache_file_name(&self.neighbors_filename, &Self::convert_cache_file(target), seq)
+    }
+
+    /// A scratch (`.tmp`) file of one instance of the entry, `<kind>_<seq>_<instance>_<id>.tmp`:
+    /// instances of an entry running the same algorithm at once never share scratch files.
+    pub(crate) fn build_instance_cache_filename(
+        &self,
+        target: CacheFile,
+        seq: usize,
+        instance: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let id = self.cache_id()?;
+        let name = cache_file_name(&self.neighbors_filename, &Self::convert_cache_file(target), Some(seq))?;
+        let tail = format!("_{seq}_{id}.tmp");
+        let stem = name
+            .strip_suffix(&tail)
+            .ok_or_else(|| format!("error unexpected scratch file name {name:?}"))?;
+        Ok(format!("{stem}_{seq}_{instance}_{id}.tmp"))
+    }
+
+    /// Removes one instance's scratch (`.tmp`) files of a given kind (see
+    /// [`build_instance_cache_filename`](Self::build_instance_cache_filename)), and only its.
+    pub(crate) fn cleanup_instance_cache(
+        &self,
+        target: CacheFile,
+        instance: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let id = self.cache_id()?;
+        let name = cache_file_name(&self.neighbors_filename, &Self::convert_cache_file(target), Some(0))?;
+        let stem = name
+            .strip_suffix(&format!("_0_{id}.tmp"))
+            .ok_or_else(|| format!("error unexpected scratch file name {name:?}"))?;
+        for f in glob::glob(&format!("{stem}_*_{instance}_{id}.tmp"))?.flatten() {
+            crate::shared_slice::remove_if_exists(f)?;
+        }
+        Ok(())
     }
 
     /// Build a cached (`.toml`) file of a given [`GraphFile`] type for the [`GraphCache`] instance.
@@ -1835,7 +1847,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         new_cache.index_bytes = offset_size;
         new_cache.graph_bytes = edge_count;
         // same arcs: no need to check again
-        new_cache.directed = metadata.directed;
+        new_cache.symmetric = metadata.symmetric;
 
         // node/edge labels are `Ix`-independent and keep a stable (non-tmp) filename: copy
         // verbatim.
@@ -1887,12 +1899,12 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
-        std::fs::remove_file(this.metadata_filename())?;
-        std::fs::remove_file(this.neighbors_filename())?;
-        std::fs::remove_file(this.offsets_filename())?;
-        std::fs::remove_file(this.nodelabels_filename())?;
-        std::fs::remove_file(this.edgelabels_filename())?;
-        std::fs::remove_file(this.fst_filename())?;
+        crate::shared_slice::remove_if_exists(this.metadata_filename())?;
+        crate::shared_slice::remove_if_exists(this.neighbors_filename())?;
+        crate::shared_slice::remove_if_exists(this.offsets_filename())?;
+        crate::shared_slice::remove_if_exists(this.nodelabels_filename())?;
+        crate::shared_slice::remove_if_exists(this.edgelabels_filename())?;
+        crate::shared_slice::remove_if_exists(this.fst_filename())?;
         Ok(())
     }
 }
@@ -1920,7 +1932,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> Clone for GraphCache<N, E, Ix> {
             graph_bytes: self.graph_bytes,
             index_bytes: self.index_bytes,
             readonly: true,
-            directed: self.directed,
+            symmetric: self.symmetric,
             batch: self.batch,
             _marker1: self._marker1,
             _marker2: self._marker2,

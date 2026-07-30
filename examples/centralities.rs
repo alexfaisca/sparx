@@ -5,7 +5,7 @@
 //! `[graph]` defaults to a small bundled fixture. The exact centralities run a BFS from every
 //! node, so only use them on small graphs.
 use sparx::centralities::{exact::ExactClosenessCentrality, hyper_ball::HyperBall8};
-use sparx::graph::GraphMemoryMap;
+use sparx::graph::DiGraph;
 
 const FIXTURE: &str = "tests/fixtures/ggcat/random_graph_1_5.lz4";
 
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = args.get(1).map_or(FIXTURE, String::as_str);
     let threads: u8 = args.get(2).map_or(Ok(4), |t| t.parse())?;
 
-    let mut graph = GraphMemoryMap::<(), (), u32>::from_file(path, None, Some(threads))?;
+    let mut graph = DiGraph::<(), (), u32>::from_file(path, None, Some(threads))?;
     println!("graph |V| = {}, |E| = {}", graph.size(), graph.width());
 
     let result = run(&graph);
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn run(graph: &GraphMemoryMap<(), (), u32>) -> Result<(), Box<dyn std::error::Error>> {
+fn run(graph: &DiGraph<(), (), u32>) -> Result<(), Box<dyn std::error::Error>> {
     // 2^8 registers per counter: a relative standard error of about 1.04 / sqrt(2^8) = 6.5%
     let mut hyperball = HyperBall8::new(graph)?;
     // normalized by each node's reachable set
@@ -33,7 +33,7 @@ fn run(graph: &GraphMemoryMap<(), (), u32>) -> Result<(), Box<dyn std::error::Er
     let harmonic = hyperball.get_or_compute_harmonic_centrality(true)?.to_vec();
     hyperball.drop_cache()?;
 
-    let mut exact = ExactClosenessCentrality::<_, _, _, f64>::new(graph, Some(true))?;
+    let mut exact = ExactClosenessCentrality::<_, _, _, f64, _>::new(graph, Some(true))?;
     let n = graph.size();
     let mean_relative_error = (0..n)
         .map(|v| {

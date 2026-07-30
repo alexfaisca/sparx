@@ -287,8 +287,9 @@ impl<T> SharedSlice<T> {
 
     pub(crate) fn from_file(file: &File) -> Result<(Self, Mmap), Box<dyn std::error::Error>> {
         let file_len = file.metadata()?.len() as usize;
-        // Ensure the memory is properly aligned
-        if size_of::<T>() != 0 && file_len % size_of::<T>() != 0 {
+        // Ensure the memory is properly aligned (a file shorter than an element holds none: empty
+        // arrays are stored as 1 byte, as memory maps can't be empty)
+        if size_of::<T>() != 0 && file_len % size_of::<T>() != 0 && file_len >= size_of::<T>() {
             return Err("file length is not a multiple of u64".into());
         } else if size_of::<T>() == 0 && file_len != 1 {
             // Memory mapped files may not be length zero ;)
@@ -420,8 +421,9 @@ impl<T> SharedSliceMut<T> {
         let mmap = unsafe { MmapOptions::new().map_mut(file)? };
         let mmap_len = mmap.len();
 
-        // Ensure the memory is properly aligned
-        if size_of::<T>() != 0 && mmap_len % size_of::<T>() != 0 {
+        // Ensure the memory is properly aligned (a file shorter than an element holds none: empty
+        // arrays are stored as 1 byte, as memory maps can't be empty)
+        if size_of::<T>() != 0 && mmap_len % size_of::<T>() != 0 && mmap_len >= size_of::<T>() {
             return Err("file length is not a multiple of u64".into());
         } else if size_of::<T>() == 0 && mmap_len != 1 {
             return Err("file length for 0 length types should be 1".into());
@@ -604,12 +606,9 @@ impl<T> SharedSliceMut<T> {
         len: usize,
         mmapped: bool,
     ) -> Result<AbstractedProceduralMemoryMut<T>, Box<dyn std::error::Error>> {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(mfn)?;
+        // a new file, rather than the old one truncated: whoever still maps the old one (another
+        // instance of the graph, an earlier result) keeps it, intact
+        let file = create_new_file(mfn)?;
         let file_len = (if mmapped { len } else { 1 }
             * if size_of::<T>() == 0 {
                 1
@@ -1539,5 +1538,27 @@ mod tests {
         assert_eq!(diff_count, 1, "only one byte should have changed");
 
         let _ = fs::remove_file(path);
+    }
+}
+
+/// Removes a file if there's one: its readers (memory maps, open handles) keep it until they're
+/// done with it, and a file created in its place is a new one.
+pub(crate) fn remove_if_exists<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Creates a new, empty file at `path`, in place of any there: readers of the one there keep it.
+/// Never opens another's: if another file appears at `path` between removing the old one and
+/// creating this one (another writer's), that's removed in turn, until this one is created.
+pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<std::fs::File> {
+    loop {
+        remove_if_exists(path.as_ref())?;
+        match OpenOptions::new().create_new(true).read(true).write(true).open(path.as_ref()) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            file => return file,
+        }
     }
 }

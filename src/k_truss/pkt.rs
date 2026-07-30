@@ -35,9 +35,16 @@ type ProceduralMemoryPKT<Ix> = (
 /// [`DirectedTriangleType`]: ../directed/enum.DirectedTriangleType.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AlgoPKT<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount = u8> {
+pub struct AlgoPKT<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Tx: TriangleCount = u8,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which edge trussness is computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the trussness of each edge.
     k_trusses: AbstractedProceduralMemoryMut<Tx>,
     threads: usize,
@@ -97,16 +104,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         Self::new_tx(g, threads)
     }
 
-    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph, over its
-    /// triangles of type `triangle_type` (an edge is in the k-truss if it's in at least `k - 2`
-    /// triangles, in a selected role, of the k-truss). Trussness is stored as `u8`s, see
-    /// [`new_directed_tx`](Self::new_directed_tx) for other widths.
-    pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
-        triangle_type: DirectedTriangleType,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_directed_tx(g, triangle_type, g.thread_num())
-    }
 }
 
 #[allow(dead_code)]
@@ -162,87 +159,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         Ok(pkt)
     }
 
-    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph, over its
-    /// triangles of type `triangle_type`, storing trussness as `Tx` integers.
-    pub fn new_directed_tx(
-        g: &'a GraphMemoryMap<N, E, Ix>,
-        triangle_type: DirectedTriangleType,
-        threads: usize,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        // the merged adjacency serves both counting and peeling
-        let adjacency = DirectedAdjacency::build(g, threads)?;
-        let result = (|| {
-            // with only some roles selected, edges without support are peeled too, but only those
-            // in some triangle can matter
-            let in_triangle = match triangle_type.symmetric() {
-                true => None,
-                false => Some(adjacency.in_triangle_flags()?),
-            };
-            let triangles = DirectedTriangles::<N, E, Ix, Tx>::new_with_adjacency(
-                g,
-                triangle_type,
-                &adjacency,
-                in_triangle.as_ref().map(|f| f.shared_slice()),
-            )?;
-            let pkt = Self::new_no_compute_impl(g, threads, Some(triangle_type))?;
-            let proc_mem = pkt.init_cache_mem()?;
-            pkt.compute_directed_with_triangles(
-                proc_mem,
-                triangles,
-                Some((&adjacency, in_triangle.as_ref().map(|f| f.shared_slice()))),
-            )?;
-            Ok(pkt)
-        })();
-        adjacency.cleanup()?;
-        result
-    }
 
-    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph from its
-    /// precomputed `triangles` (of their type), which are consumed: their counts are used as
-    /// working memory.
-    pub fn new_directed_with_triangles(
-        g: &'a GraphMemoryMap<N, E, Ix>,
-        triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let pkt = Self::new_no_compute_impl(g, g.thread_num(), Some(triangles.triangle_type()))?;
-        let proc_mem = pkt.init_cache_mem()?;
-        pkt.compute_directed_with_triangles(proc_mem, triangles, None)?;
-        Ok(pkt)
-    }
 
-    /// Returns the trussness of a given edge of a [`GraphMemoryMap`] instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `e_idx` --- the index of the edge whose trussness is to be returned.
-    ///
-    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn trussness(&self, e_idx: usize) -> Tx {
-        assert!(e_idx < self.g.width());
-        *self.k_trusses.get(e_idx)
-    }
 
-    /// Returns a slice containing the trussness of each edge of the [`GraphMemoryMap`] instance.
-    ///
-    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn k_trusses(&self) -> &[Tx] {
-        self.k_trusses.as_slice()
-    }
 
-    /// The triangles' type, for decompositions of directed graphs.
-    pub fn triangle_type(&self) -> Option<DirectedTriangleType> {
-        self.directed
-    }
 
-    /// Removes all cached files pertaining to this algorithm's execution's results.
-    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let this = ManuallyDrop::new(self);
-        let out_fn = this
-            .g
-            .build_cache_filename(cache_file(this.directed), None)?;
-        std::fs::remove_file(out_fn)?;
-        Ok(())
-    }
 }
 
 #[allow(dead_code)]
@@ -304,45 +225,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         self.g.width()
     }
 
-    fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
-        threads: usize,
-        directed: Option<DirectedTriangleType>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        if directed.is_none() {
-            g.require_symmetric("PKT", Some("`AlgoPKT::new_directed`"))?;
-        }
-        let threads = threads.max(1);
-        let out_fn = g.build_cache_filename(cache_file(directed), None)?;
-        let k_trusses = SharedSliceMut::<Tx>::abst_mem_mut(&out_fn, g.width(), true)?;
-        Ok(Self {
-            g,
-            k_trusses,
-            threads,
-            directed,
-        })
-    }
 
     fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
-        let edge_count = self.g.width();
-        let file = |seq| {
-            self.g
-                .build_cache_filename(cache_file(self.directed), Some(seq))
-        };
-
-        let curr = SharedSliceMut::<Ix>::abst_mem_mut(&file(0)?, edge_count, true)?;
-        let next = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, edge_count, true)?;
-        let processed = SharedSliceMut::<bool>::abst_mem_mut(&file(2)?, edge_count, true)?;
-        let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&file(3)?, edge_count, true)?;
-        let in_next = SharedSliceMut::<bool>::abst_mem_mut(&file(4)?, edge_count, true)?;
-
+        let mem = self.scratch_mem()?;
         // pre-initialize the memmapped files if they don't exist
-        if self.directed.is_none() {
-            let _edge_reciprocal = self.g.edge_reciprocal()?;
-            let _edge_out = self.g.edge_over()?;
-        }
-
-        Ok((curr, next, processed, in_curr, in_next))
+        let _edge_reciprocal = self.g.edge_reciprocal()?;
+        let _edge_out = self.g.edge_over()?;
+        Ok(mem)
     }
 
     fn compute_with_proc_mem_impl(
@@ -378,50 +267,77 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         Ok(())
     }
 
-    /// Decomposes the directed graph from its `triangles`, whose counts are used (and consumed)
-    /// as working memory.
-    fn compute_directed_with_triangles(
-        &self,
-        proc_mem: ProceduralMemoryPKT<Ix>,
-        mut triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
-        adjacency: Option<(
-            &DirectedAdjacency<'a, N, E, Ix>,
-            Option<SharedSliceMut<portable_atomic::AtomicBool>>,
-        )>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if triangles.all_triangles().len() != self.g.width() {
-            return Err(format!(
-                "error expected the triangles of a graph with {} edges, got {}",
-                self.g.width(),
-                triangles.all_triangles().len()
-            )
-            .into());
-        }
-        // the caller's merged adjacency, or one built (and removed) here
-        let built = match adjacency {
-            Some(_) => None,
-            None => Some(DirectedAdjacency::build(self.g, self.threads)?),
+
+}
+
+/// Shared by the decompositions of undirected graphs' triangles and directed graphs'.
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir: Directedness>
+    AlgoPKT<'a, N, E, Ix, Tx, Dir>
+{
+    /// The working memory of a decomposition.
+    fn scratch_mem(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
+        let edge_count = self.g.width();
+        let file = |seq| {
+            self.g
+                .build_cache_filename(cache_file(self.directed), Some(seq))
         };
-        let (adjacency, in_triangle) = match (adjacency, built.as_ref()) {
-            (Some((adjacency, in_triangle)), _) => (adjacency, in_triangle),
-            (None, Some(built)) => (built, None),
-            (None, None) => return Err("error no merged adjacency".into()),
-        };
-        let index = TriangleIndex::Directed {
-            adjacency,
-            offsets: SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size()),
-            roles: triangles.triangle_type().roles(),
-            in_triangle,
-        };
-        let result = self.peel(proc_mem, triangles.triangles_shares_slice(), &index);
-        if let Some(built) = built {
-            built.cleanup()?;
-        }
-        result?;
-        triangles.drop_cache()?;
-        Ok(())
+
+        let curr = SharedSliceMut::<Ix>::abst_mem_mut(&file(0)?, edge_count, true)?;
+        let next = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, edge_count, true)?;
+        let processed = SharedSliceMut::<bool>::abst_mem_mut(&file(2)?, edge_count, true)?;
+        let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&file(3)?, edge_count, true)?;
+        let in_next = SharedSliceMut::<bool>::abst_mem_mut(&file(4)?, edge_count, true)?;
+
+
+        Ok((curr, next, processed, in_curr, in_next))
     }
 
+    /// Returns the trussness of a given edge of a [`GraphMemoryMap`] instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `e_idx` --- the index of the edge whose trussness is to be returned.
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    pub fn trussness(&self, e_idx: usize) -> Tx {
+        assert!(e_idx < self.g.width());
+        *self.k_trusses.get(e_idx)
+    }
+    /// Returns a slice containing the trussness of each edge of the [`GraphMemoryMap`] instance.
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    pub fn k_trusses(&self) -> &[Tx] {
+        self.k_trusses.as_slice()
+    }
+    /// The triangles' type, for decompositions of directed graphs.
+    pub fn triangle_type(&self) -> Option<DirectedTriangleType> {
+        self.directed
+    }
+    /// Removes all cached files pertaining to this algorithm's execution's results.
+    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let this = ManuallyDrop::new(self);
+        let out_fn = this
+            .g
+            .build_cache_filename(cache_file(this.directed), None)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
+        Ok(())
+    }
+    fn new_no_compute_impl(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        threads: usize,
+        directed: Option<DirectedTriangleType>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let threads = threads.max(1);
+        let out_fn = g.build_cache_filename(cache_file(directed), None)?;
+        let k_trusses = SharedSliceMut::<Tx>::abst_mem_mut(&out_fn, g.width(), true)?;
+        Ok(Self {
+            g,
+            k_trusses,
+            threads,
+            directed,
+        })
+    }
     /// ParTriangle-AM4 --- adjusted for multigraphs and directed triangle types: peels edges by
     /// increasing support `s` (their triangle counts, consumed), storing their trussness.
     fn peel(
@@ -697,6 +613,116 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         // cleanup cache (curr, next, processed, in_curr and in_next)
         self.g.remove_tmp_files(cache_file(self.directed), 0..5)?;
 
+        Ok(())
+    }
+}
+
+/// Decompositions of a directed graph's triangles of a given type.
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix, u8, Directed> {
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph, over its
+    /// triangles of type `triangle_type` (an edge is in the k-truss if it's in at least `k - 2`
+    /// triangles, in a selected role, of the k-truss). Trussness is stored as `u8`s, see
+    /// [`new_directed_tx`](Self::new_directed_tx) for other widths.
+    pub fn new_directed(
+        g: &'a DiGraph<N, E, Ix>,
+        triangle_type: DirectedTriangleType,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_directed_tx(g, triangle_type, g.thread_num())
+    }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
+    AlgoPKT<'a, N, E, Ix, Tx, Directed>
+{
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph, over its
+    /// triangles of type `triangle_type`, storing trussness as `Tx` integers.
+    pub fn new_directed_tx(
+        g: &'a DiGraph<N, E, Ix>,
+        triangle_type: DirectedTriangleType,
+        threads: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // the merged adjacency serves both counting and peeling
+        let adjacency = DirectedAdjacency::build(g, threads)?;
+        let result = (|| {
+            // with only some roles selected, edges without support are peeled too, but only those
+            // in some triangle can matter
+            let in_triangle = match triangle_type.symmetric() {
+                true => None,
+                false => Some(adjacency.in_triangle_flags()?),
+            };
+            let triangles = DirectedTriangles::<N, E, Ix, Tx>::new_with_adjacency(
+                g,
+                triangle_type,
+                &adjacency,
+                in_triangle.as_ref().map(|f| f.shared_slice()),
+            )?;
+            let pkt = Self::new_no_compute_impl(g, threads, Some(triangle_type))?;
+            let proc_mem = pkt.scratch_mem()?;
+            pkt.compute_directed_with_triangles(
+                proc_mem,
+                triangles,
+                Some((&adjacency, in_triangle.as_ref().map(|f| f.shared_slice()))),
+            )?;
+            Ok(pkt)
+        })();
+        adjacency.cleanup()?;
+        result
+    }
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph from its
+    /// precomputed `triangles` (of their type), which are consumed: their counts are used as
+    /// working memory.
+    pub fn new_directed_with_triangles(
+        g: &'a DiGraph<N, E, Ix>,
+        triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let pkt = Self::new_no_compute_impl(g, g.thread_num(), Some(triangles.triangle_type()))?;
+        let proc_mem = pkt.scratch_mem()?;
+        pkt.compute_directed_with_triangles(proc_mem, triangles, None)?;
+        Ok(pkt)
+    }
+    /// Decomposes the directed graph from its `triangles`, whose counts are used (and consumed)
+    /// as working memory.
+    fn compute_directed_with_triangles(
+        &self,
+        proc_mem: ProceduralMemoryPKT<Ix>,
+        mut triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
+        adjacency: Option<(
+            &DirectedAdjacency<'a, N, E, Ix>,
+            Option<SharedSliceMut<portable_atomic::AtomicBool>>,
+        )>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if triangles.all_triangles().len() != self.g.width() {
+            return Err(format!(
+                "error expected the triangles of a graph with {} edges, got {}",
+                self.g.width(),
+                triangles.all_triangles().len()
+            )
+            .into());
+        }
+        // the caller's merged adjacency, or one built (and removed) here
+        let built = match adjacency {
+            Some(_) => None,
+            None => Some(DirectedAdjacency::build(self.g, self.threads)?),
+        };
+        let (adjacency, in_triangle) = match (adjacency, built.as_ref()) {
+            (Some((adjacency, in_triangle)), _) => (adjacency, in_triangle),
+            (None, Some(built)) => (built, None),
+            (None, None) => return Err("error no merged adjacency".into()),
+        };
+        let index = TriangleIndex::Directed {
+            adjacency,
+            offsets: SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size()),
+            roles: triangles.triangle_type().roles(),
+            in_triangle,
+        };
+        let result = self.peel(proc_mem, triangles.triangles_shares_slice(), &index);
+        if let Some(built) = built {
+            built.cleanup()?;
+        }
+        result?;
+        triangles.drop_cache()?;
         Ok(())
     }
 }

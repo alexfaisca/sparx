@@ -28,8 +28,8 @@ const DEFAULT_TOLERANCE: f64 = 0.0;
 /// arcs has modularity `0`.
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType>(
-    g: &GraphMemoryMap<N, E, Ix>,
+pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
     communities: &[Ix],
 ) -> Result<f64, Box<dyn std::error::Error>> {
     let node_count = g.size();
@@ -92,9 +92,13 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType>(
 /// Perez's ["Directed Louvain: maximizing modularity in directed
 /// networks"](https://hal.science/hal-01231784).
 ///
-/// This is the community detection algorithm for **directed** graphs: [`AlgoGVELouvain`] (faster
-/// and parallel) refuses them. It accepts undirected graphs too, on which it is ordinary
-/// (sequential) Louvain. The graph is unweighted: each arc weighs `1`, so parallel arcs add up.
+/// This is the community detection algorithm for [`DiGraph`]s, as [`AlgoGVELouvain`] (faster and
+/// parallel) is for undirected [`Graph`]s; on a symmetric `DiGraph` (e.g. a `Graph`'s
+/// [`into_directed`](crate::graph::GraphMemoryMap::into_directed)) it is ordinary, sequential,
+/// Louvain. The graph is unweighted: each arc weighs `1`, so parallel arcs add up.
+///
+/// [`DiGraph`]: crate::graph::DiGraph
+/// [`Graph`]: crate::graph::Graph
 ///
 /// The algorithm alternates two phases, sequentially and in node order (so results are
 /// deterministic):
@@ -124,7 +128,7 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType>(
 #[derive(Debug)]
 pub struct DirectedLouvain<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     /// Graph whose nodes are partitioned.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a DiGraph<N, E, Ix>,
     /// Memmapped slice containing the community of each node.
     communities: AbstractedProceduralMemoryMut<Ix>,
     /// Number of communities.
@@ -145,7 +149,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
     /// * `g` --- the [`GraphMemoryMap`] instance to be partitioned.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a DiGraph<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_with_conf(g, DEFAULT_MAX_PASSES, DEFAULT_TOLERANCE)
     }
 
@@ -165,7 +169,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new_with_conf(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         max_passes: usize,
         tolerance: f64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -218,7 +222,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
         let out_fn = this
             .g
             .build_cache_filename(CacheFile::DirectedLouvain, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 
@@ -321,7 +325,7 @@ struct BaseArcs<Ix: graph::IndexType> {
 impl<Ix: graph::IndexType> BaseArcs<Ix> {
     /// Valid while `g` (which owns its transpose) is.
     fn new<N: graph::N, E: graph::E>(
-        g: &GraphMemoryMap<N, E, Ix>,
+        g: &DiGraph<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let t = g.transpose()?;
         Ok(Self {
@@ -675,7 +679,7 @@ mod test {
     fn directed_modularity_of_linked_cycles_matches_networkx() {
         let arcs = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (2, 3)];
         let g = graph("dm_cycles", "general", 6, &arcs);
-        assert!(g.is_directed().unwrap());
+        assert!(!g.is_symmetric().unwrap());
         let q = directed_modularity(&g, &[0, 0, 0, 1, 1, 1]).unwrap();
         assert_close(q, 18.0 / 49.0, "two cycles");
         assert!(directed_modularity(&g, &[0, 0, 0]).is_err());
@@ -686,7 +690,7 @@ mod test {
         let n = 30;
         let edges = simple_edges(n, 90, 7);
         let g = graph("dm_symmetric", "symmetric", n, &edges);
-        assert!(!g.is_directed().unwrap());
+        assert!(g.is_symmetric().unwrap());
         for comm in [
             (0..n).map(|v| v % 4).collect::<Vec<_>>(),
             (0..n).map(|v| v / 10).collect(),
@@ -721,7 +725,7 @@ mod test {
         let (groups, size) = (4, 8);
         let arcs = planted(groups, size);
         let g = graph("dl_planted", "general", groups * size, &arcs);
-        assert!(g.is_directed().unwrap());
+        assert!(!g.is_symmetric().unwrap());
         let louvain = DirectedLouvain::new(&g).unwrap();
         let expected: Vec<usize> = (0..groups * size).map(|v| v / size).collect();
         assert_eq!(as_usize(louvain.communities()), expected);
@@ -811,7 +815,7 @@ mod test {
         }
         edges.push((4, 5));
         let g = graph("dl_cliques", "symmetric", 10, &edges);
-        assert!(!g.is_directed().unwrap());
+        assert!(g.is_symmetric().unwrap());
         let louvain = DirectedLouvain::new(&g).unwrap();
         let comm = as_usize(louvain.communities());
         assert_eq!(comm, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
@@ -871,12 +875,12 @@ mod test {
         for &(u, v) in &arcs { writeln!(f, "{} {}", u + 1, v + 1).unwrap(); }
         drop(f);
         let expected: Vec<usize> = (0..groups * size).map(|v| v / size).collect();
-        let g16 = TestGraph::new(GraphMemoryMap::<(), (), u16>::from_file(&path, Some(format!("r16_{}", unique_run_tag())), Some(2)).unwrap(), None);
+        let g16 = TestGraph::new(crate::graph::DiGraph::<(), (), u16>::from_file(&path, Some(format!("r16_{}", unique_run_tag())), Some(2)).unwrap(), None);
         let l = DirectedLouvain::new(&g16).unwrap();
         assert_eq!(l.communities().iter().map(|c| c.index()).collect::<Vec<_>>(), expected);
         let lab: Vec<u16> = (0..groups * size).map(|v| 60000 + (v / size) as u16).collect();
         assert_close(directed_modularity(&g16, &lab).unwrap(), l.partition_modularity(), "u16 big labels");
-        let g8 = TestGraph::new(GraphMemoryMap::<(), (), u8>::from_file(&path, Some(format!("r8_{}", unique_run_tag())), Some(2)).unwrap(), Some(dir));
+        let g8 = TestGraph::new(crate::graph::DiGraph::<(), (), u8>::from_file(&path, Some(format!("r8_{}", unique_run_tag())), Some(2)).unwrap(), Some(dir));
         let l = DirectedLouvain::new(&g8).unwrap();
         assert_eq!(l.communities().iter().map(|c| c.index()).collect::<Vec<_>>(), expected);
     }

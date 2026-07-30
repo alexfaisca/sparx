@@ -18,9 +18,9 @@ use std::path::Path;
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct ConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+pub struct ConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
     /// Graph whose components are computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the component of each node.
     components: AbstractedProceduralMemoryMut<Ix>,
     /// Number of components.
@@ -28,7 +28,7 @@ pub struct ConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexTyp
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ConnectedComponents<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> ConnectedComponents<'a, N, E, Ix, Dir> {
     /// Computes the weakly connected components of the graph (its connected components, if
     /// it's undirected).
     ///
@@ -39,7 +39,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ConnectedComponents<'a,
     /// * `g` --- the [`GraphMemoryMap`] instance whose components are to be computed.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
         let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut cc = Self {
@@ -54,7 +54,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ConnectedComponents<'a,
     /// Searches for a previously cached result, and if not found computes the weakly connected
     /// components of the graph.
     pub fn get_or_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let c_fn = g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
         if Path::new(&c_fn).exists()
@@ -102,7 +102,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ConnectedComponents<'a,
         let this = ManuallyDrop::new(self);
         this.g.cleanup_cache(CacheFile::ConnectedComponents)?;
         let out_fn = this.g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 
@@ -114,8 +114,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ConnectedComponents<'a,
 
 /// Labels every node with its weakly connected component (numbered by smallest node), using a
 /// scratch file of `scratch`'s, and returns the number of components.
-pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType>(
-    g: &GraphMemoryMap<N, E, Ix>,
+pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
     components_mem: &AbstractedProceduralMemoryMut<Ix>,
     scratch: CacheFile,
 ) -> Result<usize, Box<dyn std::error::Error>> {
@@ -126,8 +126,8 @@ pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     let edge_count = g.width();
     let index_ptr = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
     let neighbours_ptr = SharedSlice::<Ix>::new(g.neighbours_ptr(), edge_count);
-    // an undirected graph stores each edge both ways: one of them is enough
-    let directed = g.is_directed()?;
+    // a symmetric graph stores each edge both ways: one of them is enough
+    let symmetric = g.is_symmetric()?;
 
     let p_fn = g.build_cache_filename(scratch, Some(0))?;
     let parent = SharedSliceMut::<Ix::Atomic>::abst_mem_mut(&p_fn, node_count, true)?;
@@ -174,7 +174,7 @@ pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType>(
         for u in begin..end {
             for e in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                 let v = neighbours_ptr.get(e).index();
-                if v == u || (!directed && v > u) {
+                if v == u || (symmetric && v > u) {
                     continue;
                 }
                 loop {

@@ -1,7 +1,9 @@
 use super::GraphMemoryMap;
 
 #[allow(dead_code)]
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphMemoryMap<N, E, Ix> {
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness>
+    GraphMemoryMap<N, E, Ix, Dir>
+{
     #[inline(always)]
     pub(super) fn is_neighbour_impl(&self, u: usize, v: usize) -> Option<usize> {
         assert!(

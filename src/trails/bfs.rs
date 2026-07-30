@@ -14,17 +14,18 @@ type ProceduralMemoryBFSDists<Ix> = (
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
-/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
-/// distances are from `source`. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
-/// [`Direction::In`] gives distances to `source`, [`Direction::Both`] ignores their directions.
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): distances are from `source`.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] gives distances to `source`. To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
 ///
 /// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
-/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
-pub struct BFSDists<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
+pub struct BFSDists<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
     /// Graph in which the BFS is to be performed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     source: usize,
     /// Memmapped slice containing each nodes' distance to the source node.
     distances: AbstractedProceduralMemoryMut<Ix>,
@@ -35,22 +36,26 @@ pub struct BFSDists<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix, Directed> {
     /// Computes every node's distance from `source`, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
     ///
     /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
     pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         source: usize,
         direction: Direction,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(g.view(direction)?, source)
     }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSDists<'a, N, E, Ix, Dir> {
 
     pub fn new(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bfs = Self::new_no_compute(g, source)?;
@@ -61,7 +66,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
         Ok(bfs)
     }
     pub fn new_t(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
         thread: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -114,17 +119,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.g.build_cache_filename(CacheFile::BFS, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSDists<'a, N, E, Ix, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source)
@@ -133,7 +138,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source)
@@ -186,7 +191,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix> 
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if source >= g.size() {
@@ -274,7 +279,7 @@ mod test {
         header: &str,
         n: usize,
         edges: &[(usize, usize)],
-    ) -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
+    ) -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
         let dir = unique_test_dir("bfs_dists_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{name}.mtx"));
@@ -286,7 +291,7 @@ mod test {
         }
         drop(f);
         let graph =
-            GraphMemoryMap::from_file(&path, Some(format!("bfs_{name}_{}", unique_run_tag())), None)
+            crate::graph::DiGraph::from_file(&path, Some(format!("bfs_{name}_{}", unique_run_tag())), None)
                 .expect("graph parse should succeed");
         crate::graph::test_utils::TestGraph::new(graph, Some(dir))
     }

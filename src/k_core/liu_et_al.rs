@@ -1,15 +1,16 @@
 use crate::graph;
 use crate::graph::*;
+use crate::k_core::count::{CoreCount, CoreCounter, check_degree};
 use crate::shared_slice::*;
 
 use crossbeam::thread;
-use portable_atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
-type ProceduralMemoryLiuEtAL<Ix> = (
-    AbstractedProceduralMemoryMut<AtomicU8>,
+type ProceduralMemoryLiuEtAL<Ix, Cx> = (
+    AbstractedProceduralMemoryMut<<Cx as CoreCount>::Atomic>,
     AbstractedProceduralMemoryMut<Ix>,
     AbstractedProceduralMemoryMut<AtomicBool>,
     AbstractedProceduralMemoryMut<Ix>,
@@ -18,14 +19,18 @@ type ProceduralMemoryLiuEtAL<Ix> = (
 
 /// For the computation of a [`GraphMemoryMap`] instance's k-core decomposition as described in ["Parallel 𝑘-Core Decomposition: Theory and Practice"](https://doi.org/10.48550/arXiv.2502.08042) by Liu Y. et al.
 ///
+/// Coreness is stored as `Cx` integers (`u8` by default, see [`CoreCount`]): every node's degree
+/// must fit a `Cx`, or the decomposition fails with an error.
+///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+/// [`CoreCount`]: ../count/trait.CoreCount.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AlgoLiuEtAl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
-    /// Graph for which node/edge coreness is computed.
+pub struct AlgoLiuEtAl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount = u8> {
+    /// Graph for which node coreness is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
-    /// Memmapped slice containing the coreness of each edge.
-    k_cores: AbstractedProceduralMemoryMut<u8>,
+    /// Memmapped slice containing the coreness of each node.
+    k_cores: AbstractedProceduralMemoryMut<Cx>,
     threads: usize,
 }
 
@@ -43,12 +48,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut liu_et_al = Self::new_no_compute(g, g.thread_num())?;
-        let proc_mem = liu_et_al.init_cache_mem()?;
-
-        liu_et_al.compute_with_proc_mem(proc_mem)?;
-
-        Ok(liu_et_al)
+        Self::new_cx(g, g.thread_num())
     }
     /// Searches for a previously cached result, and if not found performs k-core decomposition as described in ["Parallel 𝑘-Core Decomposition: Theory and Practice"](https://doi.org/10.48550/arXiv.2502.08042) by Liu Y. et al.
     ///
@@ -64,18 +64,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
     pub fn get_or_compute(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("Liu et al.'s k-core decomposition", None)?;
-        let c_fn = g.build_cache_filename(CacheFile::KCoreLEA, None)?;
-        if Path::new(&c_fn).exists() {
-            if let Ok(k_cores) = AbstractedProceduralMemoryMut::from_file_name(&c_fn) {
-                return Ok(Self {
-                    g,
-                    k_cores,
-                    threads: g.thread_num().max(1),
-                });
-            }
-        }
-        Self::new(g)
+        Self::get_or_compute_cx(g)
     }
 
     /// Performs k-core decomposition as described in ["Parallel 𝑘-Core Decomposition: Theory and Practice"](https://doi.org/10.48550/arXiv.2502.08042) by Liu Y. et al.
@@ -94,30 +83,69 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut liu_et_al = Self::new_no_compute(g, threads)?;
-        let proc_mem = liu_et_al.init_cache_mem()?;
+        Self::new_cx(g, threads)
+    }
+}
 
-        liu_et_al.compute_with_proc_mem(proc_mem)?;
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
+    AlgoLiuEtAl<'a, N, E, Ix, Cx>
+{
+    /// Performs the k-core decomposition with `threads` threads, storing coreness as `Cx`
+    /// integers.
+    pub fn new_cx(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        threads: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut liu_et_al = Self::new_no_compute(g, threads)?;
+        let computed = liu_et_al
+            .init_cache_mem()
+            .and_then(|proc_mem| liu_et_al.compute_with_proc_mem(proc_mem));
+        // so that no (partial) result is ever taken for a cached one
+        if let Err(e) = computed {
+            let _ = liu_et_al.drop_cache();
+            return Err(e);
+        }
 
         Ok(liu_et_al)
     }
 
-    /// Returns the coreness of a given edge of a [`GraphMemoryMap`] instance.
+    /// Searches for a previously cached `Cx` result, computing it if not found.
+    pub fn get_or_compute_cx(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let c_fn = g.build_cache_filename(CacheFile::KCoreLEA, None)?;
+        if Path::new(&c_fn).exists() {
+            // a cache of another graph (version) or coreness width would have another length
+            if let Ok(k_cores) = AbstractedProceduralMemoryMut::<Cx>::from_file_name(&c_fn)
+                && k_cores.as_slice().len() == g.size()
+            {
+                return Ok(Self {
+                    g,
+                    k_cores,
+                    threads: g.thread_num().max(1),
+                });
+            }
+        }
+        Self::new_cx(g, g.thread_num())
+    }
+
+    /// Returns the coreness of a given node of a [`GraphMemoryMap`] instance.
     ///
     /// # Arguments
     ///
-    /// * `e_idx` --- the index of the edge whose coreness is to be returned.
+    /// * `node` --- the index of the node whose coreness is to be returned.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn coreness(&self, e_idx: usize) -> u8 {
-        assert!(e_idx < self.g.width());
-        *self.k_cores.get(e_idx)
+    pub fn coreness(&self, node: usize) -> Cx {
+        assert!(node < self.g.size());
+        *self.k_cores.get(node)
     }
 
-    /// Returns a slice containing the coreness of each edge of the [`GraphMemoryMap`] instance.
+    /// Returns a slice containing the coreness of each node of the [`GraphMemoryMap`] instance.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn k_cores(&self) -> &[u8] {
+    pub fn k_cores(&self) -> &[Cx] {
         self.k_cores.as_slice()
     }
 
@@ -126,13 +154,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         let this = ManuallyDrop::new(self);
         this.g.cleanup_cache(CacheFile::KCoreLEA)?;
         let out_fn = this.g.build_cache_filename(CacheFile::KCoreLEA, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
+    AlgoLiuEtAl<'a, N, E, Ix, Cx>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -153,7 +183,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryLiuEtAL<Ix>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -161,7 +191,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryLiuEtAL<Ix>, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -169,7 +199,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryLiuEtAL<Ix>,
+        proc_mem: ProceduralMemoryLiuEtAL<Ix, Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -178,7 +208,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryLiuEtAL<Ix>,
+        proc_mem: ProceduralMemoryLiuEtAL<Ix, Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -192,10 +222,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("Liu et al.'s k-core decomposition", None)?;
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::KCoreLEA, None)?;
-        let k_cores = SharedSliceMut::<u8>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let k_cores = SharedSliceMut::<Cx>::abst_mem_mut(&out_fn, g.size(), true)?;
         Ok(Self {
             g,
             k_cores,
@@ -203,7 +232,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryLiuEtAL<Ix>, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
@@ -213,7 +242,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         let f_fn = self.g.build_cache_filename(CacheFile::KCoreLEA, Some(3))?;
         let fs_fn = self.g.build_cache_filename(CacheFile::KCoreLEA, Some(4))?;
 
-        let degree = SharedSliceMut::<AtomicU8>::abst_mem_mut(&d_fn, node_count, true)?;
+        let degree = SharedSliceMut::<Cx::Atomic>::abst_mem_mut(&d_fn, node_count, true)?;
         let node_index = SharedSliceMut::<Ix>::abst_mem_mut(&ni_fn, node_count, true)?;
         let alive = SharedSliceMut::<AtomicBool>::abst_mem_mut(&a_fn, node_count, true)?;
         let frontier = SharedSliceMut::<Ix>::abst_mem_mut(&f_fn, edge_count, true)?;
@@ -224,7 +253,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
 
     fn compute_with_proc_mem_impl(
         &self,
-        proc_mem: ProceduralMemoryLiuEtAL<Ix>,
+        proc_mem: ProceduralMemoryLiuEtAL<Ix, Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
@@ -243,7 +272,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         let mut coreness = self.k_cores.shared_slice();
 
         // Initialize
-        let total_dead_nodes = thread::scope(|s| -> usize {
+        let total_dead_nodes = thread::scope(
+            |s| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
             let mut dead_nodes = vec![];
             for tid in 0..threads {
                 let mut degree = degree.shared_slice();
@@ -252,12 +282,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                 let start = std::cmp::min(tid * thread_load, node_count);
                 let end = std::cmp::min(start + thread_load, node_count);
 
-                dead_nodes.push(s.spawn(move |_| -> usize {
+                dead_nodes.push(s.spawn(
+                    move |_| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
                     let mut dead_nodes = 0;
 
                     for u in start..end {
                         let deg_u = index_ptr.get(u + 1).index() - index_ptr.get(u).index();
-                        *degree.get_mut(u) = AtomicU8::new(deg_u as u8);
+                        check_degree::<Cx>(u, deg_u)?;
+                        degree.get_mut(u).set_count(deg_u);
 
                         if deg_u == 0 {
                             dead_nodes += 1;
@@ -267,19 +299,21 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                         }
                     }
 
-                    dead_nodes
+                    Ok(dead_nodes)
                 }));
             }
             let mut total_dead_nodes = 0;
-            dead_nodes
-                .into_iter()
-                .map(|e| e.join().expect("error"))
-                .for_each(|e| total_dead_nodes += e);
+            for handle in dead_nodes {
+                total_dead_nodes += handle.join().map_err(
+                    |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{:?}", e).into() },
+                )??;
+            }
             let _ = degree.flush_async();
             let _ = alive.flush_async();
-            total_dead_nodes
+            Ok(total_dead_nodes)
         })
-        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
 
         // ditch node sampling as graphs are inherintely sparse
         // use veertical granularity control:
@@ -294,7 +328,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
 
         // --- core-peeling loop (Liu et al. algorithm) ---
         // for nodes with degree <= 16 no bucketing is used
-        let mut k = 1u8;
+        let mut k = 1usize;
         // number of vertices not yet peeled
         let remaining_global = Arc::new(AtomicUsize::new(node_count - total_dead_nodes));
         let frontier = SharedQueueMut::<Ix>::from_shared_slice(frontier.shared_slice());
@@ -324,7 +358,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                             // build initial frontier = all vertices with degree <= k that are still active.
                             for u in start..end {
                                 if alive.get(u).load(Ordering::Relaxed)
-                                    && degree.get(u).load(Ordering::Relaxed) <= k
+                                    && degree.get(u).count() <= k
                                 {
                                     alive.get(u).store(false, Ordering::Relaxed);
                                     let _ = frontier.push(Ix::new(u));
@@ -334,15 +368,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                             synchronize.wait();
 
                             if frontier.is_empty() {
-                                k = match k.overflowing_add(1) {
-                                    (r, false) => r,
-                                    _ => {
-                                        return Err(format!(
-                                            "error overflow when adding to k ({k} + 1)"
-                                        )
-                                        .into());
-                                    }
-                                };
+                                // past the largest degree, which fits a `Cx`, all are peeled
+                                if k == Cx::MAX {
+                                    return Err(format!(
+                                        "error overflow when adding to k ({k} + 1)"
+                                    )
+                                    .into());
+                                }
+                                k += 1;
                                 continue;
                             }
 
@@ -360,25 +393,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                                     for i in 0..end - start {
                                         // set coreness and decrement neighbour degrees
                                         let u = chunk.get(i).index();
-                                        *coreness.get_mut(u) = k;
+                                        *coreness.get_mut(u) = Cx::from_usize(k);
 
                                         // for each neighbor v of u:
                                         for idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                                             let v = neighbour_ptr.get(idx).index();
-                                            if let Ok(old) = degree.get(v).fetch_update(
-                                                Ordering::Relaxed,
-                                                Ordering::Relaxed,
-                                                |x| {
-                                                    if x > k {
-                                                        match x.overflowing_sub(1) {
-                                                            (r, false) => Some(r),
-                                                            _ => None,
-                                                        }
-                                                    } else {
-                                                        None
-                                                    }
-                                                },
-                                            ) {
+                                            if let Some(old) = degree.get(v).decrement_above(k) {
                                                 if old == k + 1 {
                                                     let life =
                                                         alive.get(v).swap(false, Ordering::Relaxed);
@@ -399,24 +419,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
                                             // set coreness and decrement neighbour degrees
                                             read_in_stack += 1;
                                             let u = u.index();
-                                            *coreness.get_mut(u) = k;
+                                            *coreness.get_mut(u) = Cx::from_usize(k);
 
                                             for idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                                                 let v = neighbour_ptr.get(idx).index();
-                                                if let Ok(old) = degree.get(v).fetch_update(
-                                                    Ordering::Relaxed,
-                                                    Ordering::Relaxed,
-                                                    |x| {
-                                                        if x > k {
-                                                            match x.overflowing_sub(1) {
-                                                                (r, false) => Some(r),
-                                                                _ => None,
-                                                            }
-                                                        } else {
-                                                            None
-                                                        }
-                                                    },
-                                                ) {
+                                                if let Some(old) = degree.get(v).decrement_above(k) {
                                                     if old == k + 1 {
                                                         let life = alive
                                                             .get(v)
@@ -443,15 +450,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
 
                                 synchronize.wait();
                             }
-                            k = match k.overflowing_add(1) {
-                                (r, false) => r,
-                                _ => {
-                                    return Err(format!(
-                                        "error overflow when adding to k ({k} + 1)"
-                                    )
-                                    .into());
-                                }
-                            };
+                            if k == Cx::MAX && remaining_global.load(Ordering::Relaxed) > 0 {
+                                return Err(format!(
+                                    "error overflow when adding to k ({k} + 1)"
+                                )
+                                .into());
+                            }
+                            k += 1;
                         }
                         Ok(())
                     },
@@ -464,15 +469,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
         let env_verbose_val = std::env::var("BRUIJNX_VERBOSE").unwrap_or_else(|_| "0".to_string());
         let verbose: bool = env_verbose_val == "1";
         if verbose {
-            let mut r = vec![0usize; u8::MAX as usize];
-            let mut max = 0;
+            let max = (0..node_count).map(|i| coreness.get(i).to_usize()).max().unwrap_or(0);
+            let mut r = vec![0usize; max + 1];
             for i in 0..node_count {
-                if *coreness.get(i) > max {
-                    max = *coreness.get(i);
-                }
-                r[*coreness.get(i) as usize] += 1;
+                r[coreness.get(i).to_usize()] += 1;
             }
-            r.resize(max as usize + 1, 0);
             println!("k-cores {:?}", r);
         }
 
@@ -513,7 +514,9 @@ mod test {
         // a private copy: tests on the same fixture may run concurrently
         let (graph, _cache) = crate::graph::test_utils::open_fixture(path.as_ref(), Some(16))?;
         let liu_et_al_k_cores = AlgoLiuEtAl::new(&graph)?;
+        verify_k_cores(&graph, liu_et_al_k_cores.k_cores)?;
 
+        let liu_et_al_k_cores = AlgoLiuEtAl::<_, _, _, u16>::new_cx(&graph, graph.thread_num())?;
         verify_k_cores(&graph, liu_et_al_k_cores.k_cores)
     }
 

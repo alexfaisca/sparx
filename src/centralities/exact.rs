@@ -16,17 +16,18 @@ use crossbeam::thread;
 /// * `Some(true)` --- `(r(u) - 1) / d(u)`.
 ///
 /// Nodes reaching no other node get 0.
-/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
-/// a node's distances are to the nodes it reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
-/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"), [`Direction::Both`] ignores their directions.
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): a node's distances are to the nodes it reaches.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"). To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
 ///
 /// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
-/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
-pub struct ExactClosenessCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
+pub struct ExactClosenessCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64, Dir: Directedness = Undirected> {
     /// Graph for which *HyperBall* is computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's centrality.
     centralities: AbstractedProceduralMemoryMut<W>,
     /// Normalization flag.
@@ -34,22 +35,26 @@ pub struct ExactClosenessCentrality<'a, N: graph::N, E: graph::E, Ix: graph::Ind
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosenessCentrality<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosenessCentrality<'a, N, E, Ix, W, Directed> {
     /// Computes every node's exact closeness centrality, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
     ///
     /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
     pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         normalized: Option<bool>,
         direction: Direction,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(g.view(direction)?, normalized)
     }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactClosenessCentrality<'a, N, E, Ix, W, Dir> {
 
     pub fn new(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut closeness = Self::new_no_compute(g, normalized)?;
@@ -72,18 +77,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.build_cache_filename(CacheFile::ExactCloseness, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosenessCentrality<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactClosenessCentrality<'a, N, E, Ix, W, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, normalized)
@@ -92,7 +97,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, normalized)
@@ -140,7 +145,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
@@ -274,39 +279,44 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
 /// * `Some(true)` --- `h(u) / (r(u) - 1)`.
 ///
 /// Nodes reaching no other node get 0.
-/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
-/// a node's distances are to the nodes it reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
-/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"), [`Direction::Both`] ignores their directions.
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): a node's distances are to the nodes it reaches.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"). To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
 ///
 /// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
-/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
-pub struct ExactHarmonicCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
+pub struct ExactHarmonicCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64, Dir: Directedness = Undirected> {
     /// Graph for which *HyperBall* is computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's centrality.
     centralities: AbstractedProceduralMemoryMut<W>,
     /// Normalization flag.
     normalized: Option<bool>,
 }
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmonicCentrality<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmonicCentrality<'a, N, E, Ix, W, Directed> {
     /// Computes every node's exact harmonic centrality, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
     ///
     /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
     pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         normalized: Option<bool>,
         direction: Direction,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(g.view(direction)?, normalized)
     }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactHarmonicCentrality<'a, N, E, Ix, W, Dir> {
 
     pub fn new(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut harmonic = Self::new_no_compute(g, normalized)?;
@@ -329,18 +339,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.build_cache_filename(CacheFile::ExactHarmonic, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmonicCentrality<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactHarmonicCentrality<'a, N, E, Ix, W, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, normalized)
@@ -349,7 +359,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, normalized)
@@ -397,7 +407,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
@@ -542,35 +552,40 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
 /// Exact Lin's centrality of every node, by one BFS per node: `r(u)^2 / d(u)`, where `r(u)` is the
 /// number of nodes `u` reaches (`u` included) and `d(u)` the sum of its distances to them, or 1
 /// if `u` reaches no other node.
-/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
-/// a node's distances are to the nodes it reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
-/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"), [`Direction::Both`] ignores their directions.
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): a node's distances are to the nodes it reaches.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] uses distances from the nodes that reach it (the convention of networkx, and of Boldi and Vigna's "Axioms for Centrality"). To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
 ///
 /// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
-/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
-pub struct ExactLinCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64> {
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
+pub struct ExactLinCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64, Dir: Directedness = Undirected> {
     /// Graph for which *HyperBall* is computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's centrality.
     centralities: AbstractedProceduralMemoryMut<W>,
 }
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCentrality<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCentrality<'a, N, E, Ix, W, Directed> {
     /// Computes every node's exact Lin's centrality, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
     ///
     /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
     pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         direction: Direction,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(g.view(direction)?)
     }
+}
 
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactLinCentrality<'a, N, E, Ix, W, Dir> {
+
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut lin = Self::new_no_compute(g)?;
 
         lin.compute_with_proc_mem(())?;
@@ -591,18 +606,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.build_cache_filename(CacheFile::ExactLin, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCentrality<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactLinCentrality<'a, N, E, Ix, W, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g)
     }
@@ -610,7 +625,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g)
     }
@@ -657,7 +672,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
         let e_fn = g.build_cache_filename(CacheFile::ExactLin, None)?;

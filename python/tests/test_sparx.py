@@ -94,10 +94,32 @@ def test_csr(nx_graph, index):
 
 
 @pytest.mark.parametrize("algorithm", ["bz", "liu"])
-def test_k_core(nx_graph, index, algorithm):
+@pytest.mark.parametrize("width", ["u8", "u16", "u32", "u64"])
+def test_k_core(nx_graph, index, algorithm, width):
     with sparx.Graph(undirected(nx_graph), index=index) as g:
         core = nx.core_number(nx_graph)
-        assert g.k_core(algorithm=algorithm).tolist() == [core[u] for u in range(len(g))]
+        kc = g.k_core(algorithm=algorithm, width=width)
+        assert kc.dtype == np.dtype(width.replace("u", "uint"))
+        assert kc.tolist() == [core[u] for u in range(len(g))]
+        if width == "u8":
+            assert g.k_core(algorithm=algorithm).dtype == np.uint8
+
+
+@pytest.mark.parametrize("algorithm", ["bz", "liu"])
+def test_degrees_that_dont_fit_a_coreness_width_fail_rather_than_wrap(algorithm):
+    for leaves, narrow, wide in [(255, None, "u8"), (256, "u8", "u16")]:
+        star = nx.star_graph(leaves)
+        with sparx.Graph(undirected(star)) as g:
+            if narrow:
+                with pytest.raises(RuntimeError, match="coreness type"):
+                    g.k_core(algorithm=algorithm, width=narrow)
+            assert g.k_core(algorithm=algorithm, width=wide).tolist() == [1] * (leaves + 1)
+    # every node of degree 256, and coreness 256
+    clique = nx.complete_graph(257)
+    with sparx.Graph(undirected(clique)) as g:
+        with pytest.raises(RuntimeError, match="coreness type"):
+            g.k_core(algorithm=algorithm)
+        assert g.k_core(algorithm=algorithm, width="u16").tolist() == [256] * 257
 
 
 @pytest.mark.parametrize("width", ["u8", "u16", "u32", "u64"])
@@ -158,7 +180,7 @@ def test_directed_triangle_types():
 @pytest.mark.parametrize("kind", sparx.DIRECTED_TRIANGLE_TYPES)
 def test_directed_triangles(digraph, index, kind):
     A = nx.to_numpy_array(digraph, nodelist=range(len(digraph)), weight=None)
-    with sparx.Graph(directed(digraph), index=index) as g:
+    with sparx.DiGraph(directed(digraph), index=index) as g:
         src, dst = edge_list(g)
         expected = [
             sum(role_counts(A, u, v)[r].sum() for r in selected_roles(kind)) for u, v in zip(src, dst)
@@ -206,14 +228,14 @@ def directed_trussness(src, dst, roles):
 @pytest.mark.parametrize("algorithm", ["pkt", "burkhardt"])
 @pytest.mark.parametrize("kind", ["cycle", "out", "middleman", "feedforward", "cyclefeedforward"])
 def test_directed_k_truss(digraph, algorithm, kind):
-    with sparx.Graph(directed(digraph)) as g:
+    with sparx.DiGraph(directed(digraph)) as g:
         src, dst = edge_list(g)
         expected = directed_trussness(src.tolist(), dst.tolist(), selected_roles(kind))
-        assert g.k_truss(algorithm=algorithm, kind=kind).tolist() == expected
+        assert g.k_truss(kind, algorithm=algorithm).tolist() == expected
 
 
 def test_triangle_type_names_are_flexible(digraph):
-    with sparx.Graph(directed(digraph)) as g:
+    with sparx.DiGraph(directed(digraph)) as g:
         expected = g.directed_triangles("cyclefeedforward").tolist()
         assert g.directed_triangles("Cycle_Feed-Forward").tolist() == expected
 
@@ -400,10 +422,9 @@ def test_invalid_arguments():
     with sparx.Graph(undirected(nx.karate_club_graph())) as g:
         for call in [
             lambda: g.triangles(width="u128"),
-            lambda: g.directed_triangles("triangle"),
             lambda: g.k_truss(algorithm="other"),
-            lambda: g.k_truss(kind="loop"),
             lambda: g.k_core(algorithm="other"),
+            lambda: g.k_core(width="u128"),
             lambda: g.hyperball(precision=3),
             lambda: g.hyperball(precision=17),
             lambda: g.bfs(len(g)),
@@ -412,10 +433,48 @@ def test_invalid_arguments():
         ]:
             with pytest.raises(ValueError):
                 call()
-    with pytest.raises(RuntimeError):
-        sparx.Graph("missing.mtx")
-    with pytest.raises(RuntimeError):
-        sparx.Graph(undirected(nx.karate_club_graph()), index="u16")
+    with sparx.DiGraph(directed(nx.gnp_random_graph(10, 0.3, seed=0, directed=True))) as d:
+        for call in [
+            lambda: d.directed_triangles("triangle"),
+            lambda: d.directed_triangles("cycle", width="u7"),
+            lambda: d.k_truss("loop"),
+            lambda: d.k_truss("cycle", algorithm="other"),
+            lambda: d.k_core(degree="both"),
+            lambda: d.k_core(width="usize"),
+            lambda: d.hyperball(precision=3),
+            lambda: d.hyperball(direction="up"),
+            lambda: d.closeness(direction="up"),
+            lambda: d.bfs(len(d)),
+            lambda: d.bfs(0, direction="up"),
+            lambda: d.in_degree(len(d)),
+            lambda: d.in_neighbours(len(d)),
+            lambda: d.components(kind="semi"),
+        ]:
+            with pytest.raises(ValueError):
+                call()
+    for cls in (sparx.Graph, sparx.DiGraph):
+        with pytest.raises(RuntimeError):
+            cls("missing.mtx")
+
+
+@pytest.mark.parametrize("cls", [sparx.Graph, sparx.DiGraph])
+def test_bad_index_is_a_value_error(cls):
+    path = undirected(nx.karate_club_graph())
+    for index in ["u16", "U32", "", "usize"]:
+        with pytest.raises(ValueError, match="unknown index type"):
+            cls(path, index=index)
+        with pytest.raises(ValueError, match="unknown index type"):
+            cls(path, index=index, keep_cache=True)
+        # checked before looking for the file
+        with pytest.raises(ValueError, match="unknown index type"):
+            cls.open("missing.mmap", index=index)
+    with cls(path, keep_cache=True) as g:
+        cache_file = g.cache_file
+    with pytest.raises(ValueError, match="unknown index type"):
+        cls.open(cache_file, index="u16")
+    cls.open(cache_file).close()
+    for f in Path(cache_file).parent.iterdir():
+        f.unlink()
 
 
 @pytest.mark.skipif(sparx.GPU, reason="built with GPU support")
@@ -457,20 +516,21 @@ def by_smallest_node(components, n):
     return labels
 
 
-def test_direction_is_recorded(tmp_path):
-    with sparx.Graph(write_mtx("a.mtx", 3, [(0, 1), (1, 2)], False)) as g:
-        assert g.is_directed
-    with sparx.Graph(write_mtx("b.mtx", 3, [(0, 1), (1, 0)], False)) as g:
-        assert not g.is_directed
-    with sparx.Graph(write_mtx("c.mtx", 3, [(1, 0), (2, 1)], True)) as g:
-        assert not g.is_directed
+def test_symmetry_is_recorded(tmp_path):
+    with sparx.DiGraph(write_mtx("a.mtx", 3, [(0, 1), (1, 2)], False)) as g:
+        assert g.is_directed and not g.is_symmetric
+    for path in [write_mtx("b.mtx", 3, [(0, 1), (1, 0)], False), write_mtx("c.mtx", 3, [(1, 0), (2, 1)], True)]:
+        with sparx.DiGraph(path) as g:
+            assert g.is_directed and g.is_symmetric
+        with sparx.Graph(path) as g:
+            assert not g.is_directed and g.is_symmetric
 
 
 @pytest.mark.parametrize("G", list(random_digraphs()))
 def test_directed_degrees_and_bfs(G):
     n = G.number_of_nodes()
     views = {"out": G, "in": G.reverse(), "both": G.to_undirected()}
-    with sparx.Graph(directed(G)) as g:
+    with sparx.DiGraph(directed(G)) as g:
         assert [g.in_degree(u) for u in range(n)] == [G.in_degree(u) for u in range(n)]
         for direction, H in views.items():
             for source in range(0, n, 5):
@@ -484,7 +544,7 @@ def test_directed_centralities_against_networkx(G):
     n = G.number_of_nodes()
     # networkx's closeness and harmonic centralities use distances *to* a node: "in"
     views = {"in": G, "out": G.reverse(), "both": G.to_undirected()}
-    with sparx.Graph(directed(G)) as g:
+    with sparx.DiGraph(directed(G)) as g:
         for direction, H in views.items():
             closeness = nx.closeness_centrality(H, wf_improved=False)
             got = g.closeness(direction=direction, normalized=True)
@@ -500,7 +560,7 @@ def test_directed_centralities_against_networkx(G):
 @pytest.mark.parametrize("G", list(random_digraphs()))
 def test_components_against_networkx(G):
     n = G.number_of_nodes()
-    with sparx.Graph(directed(G)) as g:
+    with sparx.DiGraph(directed(G)) as g:
         weak = g.components(kind="weak")
         assert weak["components"].tolist() == by_smallest_node(nx.weakly_connected_components(G), n)
         assert weak["count"] == nx.number_weakly_connected_components(G)
@@ -537,41 +597,180 @@ def brute_force_cores(G, degree):
 
 @pytest.mark.parametrize("G", list(random_digraphs()))
 def test_directed_k_cores(G):
-    with sparx.Graph(directed(G)) as g:
+    with sparx.DiGraph(directed(G)) as g:
         core = nx.core_number(G)
-        assert g.k_core(direction="both").tolist() == [core[u] for u in range(G.number_of_nodes())]
-        assert g.k_core(direction="in").tolist() == brute_force_cores(G, lambda H, u: H.in_degree(u))
-        assert g.k_core(direction="out").tolist() == brute_force_cores(G, lambda H, u: H.out_degree(u))
+        assert g.k_core().tolist() == [core[u] for u in range(G.number_of_nodes())]
+        assert g.k_core(degree="total").tolist() == [core[u] for u in range(G.number_of_nodes())]
+        assert g.k_core(degree="in").tolist() == brute_force_cores(G, lambda H, u: H.in_degree(u))
+        assert g.k_core(degree="out").tolist() == brute_force_cores(G, lambda H, u: H.out_degree(u))
+        for width in ["u8", "u16", "u32", "u64"]:
+            for degree in ["in", "out", "total"]:
+                kc = g.k_core(degree=degree, width=width)
+                assert kc.dtype == np.dtype(width.replace("u", "uint"))
+                assert kc.tolist() == g.k_core(degree=degree).tolist()
+
+
+def test_directed_degrees_that_dont_fit_a_coreness_width_fail_rather_than_wrap():
+    # every node has in- and out-degree 255: total degree 510
+    D = nx.complete_graph(256, create_using=nx.DiGraph)
+    with sparx.DiGraph(directed(D)) as d:
+        assert d.k_core(degree="in").tolist() == [255] * 256
+        assert d.k_core(degree="out").tolist() == [255] * 256
+        with pytest.raises(RuntimeError, match="coreness type"):
+            d.k_core()
+        assert d.k_core(width="u16").tolist() == [510] * 256
 
 
 @pytest.mark.parametrize("G", list(random_digraphs()))
 def test_directed_clustering_against_networkx(G):
     n = G.number_of_nodes()
-    with sparx.Graph(directed(G)) as g:
-        c = g.directed_clustering()
+    with sparx.DiGraph(directed(G)) as g:
+        c = g.clustering()
         want = nx.clustering(G)
         np.testing.assert_allclose(c["local"], [want[u] for u in range(n)], atol=1e-12)
         assert c["average"] == pytest.approx(nx.average_clustering(G))
 
 
-def test_undirected_methods_refuse_directed_graphs():
-    with sparx.Graph(write_mtx("d.mtx", 3, [(0, 1), (1, 2), (0, 2)], False)) as g:
-        for method in (g.triangles, g.k_truss, g.k_core, g.clustering, g.louvain):
-            with pytest.raises(RuntimeError, match="needs an undirected graph"):
-                method()
+def test_graph_refuses_directed_files(cache_dir):
+    path = write_mtx("d.mtx", 3, [(0, 1), (1, 2), (0, 2)], False)
+    for index in ["u32", "u64"]:
+        with pytest.raises(RuntimeError, match="DiGraph") as e:
+            sparx.Graph(path, index=index)
+        assert "arc 0 -> 1 has no reverse" in str(e.value)
+        # the refused entry isn't left behind
+        assert not cache_dir.exists() or not any(cache_dir.iterdir())
+    # and an existing directed entry can't be opened as one either, nor is it removed for it
+    with sparx.DiGraph(path, keep_cache=True) as d:
+        cache_file = d.cache_file
+    with pytest.raises(RuntimeError, match="DiGraph"):
+        sparx.Graph.open(cache_file)
+    assert Path(cache_file).exists()
+    sparx.DiGraph.open(cache_file).close()
+    for f in cache_dir.iterdir():
+        f.unlink()
+
+
+def test_directed_and_undirected_methods_are_split():
+    for name in ["triangles", "to_directed"]:
+        assert hasattr(sparx.Graph, name) and not hasattr(sparx.DiGraph, name)
+    for name in ["in_degree", "in_neighbours", "directed_triangles", "to_undirected"]:
+        assert hasattr(sparx.DiGraph, name) and not hasattr(sparx.Graph, name)
+    for name in ["directed_clustering", "directed_louvain"]:
+        assert not hasattr(sparx.Graph, name) and not hasattr(sparx.DiGraph, name)
+    with sparx.DiGraph(write_mtx("d.mtx", 3, [(0, 1), (1, 2), (0, 2)], False)) as g:
         with pytest.raises(ValueError, match="unknown direction"):
             g.bfs(0, direction="sideways")
-        with pytest.raises(ValueError, match="unknown k-core algorithm"):
-            g.k_core(algorithm="nonsense", direction="out")
+        with pytest.raises(ValueError, match="unknown core degree"):
+            g.k_core(degree="both")
+        with pytest.raises(TypeError):
+            g.k_truss()  # kind is required
+        with pytest.raises(TypeError):
+            g.k_core(algorithm="bz")
+    with sparx.Graph(undirected(nx.karate_club_graph())) as g:
+        with pytest.raises(TypeError):
+            g.k_truss(kind="cycle")
+        with pytest.raises(TypeError):
+            g.k_core(direction="in")
+        with pytest.raises(TypeError):
+            g.bfs(0, direction="in")
 
 
 @pytest.mark.parametrize("G", list(random_digraphs()))
 def test_directed_louvain_against_networkx_modularity(G):
     n = G.number_of_nodes()
-    with sparx.Graph(directed(G)) as g:
-        result = g.directed_louvain()
+    with sparx.DiGraph(directed(G)) as g:
+        result = g.louvain()
         labels = result["communities"].tolist()
         groups = [{u for u in range(n) if labels[u] == c} for c in range(result["count"])]
         assert result["modularity"] == pytest.approx(nx.community.modularity(G, groups), abs=1e-12)
         singletons = [{u} for u in range(n)]
         assert result["modularity"] >= nx.community.modularity(G, singletons) - 1e-12
+
+
+def test_in_degree_releases_the_gil():
+    """The first `in_degree` builds the transpose: other Python threads run meanwhile."""
+    import threading
+    import time
+
+    n, m = 200_000, 2_000_000
+    arcs = np.random.default_rng(0).integers(1, n + 1, size=(m, 2))
+    with open("big.mtx", "w") as f:
+        f.write(f"%%MatrixMarket matrix coordinate pattern general\n{n} {n} {m}\n")
+        f.write("%d %d\n" * m % tuple(arcs.ravel().tolist()))
+    with sparx.DiGraph("big.mtx") as d:
+        ticks, done = [0], threading.Event()
+
+        def tick():
+            while not done.is_set():
+                ticks[0] += 1
+                time.sleep(0.0005)
+
+        ticker = threading.Thread(target=tick)
+        ticker.start()
+        time.sleep(0.02)
+        before = ticks[0]
+        degree = d.in_degree(0)
+        during = ticks[0] - before
+        done.set()
+        ticker.join()
+        assert degree == int((arcs[:, 1] == 1).sum())
+        # holding the GIL, the ticker wouldn't tick at all while the transpose is built
+        assert during >= 10, during
+        # and is_symmetric (an O(E) scan, for entries of earlier versions) doesn't hold it either
+        assert d.is_symmetric is False
+
+
+def cache_listing(cache_dir):
+    return sorted(str(p.relative_to(cache_dir)) for p in cache_dir.rglob("*"))
+
+
+def test_failed_calls_leave_kept_caches_as_they_were(cache_dir):
+    # one triangle, with 300 parallel copies of one of its edges: more triangles than u8 counts
+    g = sparx.Graph(write_mtx("s.mtx", 3, [(1, 0), (2, 1), (2, 0)] + [(1, 0)] * 300, True), keep_cache=True)
+    d = sparx.DiGraph(write_mtx("d.mtx", 3, [(0, 1)] * 300 + [(1, 2), (2, 0)], False), keep_cache=True)
+    # (its collapsed undirected graph has no parallel edges: its "each" one has 300)
+    u, gd = d.to_undirected(mode="each"), g.to_directed()
+    failing = {
+        "triangles": lambda: g.triangles(),
+        "k_truss pkt": lambda: g.k_truss(),
+        "k_truss burkhardt": lambda: g.k_truss(algorithm="burkhardt"),
+        "clustering": g.clustering,
+        "directed triangles": lambda: d.directed_triangles("cycle"),
+        "directed k_truss pkt": lambda: d.k_truss("cycle"),
+        "directed k_truss burkhardt": lambda: d.k_truss("cycle", algorithm="burkhardt"),
+        "converted triangles": lambda: u.triangles(),
+        "converted k_truss": lambda: u.k_truss(),
+        "converted clustering": u.clustering,
+        "converted directed triangles": lambda: gd.directed_triangles("cyclefeedforward"),
+        "converted directed k_truss": lambda: gd.k_truss("out", algorithm="burkhardt"),
+    }
+    for name, call in failing.items():
+        before = cache_listing(cache_dir)
+        with pytest.raises(RuntimeError, match="more than 255"):
+            call()
+        assert cache_listing(cache_dir) == before, name
+    # (nodes of degree 300 or more too); total degree cores peel a graph's "each" view, which
+    # a failure leaves, like a successful call does, until the graph is closed
+    gd.to_undirected(mode="each")
+    failing_cores = {
+        "k_core bz": lambda: g.k_core(),
+        "k_core liu": lambda: g.k_core(algorithm="liu"),
+        "directed k_core in": lambda: d.k_core(degree="in"),
+        "directed k_core out": lambda: d.k_core(degree="out"),
+        "directed k_core total": lambda: d.k_core(),
+        "converted k_core": lambda: u.k_core(algorithm="liu"),
+        "converted directed k_core": lambda: gd.k_core(),
+    }
+    for name, call in failing_cores.items():
+        before = cache_listing(cache_dir)
+        with pytest.raises(RuntimeError, match="coreness type"):
+            call()
+        assert cache_listing(cache_dir) == before, name
+    assert g.k_core(width="u16").tolist() == g.k_core(algorithm="liu", width="u16").tolist()
+    # the graphs are intact, and wider counts work
+    assert sorted(set(g.triangles(width="u16").tolist())) == [1, 301]
+    assert sorted(set(d.directed_triangles("cycle", width="u16").tolist())) == [1, 300]
+    for h in (gd, u, g, d):
+        h.close()
+    for f in sorted(cache_dir.rglob("*"), reverse=True):
+        f.rmdir() if f.is_dir() else f.unlink()

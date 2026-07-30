@@ -24,9 +24,9 @@ type AllEulerTrailsConcatenatedWithBounds<'a, Ix> = (&'a [Ix], Box<[(usize, usiz
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
-pub struct AlgoHierholzer<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+pub struct AlgoHierholzer<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
     /// Graph for which the euler trail(s) is(are) computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the euler trails.
     euler_trails: AbstractedProceduralMemoryMut<Ix>,
     /// Memmapped slice containing the starting position of each euler trail.
@@ -34,7 +34,7 @@ pub struct AlgoHierholzer<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> AlgoHierholzer<'a, N, E, Ix, Dir> {
     /// Performs graph traversal using *Hierholzer's Algorithm*, computing the euler trails of a [`GraphMemoryMap`] instance.
     ///
     /// The resulting Euler trail(s) is(are) stored in memory (in a memmapped file) nodewise[^1].
@@ -51,7 +51,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     /// * `g` --- the [`GraphMemoryMap`] instance for which *Hierholzer's Algorithm* is to be performed in.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut euler = Self::new_no_compute(g)?;
         let proc_mem = euler.init_cache_mem()?;
 
@@ -77,7 +77,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html
     pub fn get_or_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let t_fn = g.build_cache_filename(CacheFile::EulerTrail, None)?;
         if Path::new(&t_fn).exists() {
@@ -170,18 +170,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
         let t_fn = this.g.build_cache_filename(CacheFile::EulerTrail, None)?;
         let i_fn = this.g.build_cache_filename(CacheFile::EulerIndex, None)?;
         this.g.cleanup_cache(CacheFile::EulerTrail)?;
-        std::fs::remove_file(t_fn)?;
-        std::fs::remove_file(i_fn)?;
+        crate::shared_slice::remove_if_exists(t_fn)?;
+        crate::shared_slice::remove_if_exists(i_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> AlgoHierholzer<'a, N, E, Ix, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g)
     }
@@ -189,7 +189,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g)
     }
@@ -243,12 +243,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // closed trails need as many arcs in as out of every node (free for undirected graphs)
-        if g.is_directed()? {
-            for v in 0..g.size() {
-                let (arcs_in, arcs_out) = (g.in_degree(v)?, g.node_degree(v));
+        // closed trails need as many arcs in as out of every node (free for symmetric graphs)
+        if Dir::DIRECTED && !g.is_symmetric()? {
+            let mut arcs_in = vec![0usize; g.size()];
+            for v in &g[..] {
+                arcs_in[v.index()] += 1;
+            }
+            for (v, &arcs_in) in arcs_in.iter().enumerate() {
+                let arcs_out = g.node_degree(v);
                 if arcs_in != arcs_out {
                     return Err(format!(
                         "error Hierholzer's algorithm needs every node of a directed graph to have \

@@ -13,15 +13,15 @@
 //! iteration (union and cardinality estimation) in isolation, single-threaded.
 use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::{HyperLogLog, Precision};
-use sparx::graph::GraphMemoryMap;
+use sparx::graph::{DiGraph, Graph};
 use std::time::{Duration, Instant};
 
 fn run<P: Precision>(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &DiGraph<(), (), u32>,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let time = Instant::now();
-    let mut hb = HyperBallInner::<(), (), u32, P, f64>::new_no_compute(graph, None, threads)?;
+    let mut hb = HyperBallInner::<(), (), u32, P, f64, _>::new_no_compute(graph, None, threads)?;
     let init = time.elapsed();
     let time = Instant::now();
     let swap = hb.init_cache_mem()?;
@@ -52,13 +52,13 @@ fn run<P: Precision>(
 
 #[cfg(feature = "gpu")]
 fn compare_gpu<P: Precision>(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &DiGraph<(), (), u32>,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use sparx::gpu::{GpuBackend, WgpuBackend};
 
     let time = Instant::now();
-    let mut cpu = HyperBallInner::<(), (), u32, P, f64>::new_with_conf(graph, None, threads)?;
+    let mut cpu = HyperBallInner::<(), (), u32, P, f64, _>::new_with_conf(graph, None, threads)?;
     println!("CPU: {:?}, {} iterations", time.elapsed(), cpu.get_iters());
     // both runs use the same cache files, so keep the CPU results in memory
     let cpu_counters = cpu.counters().to_vec();
@@ -78,7 +78,7 @@ fn compare_gpu<P: Precision>(
     println!("GPU: graph uploaded in {:?}", time.elapsed());
     let time = Instant::now();
     let mut gpu =
-        HyperBallInner::<(), (), u32, P, f64>::new_gpu(graph, &backend, &device_graph, None)?;
+        HyperBallInner::<(), (), u32, P, f64, _>::new_gpu(graph, &backend, &device_graph, None)?;
     println!("GPU: {:?}, {} iterations", time.elapsed(), gpu.get_iters());
 
     let differing = cpu_counters
@@ -101,7 +101,7 @@ fn compare_gpu<P: Precision>(
 
 #[cfg(feature = "gpu")]
 fn compare_gpu_triangles(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &Graph<(), (), u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use portable_atomic::Ordering;
     use sparx::gpu::{GpuBackend, WgpuBackend};
@@ -147,7 +147,7 @@ fn compare_gpu_triangles(
 }
 
 fn time_ktruss(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &Graph<(), (), u32>,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use portable_atomic::Ordering;
@@ -215,7 +215,7 @@ fn time_ktruss(
 }
 
 fn time_ktruss_directed(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &DiGraph<(), (), u32>,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use sparx::k_truss::count::TriangleCounter;
@@ -244,7 +244,7 @@ fn time_ktruss_directed(
         triangles.drop_cache()?;
 
         let time = Instant::now();
-        let mut pkt = AlgoPKT::<_, _, _, u16>::new_directed_tx(graph, t, threads)?;
+        let mut pkt = AlgoPKT::<_, _, _, u16, _>::new_directed_tx(graph, t, threads)?;
         let elapsed = time.elapsed();
         println!(
             "{t:?} pkt: {elapsed:?} (max trussness {}, checksum {:x})",
@@ -255,7 +255,7 @@ fn time_ktruss_directed(
         pkt.drop_cache()?;
 
         let time = Instant::now();
-        let mut bea = AlgoBurkhardtEtAl::<_, _, _, u16>::new_directed_tx(graph, t)?;
+        let mut bea = AlgoBurkhardtEtAl::<_, _, _, u16, _>::new_directed_tx(graph, t)?;
         println!(
             "{t:?} burkhardt et al.: {:?} (agrees with pkt: {})",
             time.elapsed(),
@@ -330,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let precision: u8 = args.get(3).map_or(Ok(6), |p| p.parse())?;
 
     let time = Instant::now();
-    let mut graph = GraphMemoryMap::<(), (), u32>::from_file(path, None, Some(threads))?;
+    let mut graph = DiGraph::<(), (), u32>::from_file(path, None, Some(threads))?;
     println!(
         "graph |V| = {}, |E| = {} loaded in {:?}",
         graph.size(),
@@ -345,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn time_mode(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &DiGraph<(), (), u32>,
     args: &[String],
     threads: u8,
     precision: u8,
@@ -354,11 +354,11 @@ fn time_mode(
         return time_ktruss_directed(graph, threads as usize);
     }
     if args.get(4).is_some_and(|a| a == "ktruss") {
-        return time_ktruss(graph, threads as usize);
+        return time_ktruss(graph.to_undirected()?, threads as usize);
     }
     if args.get(4).is_some_and(|a| a == "gpu-triangles") {
         #[cfg(feature = "gpu")]
-        return compare_gpu_triangles(graph);
+        return compare_gpu_triangles(graph.to_undirected()?);
         #[cfg(not(feature = "gpu"))]
         return Err("the gpu comparison needs the `gpu` feature".into());
     }

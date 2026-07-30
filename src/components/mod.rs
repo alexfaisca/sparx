@@ -9,11 +9,18 @@ pub mod weak;
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::graph::GraphMemoryMap;
+    use crate::graph::{DiGraph, Directed};
     use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
     use std::io::Write;
 
-    pub(crate) fn graph(name: &str, header: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph {
+    /// A graph loaded as a [`DiGraph`] (which any graph can be: see `to_undirected` for the
+    /// undirected graph of a symmetric one).
+    pub(crate) fn graph(
+        name: &str,
+        header: &str,
+        n: usize,
+        edges: &[(usize, usize)],
+    ) -> TestGraph<(), (), usize, Directed> {
         graph_with_threads(name, header, n, edges, 3)
     }
 
@@ -23,7 +30,7 @@ pub(crate) mod test_utils {
         n: usize,
         edges: &[(usize, usize)],
         threads: u8,
-    ) -> TestGraph {
+    ) -> TestGraph<(), (), usize, Directed> {
         let dir = unique_test_dir("components_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{name}.mtx"));
@@ -35,7 +42,7 @@ pub(crate) mod test_utils {
         }
         drop(f);
         let id = format!("components_{name}_{}", unique_run_tag());
-        let graph = GraphMemoryMap::from_file(&path, Some(id), Some(threads)).expect("parse should succeed");
+        let graph = DiGraph::from_file(&path, Some(id), Some(threads)).expect("parse should succeed");
         TestGraph::new(graph, Some(dir))
     }
 

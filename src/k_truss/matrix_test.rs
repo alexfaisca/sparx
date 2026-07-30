@@ -40,7 +40,9 @@ fn write_mtx(
     (path, guard)
 }
 
-fn open<Ix: IndexType>(path: &PathBuf) -> GraphMemoryMap<VoidLabel, VoidLabel, Ix> {
+fn open_as<Ix: IndexType, Dir: crate::graph::Directedness>(
+    path: &PathBuf,
+) -> GraphMemoryMap<VoidLabel, VoidLabel, Ix, Dir> {
     let id = format!(
         "matrix_{}_{}_{}",
         path.file_stem().unwrap().to_string_lossy(),
@@ -48,6 +50,14 @@ fn open<Ix: IndexType>(path: &PathBuf) -> GraphMemoryMap<VoidLabel, VoidLabel, I
         unique_run_tag()
     );
     GraphMemoryMap::from_file(path, Some(id), Some(4)).expect("graph parse should succeed")
+}
+
+fn open<Ix: IndexType>(path: &PathBuf) -> GraphMemoryMap<VoidLabel, VoidLabel, Ix> {
+    open_as::<Ix, crate::graph::Undirected>(path)
+}
+
+fn open_directed<Ix: IndexType>(path: &PathBuf) -> crate::graph::DiGraph<VoidLabel, VoidLabel, Ix> {
+    open_as::<Ix, crate::graph::Directed>(path)
 }
 
 fn counts<C: TriangleCounter>(counts: &[C]) -> Vec<usize> {
@@ -164,14 +174,14 @@ fn directed_results<Ix: IndexType>(
     path: &PathBuf,
     triangle_type: DirectedTriangleType,
 ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-    let g = open::<Ix>(path);
+    let g = open_directed::<Ix>(path);
     let mut t = DirectedTriangles::<_, _, _, u32>::new_tx(&g, triangle_type).unwrap();
     let triangles = counts(t.all_triangles());
     t.drop_cache().unwrap();
-    let mut pkt = AlgoPKT::<_, _, _, u32>::new_directed_tx(&g, triangle_type, 4).unwrap();
+    let mut pkt = AlgoPKT::<_, _, _, u32, _>::new_directed_tx(&g, triangle_type, 4).unwrap();
     let pkt_k = widen(pkt.k_trusses());
     pkt.drop_cache().unwrap();
-    let mut bea = AlgoBurkhardtEtAl::<_, _, _, u32>::new_directed_tx(&g, triangle_type).unwrap();
+    let mut bea = AlgoBurkhardtEtAl::<_, _, _, u32, _>::new_directed_tx(&g, triangle_type).unwrap();
     let bea_k = widen(bea.k_trusses());
     bea.drop_cache().unwrap();
     (triangles, pkt_k, bea_k)
@@ -181,7 +191,7 @@ fn directed_results<Ix: IndexType>(
 fn directed_graphs_match_brute_force_at_every_index_width() {
     for (name, n, edges) in directed_graphs() {
         let (path, _fixture) = write_mtx(name, false, n, &edges);
-        let g = open::<usize>(&path);
+        let g = open_directed::<usize>(&path);
         for triangle_type in DirectedTriangleType::ALL {
             let roles = triangle_type.roles();
             let results = directed_results::<usize>(&path, triangle_type);
@@ -248,14 +258,14 @@ fn every_count_width_agrees() {
         path: &PathBuf,
         t: DirectedTriangleType,
     ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-        let g = open::<usize>(path);
+        let g = open_directed::<usize>(path);
         let mut tri = DirectedTriangles::<_, _, _, Tx>::new_tx(&g, t).unwrap();
         let triangles = counts(tri.all_triangles());
         tri.drop_cache().unwrap();
-        let mut pkt = AlgoPKT::<_, _, _, Tx>::new_directed_tx(&g, t, 4).unwrap();
+        let mut pkt = AlgoPKT::<_, _, _, Tx, _>::new_directed_tx(&g, t, 4).unwrap();
         let pkt_k = widen(pkt.k_trusses());
         pkt.drop_cache().unwrap();
-        let mut bea = AlgoBurkhardtEtAl::<_, _, _, Tx>::new_directed_tx(&g, t).unwrap();
+        let mut bea = AlgoBurkhardtEtAl::<_, _, _, Tx, _>::new_directed_tx(&g, t).unwrap();
         let bea_k = widen(bea.k_trusses());
         bea.drop_cache().unwrap();
         (triangles, pkt_k, bea_k)
@@ -292,7 +302,7 @@ fn directed_wide_counts() {
         edges.extend([(0, 1), (1, 2), (2, 0), (0, 2)]);
     }
     let (path, _fixture) = write_mtx("directed_parallel20", false, 3, &edges);
-    let g = open::<usize>(&path);
+    let g = open_directed::<usize>(&path);
     let t = DirectedTriangleType::CycleFeedForward;
     let error = DirectedTriangles::new(&g, t)
         .err()
@@ -309,7 +319,7 @@ fn directed_wide_counts() {
     );
     tri.drop_cache().unwrap();
     let expected = brute_force_directed_trussness(&g, t.roles());
-    let mut pkt = AlgoPKT::<_, _, _, u16>::new_directed_tx(&g, t, 4).unwrap();
+    let mut pkt = AlgoPKT::<_, _, _, u16, _>::new_directed_tx(&g, t, 4).unwrap();
     assert_eq!(widen(pkt.k_trusses()), expected);
     pkt.drop_cache().unwrap();
     let error = AlgoPKT::new_directed(&g, t)
@@ -329,15 +339,15 @@ fn directed_pkt_is_deterministic_across_threads() {
         60,
         &directed_multigraph_edges(60, 77),
     );
-    let g = open::<u32>(&path);
+    let g = open_directed::<u32>(&path);
     for t in [
         DirectedTriangleType::Out,
         DirectedTriangleType::CycleFeedForward,
     ] {
-        let expected = brute_force_directed_trussness(&open::<usize>(&path), t.roles());
+        let expected = brute_force_directed_trussness(&open_directed::<usize>(&path), t.roles());
         for threads in [8, 16] {
             for run in 0..15 {
-                let mut pkt = AlgoPKT::<_, _, _, u16>::new_directed_tx(&g, t, threads).unwrap();
+                let mut pkt = AlgoPKT::<_, _, _, u16, _>::new_directed_tx(&g, t, threads).unwrap();
                 assert_eq!(
                     widen(pkt.k_trusses()),
                     expected,
@@ -424,8 +434,8 @@ fn directed_k_truss_from_precomputed_triangles() {
         30,
         &directed_multigraph_edges(30, 61),
     );
-    let g = open::<u32>(&path);
-    let reference = open::<usize>(&path);
+    let g = open_directed::<u32>(&path);
+    let reference = open_directed::<usize>(&path);
     for t in DirectedTriangleType::ALL {
         let expected = brute_force_directed_trussness(&reference, t.roles());
         let triangles = DirectedTriangles::<_, _, _, u16>::new_tx(&g, t).unwrap();

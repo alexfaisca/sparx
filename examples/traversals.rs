@@ -4,7 +4,7 @@
 //! cargo run --release --example traversals -- [graph] [threads] [source node]
 //!
 //! `[graph]` defaults to a small bundled fixture.
-use sparx::graph::{GraphMemoryMap, IndexType};
+use sparx::graph::{DiGraph, IndexType};
 use sparx::trails::{bfs::BFSDists, hierholzer::AlgoHierholzer};
 
 const FIXTURE: &str = "tests/fixtures/ggcat/random_graph_1_5.lz4";
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let threads: u8 = args.get(2).map_or(Ok(4), |t| t.parse())?;
     let source: usize = args.get(3).map_or(Ok(0), |s| s.parse())?;
 
-    let mut graph = GraphMemoryMap::<(), (), u32>::from_file(path, None, Some(threads))?;
+    let mut graph = DiGraph::<(), (), u32>::from_file(path, None, Some(threads))?;
     println!("graph |V| = {}, |E| = {}", graph.size(), graph.width());
 
     let result = run(&graph, source);
@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run(
-    graph: &GraphMemoryMap<(), (), u32>,
+    graph: &DiGraph<(), (), u32>,
     source: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut bfs = BFSDists::new(graph, source)?;

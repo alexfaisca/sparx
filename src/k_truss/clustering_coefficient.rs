@@ -39,7 +39,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("the clustering coefficient", None)?;
         let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
         let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut clustering_coefficient = Self {
@@ -61,7 +60,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         g: &'a GraphMemoryMap<N, E, Ix>,
         triangles: Triangles<'a, N, E, Ix, Tx>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("the clustering coefficient", None)?;
         let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
         let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut clustering_coefficient = Self {
@@ -94,7 +92,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 
@@ -224,9 +222,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         self.local_average = local_clustering_sum.load(Ordering::Relaxed) / node_count as f64;
         // every triangle counts once for each of its 6 (directed) edges, so the sum of all
         // edges' counts is 6 * triangles, and transitivity = 3 * triangles / connected triples
-        self.transitivity = total_triangles.load(Ordering::Relaxed) as f64
-            / 2.
-            / total_possible_triangles.load(Ordering::Relaxed);
+        // (0 without connected triples, as networkx's `transitivity`)
+        let triples = total_possible_triangles.load(Ordering::Relaxed);
+        self.transitivity = if triples > 0. {
+            total_triangles.load(Ordering::Relaxed) as f64 / 2. / triples
+        } else {
+            0.
+        };
 
         // cleanup cache
         triangles.drop_cache()?;
@@ -259,7 +261,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
 #[derive(Debug)]
 pub struct DirectedClusteringCoefficient<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     /// Graph for which the clustering coefficients are computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a DiGraph<N, E, Ix>,
     /// Memmapped slice containing each node's local clustering coefficient.
     local: AbstractedProceduralMemoryMut<f64>,
     /// Average of the local clustering coefficients.
@@ -272,7 +274,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoeff
     /// counting triangles as `u32`s (see [`new_tx`](Self::new_tx) for other widths).
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a DiGraph<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_tx::<u32>(g)
     }
 
@@ -281,7 +283,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoeff
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new_tx<Tx: TriangleCount>(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         use super::directed::{DirectedTriangleType, DirectedTriangles};
 
@@ -365,7 +367,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoeff
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.g.build_cache_filename(CacheFile::DirectedClusteringCoefficient, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
@@ -429,10 +431,19 @@ mod directed_test {
         simple.dedup();
         let g = graph("undirected", "symmetric", 30, &simple);
         let directed = DirectedClusteringCoefficient::new(&g).unwrap();
-        let undirected = ClusteringCoefficient::new(&g).unwrap();
+        let undirected = ClusteringCoefficient::new(g.to_undirected().unwrap()).unwrap();
         for i in 0..30 {
             let (d, u) = (directed.get_node_clustering_coefficient(i), undirected.get_node_clusteringcoefficient(i));
             assert!((d - u).abs() < 1e-12, "node {i}: {d} != {u}");
         }
+    }
+
+    /// Without connected triples, transitivity is 0 (as networkx's), not 0 / 0.
+    #[test]
+    fn transitivity_without_triples_is_zero() {
+        let g = graph("one_edge", "symmetric", 3, &[(2, 1)]);
+        let cc = ClusteringCoefficient::new(g.to_undirected().unwrap()).unwrap();
+        assert_eq!(cc.get_graph_transitivity(), 0.);
+        assert_eq!(cc.get_average_clustering_coefficient(), 0.);
     }
 }

@@ -1,5 +1,6 @@
 use crate::graph;
 use crate::graph::*;
+use crate::k_core::count::{CoreCount, check_degree};
 use crate::shared_slice::*;
 
 use crossbeam::thread;
@@ -7,22 +8,27 @@ use num_cpus::get_physical;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 
-type ProceduralMemoryBZ<Ix> = (
-    AbstractedProceduralMemoryMut<u8>,
+type ProceduralMemoryBZ<Ix, Cx> = (
+    AbstractedProceduralMemoryMut<Cx>,
     AbstractedProceduralMemoryMut<Ix>,
     AbstractedProceduralMemoryMut<Ix>,
 );
 
 /// For the computation of a [`GraphMemoryMap`] instance's k-core decomposition as described in ["An O(m) Algorithm for Cores Decomposition of Networks"](https://doi.org/10.48550/arXiv.cs/0310049) by Batagelj V. and Zaversnik M.
 ///
+/// Coreness is stored as `Cx` integers (`u8` by default, see [`CoreCount`]): every node's degree
+/// must fit a `Cx`, or the decomposition fails with an error.
+///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+/// [`CoreCount`]: ../count/trait.CoreCount.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AlgoBatageljZaversnik<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
-    /// Graph for which node/edge coreness is computed.
+pub struct AlgoBatageljZaversnik<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount = u8>
+{
+    /// Graph for which node coreness is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
-    /// Memmapped slice containing the coreness of each edge.
-    k_cores: AbstractedProceduralMemoryMut<u8>,
+    /// Memmapped slice containing the coreness of each node.
+    k_cores: AbstractedProceduralMemoryMut<Cx>,
 }
 
 #[allow(dead_code)]
@@ -30,6 +36,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     /// Performs k-core decomposition as described in ["An O(m) Algorithm for Cores Decomposition of Networks"](https://doi.org/10.48550/arXiv.cs/0310049) by Batagelj V. and Zaversnik M.
     ///
     /// The resulting k-core subgraphs are stored in memory (in a memmapped file) nodewise[^1].
+    /// Coreness is stored as `u8`s, see [`new_cx`](Self::new_cx) for other widths.
     ///
     /// [^1]: for each node of the graph its coreness is stored in an array.
     ///
@@ -39,13 +46,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut bz = Self::new_no_compute(g)?;
-        let proc_mem = bz.init_cache_mem()?;
-
-        bz.compute_with_proc_mem(proc_mem)?;
-
-        Ok(bz)
+        Self::new_cx(g)
     }
+
     /// Searches for a previously cached result, and if not found performs k-core decomposition as described in ["An O(m) Algorithm for Cores Decomposition of Networks"](https://doi.org/10.48550/arXiv.cs/0310049) by Batagelj V. and Zaversnik M.
     ///
     /// The resulting k-core subgraphs are stored in memory (in a memmapped file) nodewise[^1].
@@ -60,32 +63,61 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     pub fn get_or_compute(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("Batagelj and Zaversnik's k-core decomposition", None)?;
+        Self::get_or_compute_cx(g)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
+    AlgoBatageljZaversnik<'a, N, E, Ix, Cx>
+{
+    /// Performs the k-core decomposition, storing coreness as `Cx` integers.
+    pub fn new_cx(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut bz = Self::new_no_compute(g)?;
+        let computed = bz
+            .init_cache_mem()
+            .and_then(|proc_mem| bz.compute_with_proc_mem(proc_mem));
+        // so that no (partial) result is ever taken for a cached one
+        if let Err(e) = computed {
+            let _ = bz.drop_cache();
+            return Err(e);
+        }
+
+        Ok(bz)
+    }
+
+    /// Searches for a previously cached `Cx` result, computing it if not found.
+    pub fn get_or_compute_cx(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let c_fn = g.build_cache_filename(CacheFile::KCoreBZ, None)?;
         if Path::new(&c_fn).exists() {
-            if let Ok(k_cores) = AbstractedProceduralMemoryMut::from_file_name(&c_fn) {
+            // a cache of another graph (version) or coreness width would have another length
+            if let Ok(k_cores) = AbstractedProceduralMemoryMut::<Cx>::from_file_name(&c_fn)
+                && k_cores.as_slice().len() == g.size()
+            {
                 return Ok(Self { g, k_cores });
             }
         }
-        Self::new(g)
+        Self::new_cx(g)
     }
 
-    /// Returns the coreness of a given edge of a [`GraphMemoryMap`] instance.
+    /// Returns the coreness of a given node of a [`GraphMemoryMap`] instance.
     ///
     /// # Arguments
     ///
-    /// * `e_idx` --- the index of the edge whose coreness is to be returned.
+    /// * `node` --- the index of the node whose coreness is to be returned.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn coreness(&self, e_idx: usize) -> u8 {
-        assert!(e_idx < self.g.width());
-        *self.k_cores.get(e_idx)
+    pub fn coreness(&self, node: usize) -> Cx {
+        assert!(node < self.g.size());
+        *self.k_cores.get(node)
     }
 
-    /// Returns a slice containing the coreness of each edge of the [`GraphMemoryMap`] instance.
+    /// Returns a slice containing the coreness of each node of the [`GraphMemoryMap`] instance.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn k_cores(&self) -> &[u8] {
+    pub fn k_cores(&self) -> &[Cx] {
         self.k_cores.as_slice()
     }
 
@@ -94,13 +126,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         let this = ManuallyDrop::new(self);
         this.g.cleanup_cache(CacheFile::KCoreBZ)?;
         let out_fn = this.g.build_cache_filename(CacheFile::KCoreBZ, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
+    AlgoBatageljZaversnik<'a, N, E, Ix, Cx>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -119,13 +153,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ<Ix>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryBZ<Ix, Cx>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
-    pub(crate) fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ<Ix>, Box<dyn std::error::Error>> {
+    pub(crate) fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryBZ<Ix, Cx>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -133,7 +171,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBZ<Ix>,
+        proc_mem: ProceduralMemoryBZ<Ix, Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -142,7 +180,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryBZ<Ix>,
+        proc_mem: ProceduralMemoryBZ<Ix, Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -155,20 +193,21 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
     fn new_no_compute_impl(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("Batagelj and Zaversnik's k-core decomposition", None)?;
         let out_fn = g.build_cache_filename(CacheFile::KCoreBZ, None)?;
-        let k_cores = SharedSliceMut::<u8>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let k_cores = SharedSliceMut::<Cx>::abst_mem_mut(&out_fn, g.size(), true)?;
         Ok(Self { g, k_cores })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBZ<Ix>, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(
+        &self,
+    ) -> Result<ProceduralMemoryBZ<Ix, Cx>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
         let d_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(0))?;
         let n_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(1))?;
         let p_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(2))?;
 
-        let degree = SharedSliceMut::<u8>::abst_mem_mut(&d_fn, node_count, true)?;
+        let degree = SharedSliceMut::<Cx>::abst_mem_mut(&d_fn, node_count, true)?;
         let node = SharedSliceMut::<Ix>::abst_mem_mut(&n_fn, node_count, true)?;
         let pos = SharedSliceMut::<Ix>::abst_mem_mut(&p_fn, node_count, true)?;
 
@@ -177,7 +216,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
 
     fn compute_with_proc_mem_impl(
         &self,
-        proc_mem: ProceduralMemoryBZ<Ix>,
+        proc_mem: ProceduralMemoryBZ<Ix, Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
@@ -192,14 +231,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
         let graph_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
-        // initialize degree and bins count vecs
+        // initialize degree and bins count vecs (bins[d]: the number of nodes of degree d)
         let mut bins: Vec<usize> = thread::scope(
             |scope| -> Result<Vec<usize>, Box<dyn std::error::Error + Send + Sync>> {
                 // initializations always uses two threads per core
                 let threads = self.g.thread_num().max(get_physical() * 2);
                 let node_load = node_count.div_ceil(threads);
 
-                let mut bins = vec![0usize; u8::MAX as usize];
+                let mut bins = vec![];
                 let mut max_vecs = vec![];
 
                 for tid in 0..threads {
@@ -210,18 +249,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
 
                     max_vecs.push(scope.spawn(
                         move |_| -> Result<Vec<usize>, Box<dyn std::error::Error + Send + Sync>> {
-                            let mut bins: Vec<usize> = vec![0; u8::MAX as usize];
+                            let mut bins: Vec<usize> = vec![];
                             for v in start..end {
                                 let deg = index_ptr.get(v + 1).index() - index_ptr.get(v).index();
-                                if deg > u8::MAX as usize {
-                                    return Err(format!(
-                                        "error degree[{v}] == {deg} but max suported is {}",
-                                        u8::MAX
-                                    )
-                                    .into());
+                                check_degree::<Cx>(v, deg)?;
+                                if deg >= bins.len() {
+                                    bins.resize(deg + 1, 0);
                                 }
                                 bins[deg] += 1;
-                                *deg_arr.get_mut(v) = deg as u8;
+                                *deg_arr.get_mut(v) = Cx::from_usize(deg);
                             }
                             Ok(bins)
                         },
@@ -229,31 +265,26 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
                 }
                 // join results
                 for handle_bin in max_vecs {
-                    let joined_bin = handle_bin.join().map_err(
+                    let thread_bins = handle_bin.join().map_err(
                         |e| -> Box<dyn std::error::Error + Send + Sync> {
                             format!("{:?}", e).into()
                         },
-                    )?;
-                    for entries in joined_bin.into_iter() {
-                        for (degree, count) in entries.iter().enumerate() {
-                            bins[degree] += *count;
-                        }
+                    )??;
+                    if thread_bins.len() > bins.len() {
+                        bins.resize(thread_bins.len(), 0);
+                    }
+                    for (degree, count) in thread_bins.into_iter().enumerate() {
+                        bins[degree] += count;
                     }
                 }
                 Ok(bins)
             },
         )
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
-        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
 
-        let (max_degree, _) = bins
-            .iter()
-            .enumerate()
-            .max_by_key(|(deg, c)| *deg * (if **c != 0 { 1 } else { 0 }))
-            .ok_or_else(|| -> Box<dyn std::error::Error> {
-                "error couldn't get max degree".into()
-            })?;
-        bins.resize(max_degree + 1, 0);
+        // every thread's bins end at its largest degree: so do the merged ones
+        let max_degree = bins.len() - 1;
 
         // prefix sum to get starting indices for each degree
         let mut start_index = 0usize;
@@ -265,7 +296,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         // `bins[d]` now holds the starting index in `vert` for vertices of degree d.
         // fill node array with vertices ordered by degree
         for v in 0..node_count {
-            let d = *degree.get(v) as usize;
+            let d = degree.get(v).to_usize();
             let idx = bins[d];
             *node.get_mut(idx) = Ix::new(v);
             *pos.get_mut(v) = Ix::new(idx);
@@ -292,9 +323,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
                 let u = graph_ptr.get(e).index();
                 let deg_u = *degree.get(u);
                 if deg_u > deg_v {
+                    let deg_u = deg_u.to_usize();
                     // swap u's position node array to maintain order
                     let u_pos = pos.get(u).index();
-                    let new_pos = bins[deg_u as usize];
+                    let new_pos = bins[deg_u];
                     // bins[deg_u] points to start of nodes with degree >= old_deg
                     // swap the node at new_pos with u to move u into the bucket of (u_new_degree)
                     let w = node.get(new_pos).index();
@@ -304,8 +336,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
                         *node.get_mut(new_pos) = Ix::new(u);
                         *pos.get_mut(u) = Ix::new(new_pos);
                     }
-                    bins[deg_u as usize] += 1;
-                    *degree.get_mut(u) = deg_u - 1;
+                    bins[deg_u] += 1;
+                    *degree.get_mut(u) = Cx::from_usize(deg_u - 1);
                 }
             }
         }
@@ -313,15 +345,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBatageljZaversnik<'
         let env_verbose_val = std::env::var("BRUIJNX_VERBOSE").unwrap_or_else(|_| "0".to_string());
         let verbose: bool = env_verbose_val == "1";
         if verbose {
-            let mut r = vec![0usize; u8::MAX as usize];
-            let mut max = 0;
+            let mut r = vec![0usize; max_degree + 1];
             for i in 0..node_count {
-                if *core.get(i) > max {
-                    max = *core.get(i);
-                }
-                r[*core.get(i) as usize] += 1;
+                r[core.get(i).to_usize()] += 1;
             }
-            r.resize(max as usize + 1, 0);
+            while r.len() > 1 && r.last() == Some(&0) {
+                r.pop();
+            }
             println!("k-cores {:?}", r);
         }
         // flush output to ensure all data is written to disk
@@ -360,7 +390,9 @@ mod test {
         // a private copy: tests on the same fixture may run concurrently
         let (graph, _cache) = crate::graph::test_utils::open_fixture(path.as_ref(), Some(16))?;
         let bz_k_cores = AlgoBatageljZaversnik::new(&graph)?;
+        verify_k_cores(&graph, bz_k_cores.k_cores)?;
 
+        let bz_k_cores = AlgoBatageljZaversnik::<_, _, _, u32>::new_cx(&graph)?;
         verify_k_cores(&graph, bz_k_cores.k_cores)
     }
 

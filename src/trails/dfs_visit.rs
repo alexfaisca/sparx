@@ -162,7 +162,7 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.g.cache_file_name(CacheFile::BFS, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }

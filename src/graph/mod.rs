@@ -23,7 +23,7 @@ use crate::graph::cache::{AccumulatorAtomic, GraphCache};
 use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut};
 use cache::CacheMetadata;
 pub use weight::{Weight, WeightAtomic};
-pub use direction::Direction;
+pub use direction::{AnyGraph, Directed, Directedness, Direction, Undirected, UndirectedMode};
 pub use graph_derive::{GenericEdge, GenericEdgeType};
 
 use label::VoidLabel;
@@ -368,7 +368,7 @@ pub enum CacheFile {
     ConnectedComponents,
     StronglyConnectedComponents,
     /// k-core decomposition of a directed graph, by in-, out- or total degree.
-    KCoreDirected(direction::Direction),
+    KCoreDirected(crate::k_core::directed::CoreDegree),
     DirectedClusteringCoefficient,
     /// Louvain partition of a directed graph (by Leicht and Newman's directed modularity).
     DirectedLouvain,
@@ -383,11 +383,14 @@ enum GraphFile {
     MetaLabels,
 }
 
+/// A memory-mapped graph: [`Graph`] (the default) for undirected graphs, [`DiGraph`] for
+/// directed ones (see [`direction`]).
 #[derive(Clone)]
 pub struct GraphMemoryMap<
     N: crate::graph::N = VoidLabel,
     E: crate::graph::E = VoidLabel,
     Ix: crate::graph::IndexType = DefaultIx,
+    Dir: Directedness = Undirected,
 > {
     graph: Arc<memmap2::Mmap>,
     index: Arc<memmap2::Mmap>,
@@ -398,17 +401,47 @@ pub struct GraphMemoryMap<
     edge_size: usize,
     thread_count: u8,
     exports: u8,
-    /// Whether the graph is directed: recorded in its metadata, or else checked on first use.
-    directed: std::sync::OnceLock<bool>,
-    /// The graph's transpose and underlying undirected graph, once built (directed graphs only).
+    /// Whether every arc has a reverse: recorded in its metadata, or else checked on first use.
+    symmetric: std::sync::OnceLock<bool>,
+    /// A directed graph's transpose and underlying undirected graph, once built.
     transpose: std::sync::OnceLock<Box<Self>>,
-    undirected: std::sync::OnceLock<Box<Self>>,
+    /// (one per [`UndirectedMode`])
+    undirected: [std::sync::OnceLock<Box<GraphMemoryMap<N, E, Ix, Undirected>>>; 3],
     derive_lock: Arc<std::sync::Mutex<()>>,
-    _marker: PhantomData<Ix>,
+    /// Tells this instance's scratch files apart from other instances' of the same entry.
+    instance: InstanceTag,
+    _marker: PhantomData<(Ix, Dir)>,
 }
 
+/// A tag unique to a graph instance (in this process and across processes): its scratch files
+/// carry it. A clone is another instance, with another tag.
+#[derive(Debug)]
+struct InstanceTag(String);
+
+impl InstanceTag {
+    fn new() -> Self {
+        static INSTANCES: AtomicUsize = AtomicUsize::new(0);
+        InstanceTag(format!("p{}i{}", std::process::id(), INSTANCES.fetch_add(1, Ordering::Relaxed)))
+    }
+}
+
+impl Clone for InstanceTag {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+/// An undirected graph: every edge is stored as an arc each way, so every arc has a reverse
+/// (see [`GraphMemoryMap::is_symmetric`]). Loading a directed one as a `Graph` fails.
+pub type Graph<N = VoidLabel, E = VoidLabel, Ix = DefaultIx> = GraphMemoryMap<N, E, Ix, Undirected>;
+
+/// A directed graph, whose arcs need not have reverses. Any graph can be loaded as one.
+pub type DiGraph<N = VoidLabel, E = VoidLabel, Ix = DefaultIx> = GraphMemoryMap<N, E, Ix, Directed>;
+
 #[allow(dead_code)]
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphMemoryMap<N, E, Ix> {
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    GraphMemoryMap<N, E, Ix, Dir>
+{
     /// Initializes a [`GraphMemoryMap`] instance from a [`GraphCache`] instance[^1][^2].
     ///
     /// [^1]: [`GraphCache`] instance must be reandonly, dynamic graphs are not supported.
@@ -441,15 +474,15 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
             let edge_size = std::mem::size_of::<Ix>();
             let thread_count = thread_count.unwrap_or(1).max(1);
             let exports = 0u8;
-            let directed = std::sync::OnceLock::new();
-            if let Some(d) = graph_cache
-                .directed
-                .or_else(|| graph_cache.metadata().ok().and_then(|m| m.directed))
+            let symmetric = std::sync::OnceLock::new();
+            if let Some(s) = graph_cache
+                .symmetric
+                .or_else(|| graph_cache.metadata().ok().and_then(|m| m.symmetric))
             {
-                let _ = directed.set(d);
+                let _ = symmetric.set(s);
             }
 
-            return Ok(Self {
+            let graph = Self {
                 graph,
                 index,
                 metalabels,
@@ -459,12 +492,18 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 edge_size,
                 thread_count,
                 exports,
-                directed,
+                symmetric,
                 transpose: std::sync::OnceLock::new(),
-                undirected: std::sync::OnceLock::new(),
+                undirected: Default::default(),
                 derive_lock: Arc::new(std::sync::Mutex::new(())),
-                _marker: PhantomData::<Ix>,
-            });
+                instance: InstanceTag::new(),
+                _marker: PhantomData,
+            };
+            // an undirected graph is symmetric (a property recorded when the cache was built)
+            if !Dir::DIRECTED {
+                graph.require_symmetric()?;
+            }
+            return Ok(graph);
         }
 
         Err("error graph cache must be readonly to be memmapped".into())
@@ -479,6 +518,18 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// * `thread_count`--- user suggested number of threads to be used when computing algorithms on the graph.
     ///
     /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
+    /// Like [`init_from_cache`](Self::init_from_cache), for a cache entry just built: if it
+    /// can't be opened as this type (a directed graph as a [`Graph`]), the entry is removed.
+    fn init_from_new_cache(
+        graph_cache: GraphCache<N, E, Ix>,
+        thread_count: Option<u8>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut entry = graph_cache.clone();
+        Self::init_from_cache(graph_cache, thread_count).inspect_err(|_| {
+            let _ = entry.drop_cache();
+        })
+    }
+
     #[inline(always)]
     pub fn from_file<P: AsRef<Path>>(
         p: P,
@@ -486,7 +537,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         thread_count: Option<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let graph_cache = GraphCache::<N, E, Ix>::from_file(p, id, None, None)?;
-        Self::init_from_cache(graph_cache, thread_count)
+        Self::init_from_new_cache(graph_cache, thread_count)
     }
 
     /// Same as [`from_file`](Self::from_file), but lets the caller choose the width-matched
@@ -505,7 +556,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         thread_count: Option<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let graph_cache = GraphCache::<N, E, Ix>::from_file_with_accumulator::<P, D>(p, id, None, None)?;
-        Self::init_from_cache(graph_cache, thread_count)
+        Self::init_from_new_cache(graph_cache, thread_count)
     }
 
     /// Initializes a [`GraphMemoryMap`] instance from a given file, and builds an fst.
@@ -526,7 +577,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         thread_count: Option<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let graph_cache = GraphCache::<N, E, Ix>::from_file(p, id, batch, in_fst)?;
-        Self::init_from_cache(graph_cache, thread_count)
+        Self::init_from_new_cache(graph_cache, thread_count)
     }
 
     /// Opens a [`GraphMemoryMap`] instance from a cached entry.
@@ -593,9 +644,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
     pub fn convert_index_type<NewIx: crate::graph::IndexType>(
         &self,
-    ) -> Result<GraphMemoryMap<N, E, NewIx>, Box<dyn std::error::Error>> {
+    ) -> Result<GraphMemoryMap<N, E, NewIx, Dir>, Box<dyn std::error::Error>> {
         let new_cache = self.graph_cache.convert_index_type::<NewIx>()?;
-        GraphMemoryMap::<N, E, NewIx>::init_from_cache(new_cache, Some(self.thread_count))
+        GraphMemoryMap::<N, E, NewIx, Dir>::init_from_cache(new_cache, Some(self.thread_count))
     }
 
     /// Returns the graph's cache entry metadata filename.
@@ -691,46 +742,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         ))
     }
 
-    /// Performs a sweep cut over a given diffusion vector[^1] by partition conductance.
-    ///
-    /// # Arguments
-    ///
-    /// * `diffusion` --- the diffusion vector[^1][^2].
-    /// * `target_size` --- the partition's target size[^3].
-    /// * `target_volume` --- the partition's target volume[^4].
-    ///
-    /// [^1]: diffusion vector entries must be of type (node_id: [`usize`], heat: [`f64`]).
-    /// [^2]: entries must be descendingly ordered by diffusion.
-    /// [^3]: if [`None`] is provided defaults to `|V|`, effectively, the overall best partition by conducatance is returned independent on the number of nodes in it.
-    /// [^4]: if [`None`] is provided defaults to `|E|`, effectively, the overall best partition by conducatance is returned independent on the number of edges in it.
-    pub fn sweep_cut(
-        &self,
-        diffusion: &mut [(usize, f64)],
-        target_size: Option<usize>,
-        target_volume: Option<usize>,
-    ) -> Result<Community<usize>, Box<dyn std::error::Error>> {
-        self.sweep_cut_over_diffusion_vector_by_conductance(diffusion, target_size, target_volume)
-    }
-
-    /// Computes the modularity over a given partition over the [`GraphMemoryMap`] instance's nodes.
-    ///
-    /// Undirected graphs only (directed ones are refused): see
-    /// [`directed_modularity`](crate::communities::directed_louvain::directed_modularity) for
-    /// Leicht and Newman's directed modularity.
-    ///
-    /// # Arguments
-    ///
-    /// * `communities` --- a slice containing each node's community, the [`GraphMemoryMap`] instance's partition.
-    /// * `comms_cardinality` --- cardinality of distinct communities in the given partition.
-    ///
-    /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
-    pub fn modularity(
-        &self,
-        communities: &[Ix],
-        comms_cardinality: usize,
-    ) -> Result<f64, Box<dyn std::error::Error>> {
-        self.modularity_impl(communities, comms_cardinality)
-    }
 
     /// Returns number of entries in the offset file[^1].
     ///
@@ -775,10 +786,13 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     ///
     /// The resulting subgraph is that wherein only the set of nodes, `S ⊂ V`, of the nodes for whose the output of mask is true, as well as, only the set of edges coming from and going to nodes in `S`[^1].
     ///
-    /// [^1]: the node ids of the subgraph may not, and probably will not, correspond to the original node identifiers, efffectively, it will be a whole new graph.
+    /// [^1]: the subgraph's nodes are numbered `0..|S|`, in their order here (so node `u` of `S`
+    /// is the subgraph's node `|{v ∈ S : v < u}|`); they keep their labels and metalabels, and
+    /// arcs theirs. It's a cache entry of its own (id `identifier`, or a numbered export of this
+    /// graph's), of the same type: an undirected graph's subgraphs are undirected.
     pub fn induced_subgraph(
         &mut self,
-        mask: fn(usize) -> bool,
+        mask: impl Fn(usize) -> bool,
         identifier: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         self.apply_mask_to_nodes(mask, identifier)
@@ -794,34 +808,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         self.is_triangle_impl(u, v, w)
     }
 
-    #[inline(always)]
-    /// Computes or retrieves from a previously cached file, the `Compressed Sparse Column (CSC)`
-    /// representation of the graph.
-    ///
-    /// This is equivalent to each edge's reciprocal edge in the `Compressed Sparse Row (CSR)`
-    /// representation of the graph, i.e., if `e_i = (u, v)` then it's reciprocal `e_i' = (v, u)`.
-    ///
-    /// Errors if the graph is directed (see [`is_directed`]), as edges would lack reciprocals.
-    ///
-    /// [`is_directed`]: ./struct.GraphMemoryMap.html#method.is_directed
-    pub fn edge_reciprocal(
-        &self,
-    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
-        self.get_edge_reciprocal_impl()
-    }
-
-    #[inline(always)]
-    /// Computes or retrieves from a previously cached file, the offset of the first neighbor whose
-    /// id is bigger than a given node's id, in the latter's neighbor list.
-    ///
-    /// If node u has a neighbor list (sorted by id, ascendingly) `n_u = {a, b, c, d, e}`, and `id[c]
-    /// =< id[u]`, but `id[d] > id[u]` then u's `edge_over` entry, `edge_over[u] = 3`.
-    ///
-    pub fn edge_over(
-        &self,
-    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
-        self.get_edge_over_impl()
-    }
 
     #[inline(always)]
     fn build_helper_filename(&self, seq: usize) -> Result<String, Box<dyn std::error::Error>> {
@@ -856,7 +842,11 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         file_type: CacheFile,
         seq: Option<usize>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        self.graph_cache.build_cache_filename(file_type, seq)
+        match seq {
+            None => self.graph_cache.build_cache_filename(file_type, None),
+            // scratch files are this instance's own
+            Some(seq) => self.graph_cache.build_instance_cache_filename(file_type, seq, &self.instance.0),
+        }
     }
 
     /// Removes the [`GraphMemoryMap`] instance's cached `.tmp` files of a given [`CacheFile`]
@@ -886,7 +876,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// [`CacheFile`]: ./enum.CacheFile.html#
     #[inline(always)]
     pub fn cleanup_cache(&self, target: CacheFile) -> Result<(), Box<dyn std::error::Error>> {
-        self.graph_cache.cleanup_cache(target)
+        self.graph_cache.cleanup_instance_cache(target, &self.instance.0)
     }
 
     /// Export the [`GraphMemoryMap`] instance to petgraph's [`DiGraph`](https://docs.rs/petgraph/latest/petgraph/graph/type.DiGraph.html) format stripping any edge or node labelings whatsoever.
@@ -1116,7 +1106,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// callers that just want nodes in DFS order (e.g. `graph.dfs(0)?.take(5).collect()`)
     /// without implementing a visitor. Like the rest of this crate, its "visited" marker and
     /// stack are memory-mapped (not heap `Vec`s), so it scales to graphs far larger than RAM.
-    pub fn dfs(&self, source: usize) -> Result<Dfs<'_, N, E, Ix>, Box<dyn std::error::Error>> {
+    pub fn dfs(&self, source: usize) -> Result<Dfs<'_, N, E, Ix, Dir>, Box<dyn std::error::Error>> {
         if source >= self.size() {
             return Err(format!(
                 "error node with id {source} doesn't exist: max id is |V| = {}",
@@ -1130,7 +1120,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// Returns a [`Bfs`] iterator yielding every node reachable from `source` (along arcs out of
     /// nodes, on directed graphs: run it on a [`view`](Self::view) for others), in breadth-first
     /// discovery order (`source` itself first). See [`GraphMemoryMap::dfs`] for the rationale.
-    pub fn bfs(&self, source: usize) -> Result<Bfs<'_, N, E, Ix>, Box<dyn std::error::Error>> {
+    pub fn bfs(&self, source: usize) -> Result<Bfs<'_, N, E, Ix, Dir>, Box<dyn std::error::Error>> {
         if source >= self.size() {
             return Err(format!(
                 "error node with id {source} doesn't exist: max id is |V| = {}",
@@ -1159,17 +1149,88 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         // whether built in this process or an earlier one, with their algorithms' results
         cache::drop_derived_of(&id)?;
 
-        let _r = std::fs::remove_file(er_fn);
-        let _r = std::fs::remove_file(eo_fn);
+        let _r = crate::shared_slice::remove_if_exists(er_fn);
+        let _r = crate::shared_slice::remove_if_exists(eo_fn);
 
         this.graph_cache.drop_cache()?;
 
         // cache files are named `<kind>[_<seq>]_<id>.<ext>`
         let pattern = cache_dir.join(format!("*{id}.*"));
         for f in glob::glob(&pattern.to_string_lossy())?.flatten() {
-            let _r = std::fs::remove_file(f);
+            let _r = crate::shared_slice::remove_if_exists(f);
         }
         Ok(())
+    }
+}
+
+/// Methods of undirected graphs only.
+#[allow(dead_code)]
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Graph<N, E, Ix> {
+    /// Performs a sweep cut over a given diffusion vector[^1] by partition conductance.
+    ///
+    /// # Arguments
+    ///
+    /// * `diffusion` --- the diffusion vector[^1][^2].
+    /// * `target_size` --- the partition's target size[^3].
+    /// * `target_volume` --- the partition's target volume[^4].
+    ///
+    /// [^1]: diffusion vector entries must be of type (node_id: [`usize`], heat: [`f64`]).
+    /// [^2]: entries must be descendingly ordered by diffusion.
+    /// [^3]: if [`None`] is provided defaults to `|V|`, effectively, the overall best partition by conducatance is returned independent on the number of nodes in it.
+    /// [^4]: if [`None`] is provided defaults to `|E|`, effectively, the overall best partition by conducatance is returned independent on the number of edges in it.
+    pub fn sweep_cut(
+        &self,
+        diffusion: &mut [(usize, f64)],
+        target_size: Option<usize>,
+        target_volume: Option<usize>,
+    ) -> Result<Community<usize>, Box<dyn std::error::Error>> {
+        self.sweep_cut_over_diffusion_vector_by_conductance(diffusion, target_size, target_volume)
+    }
+
+    /// Computes the modularity over a given partition over the [`GraphMemoryMap`] instance's nodes.
+    ///
+    /// For directed graphs, see
+    /// [`directed_modularity`](crate::communities::directed_louvain::directed_modularity) (Leicht
+    /// and Newman's directed modularity).
+    ///
+    /// # Arguments
+    ///
+    /// * `communities` --- a slice containing each node's community, the [`GraphMemoryMap`] instance's partition.
+    /// * `comms_cardinality` --- cardinality of distinct communities in the given partition.
+    ///
+    /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
+    pub fn modularity(
+        &self,
+        communities: &[Ix],
+        comms_cardinality: usize,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        self.modularity_impl(communities, comms_cardinality)
+    }
+
+    #[inline(always)]
+    /// Computes or retrieves from a previously cached file, the `Compressed Sparse Column (CSC)`
+    /// representation of the graph.
+    ///
+    /// This is equivalent to each edge's reciprocal edge in the `Compressed Sparse Row (CSR)`
+    /// representation of the graph, i.e., if `e_i = (u, v)` then it's reciprocal `e_i' = (v, u)`.
+    ///
+    pub fn edge_reciprocal(
+        &self,
+    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
+        self.get_edge_reciprocal_impl()
+    }
+
+    #[inline(always)]
+    /// Computes or retrieves from a previously cached file, the offset of the first neighbor whose
+    /// id is bigger than a given node's id, in the latter's neighbor list.
+    ///
+    /// If node u has a neighbor list (sorted by id, ascendingly) `n_u = {a, b, c, d, e}`, and `id[c]
+    /// =< id[u]`, but `id[d] > id[u]` then u's `edge_over` entry, `edge_over[u] = 3`.
+    ///
+    pub fn edge_over(
+        &self,
+    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
+        self.get_edge_over_impl()
     }
 }
 
@@ -1293,8 +1354,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 {
 }
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-    std::ops::Index<std::ops::RangeFull> for GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    std::ops::Index<std::ops::RangeFull> for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Output = [Ix];
     #[inline]
@@ -1303,8 +1364,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     }
 }
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-    std::ops::Index<std::ops::Range<usize>> for GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    std::ops::Index<std::ops::Range<usize>> for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Output = [Ix];
     #[inline]
@@ -1318,8 +1379,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     }
 }
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-    std::ops::Index<std::ops::Range<u64>> for GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    std::ops::Index<std::ops::Range<u64>> for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Output = [Ix];
     #[inline]
@@ -1338,8 +1399,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 
 /// Iterating over `&GraphMemoryMap` directly yields every node's id, in id order --- equivalent
 /// to `graph.iter_node_indices()`, provided for idiomatic `for node in &graph` usage.
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> IntoIterator
-    for &GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> IntoIterator
+    for &GraphMemoryMap<N, E, Ix, Dir>
 {
     type Item = usize;
     type IntoIter = NodeIndices<N, E, Ix>;
@@ -1350,8 +1411,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> IntoIt
     }
 }
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Debug
-    for GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Debug
+    for GraphMemoryMap<N, E, Ix, Dir>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -3567,8 +3628,8 @@ fn next_traversal_instance_id() -> usize {
 /// since both `Dfs`/`Bfs` only ever push a node once, immediately after marking it visited.
 /// Each growth re-mmaps into a freshly, uniquely named cache file (via `target`/`instance_id`/
 /// the new generation number) and removes the previous one; the final file is removed on drop.
-struct GrowableIdBuffer<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    graph: &'a GraphMemoryMap<N, E, Ix>,
+struct GrowableIdBuffer<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness = Undirected> {
+    graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
     target: CacheFile,
     instance_id: usize,
     generation: usize,
@@ -3579,11 +3640,11 @@ struct GrowableIdBuffer<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::g
     max_capacity: usize,
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-    GrowableIdBuffer<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    GrowableIdBuffer<'a, N, E, Ix, Dir>
 {
     fn new(
-        graph: &'a GraphMemoryMap<N, E, Ix>,
+        graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
         target: CacheFile,
         instance_id: usize,
         max_capacity: usize,
@@ -3660,8 +3721,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Drop
-    for GrowableIdBuffer<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Drop
+    for GrowableIdBuffer<'a, N, E, Ix, Dir>
 {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.file_name);
@@ -3682,18 +3743,18 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Dr
 /// reachable nodes can't be known ahead of actually traversing the graph. It does implement
 /// `FusedIterator`: once the internal stack empties, it stays empty, so `next()` keeps returning
 /// `None`.
-pub struct Dfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    graph: &'a GraphMemoryMap<N, E, Ix>,
-    stack: GrowableIdBuffer<'a, N, E, Ix>,
+pub struct Dfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness = Undirected> {
+    graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
+    stack: GrowableIdBuffer<'a, N, E, Ix, Dir>,
     visited: AbstractedProceduralMemoryMut<bool>,
     visited_file: String,
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Dfs<'a, N, E, Ix> {
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Dfs<'a, N, E, Ix, Dir> {
     /// `source` must already be known to be `< graph.size()` (checked once by
     /// [`GraphMemoryMap::dfs`]); every `v` reachable through it from there on is itself a valid
     /// node id by the CSR neighbour-list invariant, so the `.expect()` in `next()` can't fail.
-    fn new(graph: &'a GraphMemoryMap<N, E, Ix>, source: usize) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(graph: &'a GraphMemoryMap<N, E, Ix, Dir>, source: usize) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = graph.size();
         let instance_id = next_traversal_instance_id();
         let visited_file =
@@ -3711,8 +3772,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Df
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterator
-    for Dfs<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Iterator
+    for Dfs<'a, N, E, Ix, Dir>
 {
     type Item = usize;
 
@@ -3734,16 +3795,16 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> It
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Drop
-    for Dfs<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Drop
+    for Dfs<'a, N, E, Ix, Dir>
 {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.visited_file);
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-    std::iter::FusedIterator for Dfs<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    std::iter::FusedIterator for Dfs<'a, N, E, Ix, Dir>
 {
 }
 
@@ -3756,16 +3817,16 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
 /// dequeuing just advances `read_pos` rather than physically removing the front element, so the
 /// same growable buffer design as `Dfs`'s stack applies directly (capacity bounded by the graph's
 /// node count either way).
-pub struct Bfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
-    graph: &'a GraphMemoryMap<N, E, Ix>,
-    queue: GrowableIdBuffer<'a, N, E, Ix>,
+pub struct Bfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness = Undirected> {
+    graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
+    queue: GrowableIdBuffer<'a, N, E, Ix, Dir>,
     read_pos: usize,
     visited: AbstractedProceduralMemoryMut<bool>,
     visited_file: String,
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Bfs<'a, N, E, Ix> {
-    fn new(graph: &'a GraphMemoryMap<N, E, Ix>, source: usize) -> Result<Self, Box<dyn std::error::Error>> {
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Bfs<'a, N, E, Ix, Dir> {
+    fn new(graph: &'a GraphMemoryMap<N, E, Ix, Dir>, source: usize) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = graph.size();
         let instance_id = next_traversal_instance_id();
         let visited_file =
@@ -3784,8 +3845,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Bf
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterator
-    for Bfs<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Iterator
+    for Bfs<'a, N, E, Ix, Dir>
 {
     type Item = usize;
 
@@ -3811,16 +3872,16 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> It
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Drop
-    for Bfs<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Drop
+    for Bfs<'a, N, E, Ix, Dir>
 {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.visited_file);
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-    std::iter::FusedIterator for Bfs<'a, N, E, Ix>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    std::iter::FusedIterator for Bfs<'a, N, E, Ix, Dir>
 {
 }
 
@@ -3848,7 +3909,7 @@ mod test {
     /// node 3 -> {0}        (degree 1)
     /// node 4 -> {}         (degree 0, isolated)
     /// node 5 -> {0, 1}     (degree 2)
-    fn build_degree_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
+    fn build_degree_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
         let dir = unique_test_dir("iter_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("degrees.mtx");
@@ -3860,7 +3921,7 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         crate::graph::test_utils::TestGraph::new(graph, None)
     }
@@ -3902,7 +3963,7 @@ mod test {
     /// Independent, textbook-style reference BFS (no shared code with [`Bfs`]/[`Dfs`]), used as
     /// ground truth: returns (reachable set in distance order, distance-from-source for each
     /// node).
-    fn reference_bfs(graph: &GraphMemoryMap<VoidLabel, VoidLabel, usize>, source: usize) -> Vec<usize> {
+    fn reference_bfs(graph: &crate::graph::DiGraph<VoidLabel, VoidLabel, usize>, source: usize) -> Vec<usize> {
         let mut dist = vec![usize::MAX; graph.size()];
         let mut order = Vec::new();
         let mut queue = std::collections::VecDeque::new();
@@ -4414,7 +4475,7 @@ mod test {
 
     /// Directed, integer-weighted graph:
     /// 0 -> 1 (w=10), 0 -> 2 (w=20), 1 -> 2 (w=30), 3 -> 0 (w=40)
-    fn build_weighted_edge_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, TestWeight, usize> {
+    fn build_weighted_edge_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, TestWeight, usize, crate::graph::Directed> {
         let dir = unique_test_dir("label_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("weighted.mtx");
@@ -4426,7 +4487,7 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, TestWeight, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         crate::graph::test_utils::TestGraph::new(graph, None)
     }
@@ -4512,14 +4573,14 @@ mod test {
             GraphCache::<VoidLabel, TestWeight, usize>::from_file(&path, None, None, None)
                 .expect("parse should succeed");
         let graph =
-            GraphMemoryMap::<VoidLabel, TestWeight, usize>::init_from_cache(cache, Some(1))
+            crate::graph::DiGraph::<VoidLabel, TestWeight, usize>::init_from_cache(cache, Some(1))
                 .expect("load should succeed");
         let before: Vec<TestWeight> = graph.iter_edge_labels().collect();
         let edges_filename = graph.cache_edges_filename();
         drop(graph);
 
         let reopened =
-            GraphMemoryMap::<VoidLabel, TestWeight, usize>::open(&edges_filename, None, Some(1))
+            crate::graph::DiGraph::<VoidLabel, TestWeight, usize>::open(&edges_filename, None, Some(1))
                 .expect("reopening the just-built cache should succeed");
         let after: Vec<TestWeight> = reopened.iter_edge_labels().collect();
 
@@ -4675,7 +4736,7 @@ mod test {
     /// chain's final node (also degree 0) giving a real spread of isolated/degree-1/high-degree
     /// nodes for the degree-filter family too.
     #[cfg(feature = "rayon")]
-    fn build_large_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize> {
+    fn build_large_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
         let dir = unique_test_dir("large_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("large.mtx");
@@ -4701,7 +4762,7 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         crate::graph::test_utils::TestGraph::new(graph, None)
     }
@@ -4792,7 +4853,7 @@ mod test {
     fn drop_cache_removes_every_file_of_the_graph() {
         use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
         use crate::k_truss::triangles::Triangles;
-        type G = GraphMemoryMap<VoidLabel, VoidLabel, usize>;
+        type G = crate::graph::Graph<VoidLabel, VoidLabel, usize>;
 
         let dir = unique_test_dir("drop_cache");
         let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());

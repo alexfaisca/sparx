@@ -14,14 +14,14 @@ fn widen_to_ix<Ix: crate::graph::IndexType>(x: usize) -> Ix {
 
 type IxNeighbours<N, E, Ix> = std::iter::Map<NeighbourIter<N, E, Ix>, fn(usize) -> Ix>;
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_visit::Graph
-    for GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness> dfs_visit::Graph
+    for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Ix = Ix;
 
     fn directed(&self) -> bool {
-        // recorded with the graph; if it can't be told, report every back edge
-        self.is_directed().unwrap_or(true)
+        // in a directed graph an arc back to a node's parent closes a cycle
+        Dir::DIRECTED
     }
 
     fn s(&self) -> usize {
@@ -61,8 +61,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> dfs_vi
     }
 }
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> bfs_visit::Graph
-    for GraphMemoryMap<N, E, Ix>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness> bfs_visit::Graph
+    for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Ix = Ix;
 
@@ -127,7 +127,7 @@ mod test {
     /// 3 -> 0                  (node 3 has degree 1)
     /// (with a guard removing its cached files)
     fn build_tiny_graph() -> (
-        GraphMemoryMap<VoidLabel, VoidLabel, usize>,
+        crate::graph::DiGraph<VoidLabel, VoidLabel, usize>,
         crate::graph::test_utils::CacheGuard,
     ) {
         let dir = unique_test_dir("impl_traits_neigh_test");
@@ -141,7 +141,7 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         let guard = crate::graph::test_utils::CacheGuard::new(&graph, None);
         (graph, guard)
@@ -226,7 +226,7 @@ mod test {
     /// `parents == [0, 0, 1, 2]`.
     /// (with a guard removing its cached files)
     fn build_chain_graph() -> (
-        GraphMemoryMap<VoidLabel, VoidLabel, usize>,
+        crate::graph::DiGraph<VoidLabel, VoidLabel, usize>,
         crate::graph::test_utils::CacheGuard,
     ) {
         let dir = unique_test_dir("impl_traits_chain_test");
@@ -240,7 +240,7 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         let guard = crate::graph::test_utils::CacheGuard::new(&graph, None);
         (graph, guard)

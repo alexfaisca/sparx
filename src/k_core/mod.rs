@@ -1,6 +1,10 @@
 pub mod batagelj_zaversnik;
+pub mod count;
 pub mod directed;
 pub mod liu_et_al;
+
+#[cfg(test)]
+mod width_test;
 
 #[cfg(test)]
 use _verify::verify_k_cores;
@@ -9,6 +13,7 @@ use _verify::verify_k_cores;
 mod _verify {
     use crate::{
         graph::{self, GraphMemoryMap},
+        k_core::count::CoreCount,
         shared_slice::AbstractedProceduralMemoryMut,
     };
 
@@ -43,9 +48,9 @@ mod _verify {
 
     /// Verifies `node_coreness` (one value per node) is `graph`'s k-core decomposition.
     #[allow(dead_code)]
-    pub(super) fn verify_k_cores<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    pub(super) fn verify_k_cores<N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>(
         graph: &GraphMemoryMap<N, E, Ix>,
-        node_coreness: AbstractedProceduralMemoryMut<u8>,
+        node_coreness: AbstractedProceduralMemoryMut<Cx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let coreness = node_coreness.as_slice();
         if coreness.len() != graph.size() {
@@ -57,9 +62,9 @@ mod _verify {
             .into());
         }
         let expected = reference_coreness(graph)?;
-        match (0..graph.size()).find(|&v| coreness[v] as usize != expected[v]) {
+        match (0..graph.size()).find(|&v| coreness[v].to_usize() != expected[v]) {
             Some(v) => Err(format!(
-                "k-cores invalid: node {v} has coreness {}, expected {}",
+                "k-cores invalid: node {v} has coreness {:?}, expected {}",
                 coreness[v], expected[v]
             )
             .into()),

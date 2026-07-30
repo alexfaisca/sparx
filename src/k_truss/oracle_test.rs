@@ -288,7 +288,7 @@ fn pkt_is_deterministic_across_threads() {
 /// support is the number of combinations of edges (still in the graph) on the other two sides of
 /// a triangle which put it in a selected role, and the `k`-truss is what's left after repeatedly
 /// removing edges with support below `k - 2`.
-pub(crate) fn brute_force_directed_trussness(g: &Graph, roles: u8) -> Vec<usize> {
+pub(crate) fn brute_force_directed_trussness(g: &DiGraph, roles: u8) -> Vec<usize> {
     use super::directed::role;
     let edges: Vec<(usize, usize)> = (0..g.size())
         .flat_map(|u| g.neighbours(u).unwrap().map(move |v| (u, v)))
@@ -368,7 +368,7 @@ fn directed_k_truss_matches_brute_force() {
         let as_usize = |k: &[u16]| k.iter().map(|&k| k as usize).collect::<Vec<_>>();
         for threads in [1, 4, 16] {
             let mut pkt =
-                AlgoPKT::<_, _, _, u16>::new_directed_tx(&g, triangle_type, threads).unwrap();
+                AlgoPKT::<_, _, _, u16, _>::new_directed_tx(&g, triangle_type, threads).unwrap();
             assert_eq!(
                 as_usize(pkt.k_trusses()),
                 expected,
@@ -377,7 +377,7 @@ fn directed_k_truss_matches_brute_force() {
             pkt.drop_cache().unwrap();
         }
         let mut bea =
-            AlgoBurkhardtEtAl::<_, _, _, u16>::new_directed_tx(&g, triangle_type).unwrap();
+            AlgoBurkhardtEtAl::<_, _, _, u16, _>::new_directed_tx(&g, triangle_type).unwrap();
         assert_eq!(
             as_usize(bea.k_trusses()),
             expected,

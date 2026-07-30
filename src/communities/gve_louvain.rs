@@ -209,7 +209,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         let out_fn = this.g.build_cache_filename(CacheFile::GVELouvain, None)?;
-        std::fs::remove_file(out_fn)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
@@ -284,7 +284,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        g.require_symmetric("GVE-Louvain", None)?;
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::GVELouvain, None)?;
         let coms = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
@@ -467,13 +466,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
                 && sig_d.is_finite()
                 && m.is_normal()
         );
-        let dq = (k_u_c - k_u_d) / m - k_u * (k_u + sig_c - sig_d) / (2.0 * m * m);
-        if dq > 1.0 {
-            println!(
-                "Deviant dq: ({k_u_c} - {k_u_d}) / {m} - {k_u} * ({k_u} + {sig_c} - {sig_d}) / (2. *{m} * {m}) = {dq}"
-            );
-        }
-        dq
+        (k_u_c - k_u_d) / m - k_u * (k_u + sig_c - sig_d) / (2.0 * m * m)
     }
 
     /// Determines the total weight of edges from a given node `u` to every community `c` it is linked to.

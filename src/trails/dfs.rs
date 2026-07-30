@@ -11,17 +11,18 @@ type ProceduralMemoryDFS = (AbstractedProceduralMemoryMut<bool>,);
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
-/// On directed graphs, follows arcs out of nodes ([`Direction::Out`], the default):
-/// it visits the nodes `source` reaches. [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
-/// [`Direction::In`] visits the nodes that reach `source`, [`Direction::Both`] ignores their directions.
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): it visits the nodes `source` reaches.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] visits the nodes that reach `source`. To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
 ///
 /// [`Direction`]: ../../graph/direction/enum.Direction.html
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
-/// [`Direction::Both`]: ../../graph/direction/enum.Direction.html#variant.Both
-pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
+pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
     /// Graph in which the DFS is to be performed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Source node for DFS.
     source: usize,
     /// Memmapped slice containing the nodes in discovery order.
@@ -29,25 +30,29 @@ pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix, Directed> {
     /// Performs a depth first search from `source`, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
     ///
     /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
     pub fn new_directed(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a DiGraph<N, E, Ix>,
         source: usize,
         direction: Direction,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new(g.view(direction)?, source)
     }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<'a, N, E, Ix, Dir> {
 
     /// Performs DFS in a [`GraphMemoryMap`] instance.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bfs = Self::new_no_compute(g, source)?;
@@ -66,18 +71,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     /// Removes all cached files pertaining to this algorithm's execution's results.
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
-        let out_fn = this.g.build_cache_filename(CacheFile::BFS, None)?;
-        std::fs::remove_file(out_fn)?;
+        let out_fn = this.g.build_cache_filename(CacheFile::DFS, None)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<'a, N, E, Ix, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source)
@@ -86,7 +91,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source)
@@ -137,7 +142,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if source >= g.size() {

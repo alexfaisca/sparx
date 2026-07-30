@@ -729,7 +729,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 mod test {
     use super::GraphCache;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
-    use crate::graph::{GraphMemoryMap, label::VoidLabel};
+    use crate::graph::label::VoidLabel;
     use std::io::Write;
 
     fn write_tiny_ggcat(path: &std::path::Path) {
@@ -762,7 +762,7 @@ mod test {
         )
         .expect("usize ggcat parse should succeed");
         let graph_usize =
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
                 .expect("usize graph init should succeed");
 
         let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
@@ -773,7 +773,7 @@ mod test {
         )
         .expect("u32 ggcat parse should succeed");
         let graph_u32 =
-            GraphMemoryMap::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
                 .expect("u32 graph init should succeed");
 
         assert_eq!(graph_usize.size(), graph_u32.size());

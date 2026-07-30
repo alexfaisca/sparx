@@ -1,13 +1,9 @@
 use super::{CacheFile, GraphMemoryMap};
-use crate::{
-    shared_slice::{
-        AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSlice, SharedSliceMut,
-    },
-    utils::OneOrMany,
+use crate::shared_slice::{
+    AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSlice, SharedSliceMut,
 };
 
 use crossbeam::thread;
-use smallvec::SmallVec;
 use std::{
     fs::OpenOptions,
     sync::{Arc, Barrier},
@@ -91,8 +87,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// the graph's lock, or other processes) never write files another one reads. Builds are
     /// deterministic, so whichever renames last leaves the same index.
     fn build_reciprocal_edge_index(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // edges of an asymmetric graph lack reciprocals
-        self.require_symmetric("the reciprocal edge index", None)?;
 
         let er_fn = self.build_cache_filename(CacheFile::EdgeReciprocal, None)?;
         let eo_fn = self.build_cache_filename(CacheFile::EdgeOver, None)?;
@@ -183,107 +177,50 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
                     // a closure, so that every thread reaches the next barrier even on errors
                     let mut matched = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                    let mut prev = OneOrMany::<(usize, usize)>::One((node_count, 0usize));
-                    for u in begin..end {
-                        for edge_offset in index_ptr.get(u).index()..eo.get(u).index() {
-                            let v = neighbours_ptr.get(edge_offset).index();
-                            // binary search on neighbours w, where w < v
-                            if u == v {
-                                // self loops are their own reciprocals
-                                *er.get_mut(edge_offset) = Ix::new(edge_offset);
-                                // reset
-                                prev = OneOrMany::One((v, edge_offset));
-                                continue;
-                            } else if let OneOrMany::One((prev_v, prev_offset)) = prev {
-                                if prev_v == v {
-                                    // find reciprocal, dest is the same, offset is different
-                                    // make entry into list and record (never actually loops)
-                                    let reciprocal = if prev_offset < edge_count - 1 && neighbours_ptr.get(prev_offset + 1).index() == u {
-                                        prev_offset + 1
-                                    } /*else if prev_offset < edge_count - 1 {
-                                            println!("after {prev_offset}->{u} comes {}", graph_ptr.get(prev_offset + 1).dest());
-                                        }*/
-                                        // search backwards
-                                    else if prev_offset > 0 && neighbours_ptr.get(prev_offset - 1).index() == u {
-                                        prev_offset - 1
-                                    } /*else if prev_offset > 0 {
-                                            println!("before {prev_offset}->{u} comes {}", graph_ptr.get(prev_offset - 1).dest());
-                                        }*/
-                                    else {
-                                        return Err(format!("error couldn't find reciprocal for 2nd multi edge {edge_offset}, u: ({u}) -> v: ({v}), all options were already taken").into());
-                                    };
-                                    let mut vs: SmallVec<[(usize, usize); 4]> = SmallVec::new();
-                                    vs.push((prev_v, prev_offset));
-                                    vs.push((v, reciprocal));
-                                    prev = OneOrMany::Many(vs);
-                                    *er.get_mut(edge_offset) = Ix::new(reciprocal);
-                                    *er.get_mut(reciprocal) = Ix::new(edge_offset);
-                                    continue;
+                        // every run of parallel edges u -> v (v <= u) is paired, in order, with the
+                        // run of edges v -> u in v's own neighbours, as long (the graph being
+                        // symmetric), and found by binary search within v's neighbours above v
+                        for u in begin..end {
+                            let stop = eo.get(u).index();
+                            let mut e = index_ptr.get(u).index();
+                            while e < stop {
+                                let v = neighbours_ptr.get(e).index();
+                                let mut run = 1;
+                                while e + run < stop && neighbours_ptr.get(e + run).index() == v {
+                                    run += 1;
                                 }
-                            } else if let OneOrMany::Many(ref mut vs) = prev {
-                                if vs[0].0 == v {
-                                    // find reciprocal, dest is the same, offset is different from
-                                    // any of the recorded offsets: greedy lookup
-                                    let reciprocal = 'search_adjacents: {
-                                        // search forwards
-                                        let mut res = vs[0].1;
-                                        while res < edge_count - 1 && neighbours_ptr.get(res + 1).index() == u {
-                                            res += 1;
-                                            if vs.iter().any(|&(_, b)| b == res) {
-                                                continue;
-                                            } else {
-                                                break 'search_adjacents res;
-                                            }
+                                if v == u {
+                                    // self-loops are their own reciprocals
+                                    for k in e..e + run {
+                                        *er.get_mut(k) = Ix::new(k);
+                                    }
+                                } else {
+                                    let end_v = index_ptr.get(v + 1).index();
+                                    let (mut lo, mut hi) = (eo.get(v).index(), end_v);
+                                    while lo < hi {
+                                        let m = lo + (hi - lo) / 2;
+                                        if neighbours_ptr.get(m).index() < u {
+                                            lo = m + 1;
+                                        } else {
+                                            hi = m;
                                         }
-                                        // reset and search backwards
-                                        res = vs[0].1;
-                                        while res > 0 && neighbours_ptr.get(res - 1).index() == u {
-                                            res -= 1;
-                                            if vs.iter().any(|&(_, b)| b == res) {
-                                                continue;
-                                            } else {
-                                                break 'search_adjacents res;
-                                            }
-                                        }
-
-                                        return Err(format!("error couldn't find reciprocal for nth multi edge {edge_offset}, u: ({u}) -> v: ({v}), all options were already taken").into());
-                                    };
-
-                                    // extend entry's list
-                                    vs.push((v, reciprocal));
-                                    *er.get_mut(edge_offset) = Ix::new(reciprocal);
-                                    *er.get_mut(reciprocal) = Ix::new(edge_offset);
-                                    continue;
+                                    }
+                                    if lo + run > end_v || (0..run).any(|k| neighbours_ptr.get(lo + k).index() != u) {
+                                        return Err(format!(
+                                            "error couldn't find the reciprocals of edges {e}..{}, u: ({u}) -> v: ({v})",
+                                            e + run
+                                        )
+                                        .into());
+                                    }
+                                    for k in 0..run {
+                                        *er.get_mut(e + k) = Ix::new(lo + k);
+                                        *er.get_mut(lo + k) = Ix::new(e + k);
+                                    }
                                 }
+                                e += run;
                             }
-
-                                // binary search over v's neighbours above v, [floor, ceil)
-                                let mut floor = eo.get(v).index();
-                                let mut ceil = index_ptr.get(v + 1).index();
-                                let reciprocal =  loop {
-                                    if floor >= ceil {
-                                        return Err(format!("error couldn't find reciprocal for edge {edge_offset}, u: ({u}) -> v: ({v})").into());
-                                    }
-
-                                    let m = floor + (ceil - floor) / 2;
-                                    let dest = neighbours_ptr.get(m).index();
-
-                                    match dest.cmp(&u) {
-                                        std::cmp::Ordering::Equal => break m,
-                                        std::cmp::Ordering::Greater => ceil = m,
-                                        std::cmp::Ordering::Less => floor = m + 1,
-                                    }
-                                };
-
-                                *er.get_mut(edge_offset) = Ix::new(reciprocal);
-                                *er.get_mut(reciprocal) = Ix::new(edge_offset);
-                                // reset
-                                prev = OneOrMany::One((v, reciprocal));
                         }
-
-                        prev = OneOrMany::One((node_count, 0));
-                    }
-                    Ok(())
+                        Ok(())
                     };
                     let matched = matched();
 
@@ -334,7 +271,31 @@ mod tests {
     use crate::graph::label::VoidLabel;
     use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
     use std::io::Write;
-    use std::path::Path;
+
+    fn digraph_from_mtx(
+        name: &str,
+        header: &str,
+        n: usize,
+        edges: &[(usize, usize)],
+    ) -> TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
+        let dir = unique_test_dir("impl_csc_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let path = dir.join(format!("{name}.mtx"));
+        let mut f = std::fs::File::create(&path).expect("error creating mtx fixture");
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern {header}").unwrap();
+        writeln!(f, "{n} {n} {}", edges.len()).unwrap();
+        for &(u, v) in edges {
+            writeln!(f, "{} {}", u + 1, v + 1).unwrap();
+        }
+        drop(f);
+        let graph = crate::graph::DiGraph::from_file(
+            &path,
+            Some(format!("impl_csc_{name}_{}", unique_run_tag())),
+            Some(2),
+        )
+        .expect("graph parse should succeed");
+        TestGraph::new(graph, Some(dir))
+    }
 
     fn graph_from_mtx(
         name: &str,
@@ -362,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn is_directed_counts_multiplicity() {
+    fn symmetry_counts_multiplicity() {
         for (name, header, n, edges, symmetric) in [
             ("sym_path", "symmetric", 3, vec![(1, 0), (2, 1)], true),
             ("dir_path", "general", 3, vec![(0, 1), (1, 2)], false),
@@ -371,39 +332,10 @@ mod tests {
             ("multi_unbalanced", "general", 2, vec![(0, 1), (0, 1), (1, 0)], false),
             ("multi_balanced", "general", 2, vec![(0, 1), (0, 1), (1, 0), (1, 0)], true),
         ] {
-            let g = graph_from_mtx(name, header, n, &edges);
-            assert_eq!(g.is_directed().unwrap(), !symmetric, "{name}");
+            let g = digraph_from_mtx(name, header, n, &edges);
+            assert_eq!(g.is_symmetric().unwrap(), symmetric, "{name}");
             // remembered
-            assert_eq!(g.is_directed().unwrap(), !symmetric, "{name}, again");
-        }
-    }
-
-    /// Asymmetric graphs used to get reciprocal indices of zeros (arcs to higher nodes were never
-    /// checked), mismatched edges (the binary search read past a node's neighbours), or a
-    /// subtraction overflow; and a failed build left files behind that later calls trusted.
-    #[test]
-    fn edge_reciprocal_refuses_asymmetric_graphs_and_leaves_no_files() {
-        for (name, n, edges) in [
-            ("upward_dag", 3, vec![(0, 1), (0, 2), (1, 2)]),
-            ("downward", 3, vec![(1, 0), (2, 1)]),
-            ("search_overrun", 3, vec![(1, 2), (2, 0)]),
-            ("search_underflow", 3, vec![(0, 2), (1, 0)]),
-            ("one_upward", 3, vec![(0, 1), (1, 0), (1, 2)]),
-        ] {
-            let g = graph_from_mtx(name, "general", n, &edges);
-            let er_fn = g.build_cache_filename(CacheFile::EdgeReciprocal, None).unwrap();
-            let eo_fn = g.build_cache_filename(CacheFile::EdgeOver, None).unwrap();
-            for attempt in 0..2 {
-                let err = g.edge_reciprocal().err().unwrap_or_else(|| {
-                    panic!("{name}: attempt {attempt} should fail")
-                });
-                assert!(err.to_string().contains("needs an undirected graph"), "{name}: {err}");
-                assert!(g.edge_over().is_err(), "{name}: edge over, attempt {attempt}");
-                for f in [&er_fn, &eo_fn] {
-                    assert!(!Path::new(f).exists(), "{name}: {f} left behind");
-                    assert!(!Path::new(&format!("{f}.part")).exists(), "{name}: {f}.part left behind");
-                }
-            }
+            assert_eq!(g.is_symmetric().unwrap(), symmetric, "{name}, again");
         }
     }
 
@@ -427,39 +359,47 @@ mod tests {
         }
     }
 
+
+    /// Parallel edges next to another node's neighbours: the reciprocals of the 2nd and later
+    /// copies used to be looked for past the end of the node's own neighbours.
     #[test]
-    fn undirected_algorithms_refuse_directed_graphs() {
-        use crate::communities::{
-            approx_dirichlet_hkpr::ApproxDirHKPR, gve_louvain::AlgoGVELouvain, hk_relax::HKRelax,
-        };
-        use crate::k_core::{batagelj_zaversnik::AlgoBatageljZaversnik, liu_et_al::AlgoLiuEtAl};
-        use crate::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
-        use crate::k_truss::{
-            burkhardt_et_al::AlgoBurkhardtEtAl, clustering_coefficient::ClusteringCoefficient,
-            pkt::AlgoPKT, triangles::Triangles,
-        };
-
-        let g = graph_from_mtx("dag", "general", 4, &[(0, 1), (0, 2), (1, 2), (2, 3)]);
-        let refused = |what: &str, err: Option<Box<dyn std::error::Error>>| {
-            let err = err.unwrap_or_else(|| panic!("{what} accepted a directed graph"));
-            assert!(err.to_string().contains("needs an undirected graph"), "{what}: {err}");
-        };
-        refused("triangles", Triangles::<_, _, _, u8>::new_tx(&g).err());
-        refused("pkt", AlgoPKT::<_, _, _, u8>::new_tx(&g, 2).err());
-        refused("burkhardt et al.", AlgoBurkhardtEtAl::<_, _, _, u8>::new_tx(&g).err());
-        refused("clustering coefficient", ClusteringCoefficient::new(&g).err());
-        refused("batagelj zaversnik", AlgoBatageljZaversnik::new(&g).err());
-        refused("liu et al.", AlgoLiuEtAl::new(&g).err());
-        refused("louvain", AlgoGVELouvain::<_, _, _, f64>::new(&g).err());
-        refused("modularity", g.modularity(&[0, 0, 1, 1], 2).err());
-        refused("sweep cut", g.sweep_cut(&mut [(0, 1.), (1, 0.5)], None, None).err());
-        refused("hk-relax", HKRelax::new(&g, 1., 1e-3, vec![0], None, None).err());
-        refused("approx. dirichlet hkpr", ApproxDirHKPR::new(&g, 0.05, 0, 2, 2, 0.5).err());
-
-        // the directed algorithms still accept it
-        let t = DirectedTriangleType::FeedForward;
-        assert!(DirectedTriangles::<_, _, _, u8>::new_tx(&g, t).is_ok());
-        assert!(AlgoPKT::<_, _, _, u8>::new_directed(&g, t).is_ok());
-        assert!(AlgoBurkhardtEtAl::<_, _, _, u8>::new_directed(&g, t).is_ok());
+    fn edge_reciprocal_pairs_parallel_edges_of_random_multigraphs() {
+        use crate::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
+        let mut cases = vec![("reviewed", 3, vec![(2, 0), (2, 0), (2, 1)])];
+        for seed in 0..12u64 {
+            let mut state = seed + 1;
+            let mut next = move || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 33) as usize
+            };
+            let n = 3 + next() % 20;
+            let mut edges = vec![];
+            for _ in 0..(n * 3) {
+                let (u, v) = (next() % n, next() % n);
+                // heavy parallelism and self-loops
+                for _ in 0..1 + next() % 3 {
+                    edges.push((u.max(v), u.min(v)));
+                }
+            }
+            cases.push(("random", n, edges));
+        }
+        for (case, (name, n, edges)) in cases.into_iter().enumerate() {
+            let g = graph_from_mtx(&format!("{name}_{case}"), "symmetric", n, &edges);
+            let er = g.edge_reciprocal().unwrap_or_else(|e| panic!("{name} {case}: {e}"));
+            let er = er.as_slice();
+            let index = SharedSlice::<usize>::new(g.offsets_ptr(), g.offsets_size());
+            for u in 0..g.size() {
+                for e in *index.get(u)..*index.get(u + 1) {
+                    let (v, r) = (g[..][e], er[e]);
+                    assert!((*index.get(v)..*index.get(v + 1)).contains(&r), "{name} {case}: edge {e}");
+                    assert_eq!((g[..][r], er[r]), (u, e), "{name} {case}: edge {e} {u}->{v}");
+                }
+            }
+            // the triangle based algorithms run, and agree
+            Triangles::<_, _, _, u32>::new_tx(&g).unwrap_or_else(|e| panic!("{name} {case}: {e}"));
+            let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 3).unwrap().k_trusses().to_vec();
+            let bea = AlgoBurkhardtEtAl::<_, _, _, u32>::new_tx(&g).unwrap().k_trusses().to_vec();
+            assert_eq!(pkt, bea, "{name} {case}");
+        }
     }
 }

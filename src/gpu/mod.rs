@@ -32,9 +32,9 @@ pub trait GpuBackend {
     type Graph;
 
     /// Copies `g`'s CSR to device memory, to be reused by any number of algorithm runs.
-    fn upload_graph<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    fn upload_graph<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>(
         &self,
-        g: &GraphMemoryMap<N, E, Ix>,
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self::Graph, Box<dyn std::error::Error>>;
 
     /// Runs *HyperBall* on `graph`.

@@ -43,9 +43,9 @@ pub(crate) fn register_cache_id(id: String) {
 }
 
 #[cfg(test)]
-/// Removes, when dropped (also when a test fails), cached graphs' files --- their own and those of
-/// every algorithm run on them, all named after the graph's unique id --- and a test's fixture
-/// directory. Files in the cache's subdirectories (e.g. exact values) are left alone.
+/// Removes, when dropped (also when a test fails), cached graphs' files --- their own, those of
+/// every algorithm run on them and their exact values, all named after the graph's unique id, and
+/// the graphs derived from them --- and a test's fixture directory.
 pub(crate) struct CacheGuard {
     ids: Vec<String>,
     fixture_dir: Option<PathBuf>,
@@ -56,8 +56,8 @@ pub(crate) struct CacheGuard {
 #[cfg(test)]
 impl CacheGuard {
     /// Guards `graph`'s cached files, and `fixture_dir` if given.
-    pub(crate) fn new<N: graph::N, E: graph::E, Ix: graph::IndexType>(
-        graph: &GraphMemoryMap<N, E, Ix>,
+    pub(crate) fn new<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>(
+        graph: &GraphMemoryMap<N, E, Ix, Dir>,
         fixture_dir: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -87,9 +87,14 @@ impl Drop for CacheGuard {
             self.ids.extend(collected.into_iter().flatten());
         }
         for id in &self.ids {
-            if let Ok(files) = glob::glob(&format!("{CACHE_DIR}*{id}.*")) {
-                for file in files.flatten() {
-                    let _ = std::fs::remove_file(file);
+            // graphs derived from it (transposes, undirected views), named after their own ids
+            let _ = crate::graph::cache::drop_derived_of(id);
+            // and exact values of it: named after its (unique) id, no other test reads them
+            for dir in ["", EXACT_VALUE_CACHE_DIR] {
+                if let Ok(files) = glob::glob(&format!("{CACHE_DIR}{dir}*{id}.*")) {
+                    for file in files.flatten() {
+                        let _ = std::fs::remove_file(file);
+                    }
                 }
             }
         }
@@ -102,23 +107,30 @@ impl Drop for CacheGuard {
 #[cfg(test)]
 /// A test graph, removing its cached files and fixture directory when dropped (see
 /// [`CacheGuard`]); derefs to its [`GraphMemoryMap`].
-pub(crate) struct TestGraph<N: graph::N = (), E: graph::E = (), Ix: graph::IndexType = usize> {
-    graph: GraphMemoryMap<N, E, Ix>,
+pub(crate) struct TestGraph<
+    N: graph::N = (),
+    E: graph::E = (),
+    Ix: graph::IndexType = usize,
+    Dir: graph::Directedness = graph::Undirected,
+> {
+    graph: GraphMemoryMap<N, E, Ix, Dir>,
     // dropped after the graph (whose files it removes)
     _guard: CacheGuard,
 }
 
 #[cfg(test)]
-impl<N: graph::N, E: graph::E, Ix: graph::IndexType> TestGraph<N, E, Ix> {
-    pub(crate) fn new(graph: GraphMemoryMap<N, E, Ix>, fixture_dir: Option<PathBuf>) -> Self {
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness> TestGraph<N, E, Ix, Dir> {
+    pub(crate) fn new(graph: GraphMemoryMap<N, E, Ix, Dir>, fixture_dir: Option<PathBuf>) -> Self {
         let _guard = CacheGuard::new(&graph, fixture_dir);
         Self { graph, _guard }
     }
 }
 
 #[cfg(test)]
-impl<N: graph::N, E: graph::E, Ix: graph::IndexType> std::ops::Deref for TestGraph<N, E, Ix> {
-    type Target = GraphMemoryMap<N, E, Ix>;
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness> std::ops::Deref
+    for TestGraph<N, E, Ix, Dir>
+{
+    type Target = GraphMemoryMap<N, E, Ix, Dir>;
 
     fn deref(&self) -> &Self::Target {
         &self.graph

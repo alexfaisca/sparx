@@ -27,6 +27,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Narrow index types & accumulators](#narrow-index-types--accumulators)
   - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
   - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
+  - [Coreness widths](#coreness-widths)
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
   - [Directed graphs](#directed-graphs)
 - [Python](#python)
@@ -108,6 +109,13 @@ cargo build --features rayon --release
 # Data Formats
 
 Input: **GGCAT Output Files** (`.lz4`), **Matrix Market** (`.mtx`) and cached internal formats (auto-created on first load).
+
+Matrix Market files must be sparse (`coordinate`) square matrices, with `pattern`, `integer`, `real`
+(or `double`) or `complex` entries, `general` (one arc per entry) or `symmetric`, `skew-symmetric`
+or `hermitian` (each entry an arc both ways, so an undirected graph). Entries' values are kept as
+edge labels when the graph is loaded with integer labels (which `real`, `complex` and
+`skew-symmetric` files' values can't be), and ignored otherwise. The number of entries must match
+the size line's.
 
 ## OOTB Datasets
 
@@ -430,17 +438,43 @@ at least `k - 2` triangles of the `k`-truss in a selected role (`Cycle` gives cy
 `FeedForward` flow trusses).
 
 ```rust
+use sparx::graph::{DiGraph, Graph};
 use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
 use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
 
-// undirected triangles and trussness as u32s
+// an undirected graph's triangles and trussness as u32s
+let g: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?;
 let triangles = Triangles::<_, _, _, u32>::new_tx(&g)?;
 let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 16)?;
 
-// directed triangles (u8 counts) and cycle trusses (u16 trussness)
-let cycles = DirectedTriangles::new(&g, DirectedTriangleType::Cycle)?;
-let cycle_trusses = AlgoPKT::<_, _, _, u16>::new_directed_tx(&g, DirectedTriangleType::Cycle, 16)?;
-let flow_trusses = AlgoBurkhardtEtAl::new_directed(&g, DirectedTriangleType::FeedForward)?;
+// a directed graph's triangles (u8 counts) and cycle trusses (u16 trussness); a turbofish names
+// the graph type too (`_`), or it defaults to an undirected `Graph`
+let d: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
+let cycles = DirectedTriangles::new(&d, DirectedTriangleType::Cycle)?;
+let cycle_trusses = AlgoPKT::<_, _, _, u16, _>::new_directed_tx(&d, DirectedTriangleType::Cycle, 16)?;
+let flow_trusses = AlgoBurkhardtEtAl::new_directed(&d, DirectedTriangleType::FeedForward)?;
+```
+
+## Coreness Widths
+
+Coreness values are `Cx` integers (`u8`, `u16`, `u32` or `u64`; see `k_core::count::CoreCount`),
+the same way trussness is stored as `Tx` integers. `u8` is the default (used by `new`,
+`get_or_compute` and the rest). The `_cx` constructors take wider types. Every node's degree must
+fit `Cx`, because the decompositions peel degrees stored as `Cx`. A larger degree fails with an
+error and never wraps around. A cached result of another width is recomputed, not misread.
+
+```rust
+use sparx::graph::{DiGraph, Graph};
+use sparx::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
+use sparx::k_core::directed::{CoreDegree, DirectedKCores};
+use sparx::k_core::liu_et_al::AlgoLiuEtAl;
+
+let g: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?;
+let cores = AlgoBatageljZaversnik::<_, _, _, u32>::new_cx(&g)?;
+let cores = AlgoLiuEtAl::<_, _, _, u16>::new_cx(&g, 16)?;
+
+let d: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
+let total_cores = DirectedKCores::<_, _, _, u32>::new_cx(&d, CoreDegree::Total)?;
 ```
 
 ## GPU HyperBall & Triangles
@@ -477,42 +511,55 @@ lavapipe (a software Vulkan driver) runs the same kernels on the CPU, which is h
 
 ## Directed Graphs
 
-A graph is *directed* when some arc `u -> v` has no reverse `v -> u` (counting parallel arcs). This
-is recorded once, when the graph's cache entry is built, so checking it is free: MatrixMarket
-`symmetric` files and graphs listing every arc both ways are undirected, `general` files with an
-unreciprocated arc are directed.
+Graphs come in two types, which share their memory-mapped storage and cache (they're both a
+`GraphMemoryMap`, told apart by a type parameter):
+
+- **`Graph`**: an undirected graph. Every edge is stored as an arc each way, so every arc
+  `u -> v` has a reverse `v -> u` (counting parallel arcs). Loading a directed file as a `Graph`
+  fails, naming an unreciprocated arc.
+- **`DiGraph`**: a directed graph. Any file loads as one.
+
+Algorithms take the type they're defined for, so running an undirected algorithm on a directed
+graph is a compile error, not a runtime check: undirected graphs pay nothing for directed
+support. Whether a file's arcs are symmetric is recorded once, when its cache entry is built
+(MatrixMarket `symmetric` files are by construction), so loading a `Graph` checks it for free.
 
 ```rust
-use sparx::graph::{Direction, GraphMemoryMap};
+use sparx::graph::{AnyGraph, DiGraph, Direction, Graph};
+use sparx::k_truss::pkt::AlgoPKT;
+use sparx::trails::bfs::BFSDists;
 
-let g: GraphMemoryMap<(), (), u32> = GraphMemoryMap::from_file("web.mtx", None, Some(16))?;
-assert!(g.is_directed()?);
-g.in_degree(0)?;                    // arcs into node 0 (`node_degree` counts arcs out)
-let t = g.transpose()?;             // every arc reversed
-let u = g.to_undirected()?;         // the underlying undirected graph
-let v = g.view(Direction::In)?;     // `Out` (the graph), `In` (its transpose), `Both` (undirected)
+let roads: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?; // errors if directed
+let web: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
+
+web.in_degree(0)?;                       // arcs into node 0 (`node_degree` counts arcs out)
+let t: &DiGraph<_, _, _> = web.transpose()?;      // every arc reversed
+let u: &Graph<_, _, _> = web.to_undirected()?;    // the underlying undirected graph
+let trussness = AlgoPKT::new(u)?;        // undirected algorithms run on it
+let to_0 = BFSDists::new_directed(&web, 0, Direction::In)?; // distances *to* node 0
+
+match AnyGraph::<(), (), u32>::from_file("unknown.mtx", None, Some(16))? {
+    AnyGraph::Undirected(g) => { /* symmetric: a Graph */ }
+    AnyGraph::Directed(g) => { /* a DiGraph */ }
+}
 ```
 
-The transpose and the underlying undirected graph are built once (in `O(|V| + |E|)`), cached next to
-the graph and dropped with it. They keep node ids, so per-node results computed on them are results
-of the graph. `to_undirected` keeps multiplicity: arcs both ways between two nodes become parallel
-edges, which triangle based algorithms count separately. On undirected graphs every view is the
-graph itself, so undirected graphs never pay for any of this.
+A `DiGraph`'s transpose and underlying undirected graph are built once (in `O(|V| + |E|)`), cached
+next to it and dropped with it; a symmetric `DiGraph` is its own transpose, and its undirected
+graph is the same cache entry. They keep node ids, so per-node results computed on them are
+results of the graph. `to_undirected` keeps multiplicity: arcs both ways between two nodes become
+parallel edges, which triangle based algorithms count separately. `Graph::into_directed` and
+`DiGraph::try_into_undirected` convert between the types.
 
-What each algorithm does with direction:
-
-| Algorithm | On directed graphs |
+| Takes | Algorithms |
 |---|---|
-| Triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut | Refused, with an error naming an unreciprocated arc: run them on `g.to_undirected()?` |
-| `DirectedTriangles`, PKT/Burkhardt et al. `new_directed*` | Directed triangles of any combination of roles (cycle, out, in, middleman) |
-| `DirectedClusteringCoefficient` | Fagiolo's clustering coefficient (networkx's `clustering` on directed graphs) |
-| `DirectedKCores::new(g, direction)` | k-cores by in-degree (`In`), out-degree (`Out`) or both (`Both`, networkx's `core_number`) |
-| `ConnectedComponents`, `StronglyConnectedComponents` | Weakly and strongly connected components |
-| `DirectedLouvain`, `directed_modularity` | Louvain communities by Leicht and Newman's directed modularity (networkx's `modularity` on directed graphs) |
-| BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall, exact closeness/harmonic/Lin centralities | Follow arcs out of nodes by default (`Direction::Out`: distances *from* a node); `new_directed(.., direction)` follows them in (`In`: distances *to* a node, networkx's convention) or both ways |
-| Hierholzer's Euler trails | Requires as many arcs in as out of every node (checked) |
+| `Graph` | Triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
+| `DiGraph` | `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs) |
+| either | BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall (CPU and GPU), exact closeness/harmonic/Lin centralities, `ConnectedComponents` (weak), `StronglyConnectedComponents`, `directed_modularity`, Hierholzer's Euler trails (on a directed graph, every node needs as many arcs in as out) |
 
-Algorithms that work on any graph give the usual results on undirected ones.
+The algorithms that work on either follow arcs out of nodes (`Direction::Out`: distances *from*
+a node). On a `DiGraph`, their `new_directed(.., Direction::In)` follows them in instead (distances
+*to* a node, networkx's convention); to ignore directions, run them on `to_undirected()`.
 
 ## Python
 
@@ -523,7 +570,7 @@ released and return `numpy` arrays --- see [`python/README.md`](python/README.md
 import sparx
 
 with sparx.Graph("./datasets/graphs/kmer_V2a.mtx", index="u32") as g:
-    coreness = g.k_core()
+    coreness = g.k_core(width="u16")
     trussness = g.k_truss(algorithm="pkt", width="u16")
     cycle_trusses = g.k_truss(kind="cycle")
     closeness = g.hyperball(precision=8)["closeness"]

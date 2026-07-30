@@ -14,7 +14,10 @@ use super::{AccumulatorAtomic, GraphCache};
 impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// Parses a [`MatrixMarket`](https://math.nist.gov/MatrixMarket/formats.html) file input into a [`GraphCache`] instance.
     ///
-    /// Input file is assumed have file extension .mtx and must be of type matrix coordinate pattern/integer symmetric/skew-symmetric/general.
+    /// Input file is assumed have file extension .mtx and must be a sparse (`coordinate`) square
+    /// matrix, of `pattern`, `integer`, `real`/`double` or `complex` entries, `general`,
+    /// `symmetric`, `skew-symmetric` or `hermitian` (see [`MtxHeader`]). Values are only read into
+    /// integer edge labels; unlabelled graphs ignore them.
     ///
     /// # Arguments
     ///
@@ -50,7 +53,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
         let threads = (get_physical() * 2).max(1);
 
-        let (node_count, _, _) = Self::parse_mtx_header(path.as_ref())?;
+        let node_count = Self::parse_mtx_header(path.as_ref())?.nodes;
 
         let h_fn = cache_file_name(&cache.offsets_filename(), &FileType::Helper(H::H), Some(0))?;
         let offset_size = match node_count.overflowing_add(1) {
@@ -139,22 +142,75 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         std::fs::remove_file(&d_fn)?;
 
         cache.merge_fsts(&[])?;
-        // mirrored entries make symmetric inputs undirected: no need to check
+        // mirrored entries make symmetric inputs symmetric: no need to check
         if Self::mtx_header_is_symmetric(path.as_ref())? {
-            cache.directed = Some(false);
+            cache.symmetric = Some(true);
         }
 
         Ok(cache)
     }
 }
 
-type MTXHeader = (usize, usize, usize);
+/// The kind of values a MatrixMarket file's entries carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MtxField {
+    /// None: entries are positions only.
+    Pattern,
+    Integer,
+    /// `real` or `double`.
+    Real,
+    Complex,
+}
+
+impl std::fmt::Display for MtxField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MtxField::Pattern => "pattern",
+            MtxField::Integer => "integer",
+            MtxField::Real => "real",
+            MtxField::Complex => "complex",
+        })
+    }
+}
+
+/// How a MatrixMarket file's entries stand for the matrix's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MtxSymmetry {
+    /// Each entry is one arc.
+    General,
+    /// Each off-diagonal entry `(i, j)` is also `(j, i)`: with the same value...
+    Symmetric,
+    /// ... with the negated value...
+    SkewSymmetric,
+    /// ... or with the conjugated value.
+    Hermitian,
+}
+
+impl MtxSymmetry {
+    /// Whether each off-diagonal entry stands for an arc both ways.
+    pub(super) fn mirrored(self) -> bool {
+        self != MtxSymmetry::General
+    }
+}
+
+/// A MatrixMarket file's header: its banner and size line.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MtxHeader {
+    pub(super) field: MtxField,
+    pub(super) symmetry: MtxSymmetry,
+    /// Rows, which are as many as columns: the graph's nodes.
+    pub(super) nodes: usize,
+    /// Entries listed.
+    pub(super) entries: usize,
+    /// Where the entries start, in bytes.
+    pub(super) data_offset: u64,
+}
 
 #[cfg(test)]
 mod test {
     use super::GraphCache;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
-    use crate::graph::{GraphMemoryMap, IndexType, label::VoidLabel};
+    use crate::graph::{IndexType, label::VoidLabel};
     use std::io::Write;
 
     fn write_tiny_mtx(path: &std::path::Path) {
@@ -213,7 +269,7 @@ mod test {
                 None,
             )
             .unwrap();
-            let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).unwrap();
+            let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).unwrap();
             for u in 0..graph.size() {
                 for (pos, v) in graph.index_node(u).zip(graph.neighbours(u).unwrap()) {
                     // targets are 0-based, weights were written for 1-based ids
@@ -284,7 +340,7 @@ mod test {
         )
         .expect("usize mtx parse should succeed");
         let graph_usize =
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
                 .expect("usize graph init should succeed");
 
         let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
@@ -295,7 +351,7 @@ mod test {
         )
         .expect("u32 mtx parse should succeed");
         let graph_u32 =
-            GraphMemoryMap::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
                 .expect("u32 graph init should succeed");
 
         assert_eq!(graph_usize.size(), graph_u32.size());
@@ -365,7 +421,7 @@ mod test {
             None,
         )
         .expect("default (AtomicUsize) accumulator mtx parse should succeed");
-        let graph_default = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(
+        let graph_default = crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(
             cache_default,
             Some(1),
         )
@@ -382,7 +438,7 @@ mod test {
         )
         .expect("AtomicU32 accumulator mtx parse should succeed");
         let graph_u32 =
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_u32, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_u32, Some(1))
                 .expect("AtomicU32 accumulator graph init should succeed");
 
         let cache_u16 = GraphCache::<VoidLabel, VoidLabel, usize>::from_file_with_accumulator::<
@@ -396,7 +452,7 @@ mod test {
         )
         .expect("AtomicU16 accumulator mtx parse should succeed");
         let graph_u16 =
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_u16, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_u16, Some(1))
                 .expect("AtomicU16 accumulator graph init should succeed");
 
         assert_eq!(graph_default.size(), graph_u32.size());
@@ -422,7 +478,7 @@ mod test {
 
         // (BFS rather than an undirected-only algorithm: the fixture is a directed graph)
         use crate::trails::bfs::BFSDists;
-        let distances = |g: &GraphMemoryMap<VoidLabel, VoidLabel, usize>, what: &str| -> Vec<usize> {
+        let distances = |g: &crate::graph::DiGraph<VoidLabel, VoidLabel, usize>, what: &str| -> Vec<usize> {
             BFSDists::new(g, 0)
                 .unwrap_or_else(|e| panic!("{what} accumulator bfs should succeed: {e}"))
                 .get_distances()
@@ -540,10 +596,10 @@ mod test {
         assert_eq!(converted_meta.edges, original_meta.edges);
 
         let graph_usize =
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
                 .expect("usize graph init should succeed");
         let graph_u32 =
-            GraphMemoryMap::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
                 .expect("converted u32 graph init should succeed");
 
         assert_eq!(graph_usize.size(), graph_u32.size());
@@ -639,6 +695,184 @@ mod test {
             "converting a 300-node graph down to a u8 Ix must fail, not silently truncate"
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file declaring another number of entries than it has fails, every time: the parser
+    /// used to stop at a racy running total, so its counting and placing passes could read
+    /// different entries, leaving unfilled (and, for `symmetric` files, unreciprocated) arcs.
+    #[test]
+    fn mtx_entry_count_must_match_the_header() {
+        use crate::graph::{DiGraph, Graph};
+        let dir = unique_test_dir("mtx_nnz");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let mut state = 7u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        let entries: Vec<(usize, usize)> = (0..20_000).map(|_| (1 + next() % 200, 1 + next() % 200)).collect();
+        for (name, declared, kind) in [("under", 3, "symmetric"), ("over", 30_000, "symmetric"), ("under_general", 3, "general")] {
+            let path = dir.join(format!("{name}.mtx"));
+            let mut text = format!("%%MatrixMarket matrix coordinate pattern {kind}\n200 200 {declared}\n");
+            for (i, j) in &entries {
+                text += &format!("{i} {j}\n");
+            }
+            std::fs::write(&path, text).unwrap();
+            for trial in 0..5 {
+                let id = format!("mtx_nnz_{name}_{trial}_{}", unique_run_tag());
+                let err = Graph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id.clone()), Some(4))
+                    .err()
+                    .unwrap_or_else(|| panic!("{name}, trial {trial}: parsed"));
+                assert!(err.to_string().contains("declares"), "{name}: {err}");
+                assert!(DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id), Some(4)).is_err());
+            }
+        }
+        // the files' 20 000 entries, declared right, parse
+        let path = dir.join("right.mtx");
+        let mut text = "%%MatrixMarket matrix coordinate pattern symmetric\n200 200 20000\n".to_string();
+        for (i, j) in &entries {
+            text += &format!("{i} {j}\n");
+        }
+        std::fs::write(&path, text).unwrap();
+        let id = format!("mtx_nnz_right_{}", unique_run_tag());
+        let g = Graph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id), Some(4)).unwrap();
+        assert!(g.is_symmetric().unwrap());
+        assert_eq!(g.width(), 2 * entries.iter().filter(|(i, j)| i != j).count() + entries.iter().filter(|(i, j)| i == j).count());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[repr(transparent)]
+    struct Label(usize);
+    unsafe impl bytemuck::Zeroable for Label {}
+    unsafe impl bytemuck::Pod for Label {}
+    impl crate::graph::E for Label {
+        fn new(v: usize) -> Self {
+            Label(v)
+        }
+        fn is_labeled() -> bool {
+            true
+        }
+    }
+
+    fn write(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+        let path = dir.join(format!("{name}.mtx"));
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn arcs<Dir: crate::graph::Directedness>(
+        g: &crate::graph::GraphMemoryMap<VoidLabel, VoidLabel, usize, Dir>,
+    ) -> Vec<(usize, usize)> {
+        (0..g.size()).flat_map(|u| g.neighbours(u).unwrap().map(move |v| (u, v))).collect()
+    }
+
+    /// Real, double and complex files load their structure (values ignored) like the same
+    /// pattern files; hermitian and skew-symmetric ones are mirrored like symmetric ones.
+    #[test]
+    fn mtx_real_complex_and_hermitian_inputs_load_their_structure() {
+        use crate::graph::{DiGraph, Graph};
+        let dir = unique_test_dir("mtx_fields");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let tag = unique_run_tag();
+        // entries (1-based) and, per field, how a value is written
+        let entries = [(2, 1), (3, 1), (3, 3), (4, 2)];
+        let file = |field: &str, symmetry: &str, value: &dyn Fn(usize) -> String| {
+            let mut text = format!("%%MatrixMarket matrix coordinate {field} {symmetry}\n% a comment\n\n4 4 {}\n", entries.len());
+            for (k, (i, j)) in entries.iter().enumerate() {
+                text += &format!("{i} {j}{}\n", value(k));
+            }
+            text
+        };
+        let none = |_: usize| String::new();
+        let real = |k: usize| [" -1.5", " 2.0e-3", " 0", " 7"][k].to_string();
+        let complex = |k: usize| [" 1.0 -2.0", " 0.5 0", " 3 0", " -1e2 4"][k].to_string();
+        for (symmetry, kind) in [("general", "general"), ("symmetric", "symmetric")] {
+            let reference = write(&dir, &format!("pattern_{symmetry}"), &file("pattern", symmetry, &none));
+            let reference = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&reference, Some(format!("mtx_fields_ref_{kind}_{tag}")), Some(2)).unwrap();
+            for (field, value) in [("real", &real as &dyn Fn(usize) -> String), ("double", &real), ("complex", &complex), ("integer", &|k: usize| format!(" {}", k + 1))] {
+                let path = write(&dir, &format!("{field}_{symmetry}"), &file(field, symmetry, value));
+                let g = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(format!("mtx_fields_{field}_{kind}_{tag}")), Some(2))
+                    .unwrap_or_else(|e| panic!("{field} {symmetry}: {e}"));
+                assert_eq!(arcs(&g), arcs(&reference), "{field} {symmetry}");
+                assert_eq!(g.is_symmetric().unwrap(), symmetry != "general", "{field} {symmetry}");
+            }
+        }
+        // hermitian (complex) and skew-symmetric files are mirrored: undirected graphs
+        let symmetric = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(
+            &write(&dir, "pattern_sym", &file("pattern", "symmetric", &none)), Some(format!("mtx_fields_sym_{tag}")), Some(2)).unwrap();
+        for (name, text) in [("hermitian", file("complex", "hermitian", &complex)), ("skew", file("real", "skew-symmetric", &real)), ("skew_int", file("integer", "skew-symmetric", &|k: usize| format!(" {}", k + 1)))] {
+            let path = write(&dir, name, &text);
+            let g = Graph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(format!("mtx_fields_{name}_{tag}")), Some(2))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(arcs(&g), arcs(&symmetric), "{name}");
+            assert_eq!(g.metadata().unwrap().symmetric, Some(true), "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Edge labels are non-negative integers: other values are refused, with what to do instead.
+    #[test]
+    fn mtx_values_labels_cannot_hold_are_refused() {
+        use crate::graph::DiGraph;
+        let dir = unique_test_dir("mtx_label_values");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let tag = unique_run_tag();
+        for (name, text, expected) in [
+            ("real", "%%MatrixMarket matrix coordinate real general\n2 2 1\n1 2 0.5\n", "unlabelled"),
+            ("complex", "%%MatrixMarket matrix coordinate complex hermitian\n2 2 1\n2 1 1 1\n", "unlabelled"),
+            ("skew", "%%MatrixMarket matrix coordinate integer skew-symmetric\n2 2 1\n2 1 3\n", "skew-symmetric"),
+            ("negative", "%%MatrixMarket matrix coordinate integer general\n2 2 1\n1 2 -3\n", "non-negative integer"),
+        ] {
+            let path = write(&dir, name, text);
+            let id = format!("mtx_label_values_{name}_{tag}");
+            let err = DiGraph::<VoidLabel, Label, usize>::from_file(&path, Some(id.clone()), Some(2))
+                .err()
+                .unwrap_or_else(|| panic!("{name}: loaded"));
+            assert!(err.to_string().contains(expected), "{name}: {err}");
+            let hashed = crate::graph::cache::utils::id_from_filename(&id).unwrap();
+            let left: Vec<_> = glob::glob(&format!("{}*{hashed}.*", crate::graph::cache::utils::CACHE_DIR)).unwrap().flatten().collect();
+            assert!(left.is_empty(), "{name}: left {left:?}");
+            // the same files load unlabelled
+            DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(format!("{id}_unlabelled")), Some(2))
+                .unwrap_or_else(|e| panic!("{name}, unlabelled: {e}"));
+        }
+        // integer values are kept
+        let path = write(&dir, "integer", "%%MatrixMarket matrix coordinate integer general\n2 2 2\n1 2 5\n2 1 7\n");
+        let g = DiGraph::<VoidLabel, Label, usize>::from_file(&path, Some(format!("mtx_label_values_int_{tag}")), Some(2)).unwrap();
+        assert_eq!((g.edge_label(0), g.edge_label(1)), (Label(5), Label(7)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files that aren't sparse square matrices are refused, saying why.
+    #[test]
+    fn mtx_headers_are_checked() {
+        use crate::graph::DiGraph;
+        let dir = unique_test_dir("mtx_headers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let tag = unique_run_tag();
+        for (name, text, expected) in [
+            ("array", "%%MatrixMarket matrix array real general\n2 2\n1\n0\n0\n1\n", "coordinate"),
+            ("rectangular", "%%MatrixMarket matrix coordinate pattern general\n2 3 1\n1 3\n", "square"),
+            ("field", "%%MatrixMarket matrix coordinate boolean general\n2 2 1\n1 2\n", "unknown MatrixMarket field"),
+            ("symmetry", "%%MatrixMarket matrix coordinate pattern upper\n2 2 1\n1 2\n", "unknown MatrixMarket symmetry"),
+            ("banner", "%MatrixMarket matrix coordinate pattern general\n2 2 1\n1 2\n", "%%MatrixMarket"),
+            ("size", "%%MatrixMarket matrix coordinate pattern general\n2 two 1\n1 2\n", "columns"),
+        ] {
+            let path = write(&dir, name, text);
+            let err = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(format!("mtx_headers_{name}_{tag}")), Some(2))
+                .err()
+                .unwrap_or_else(|| panic!("{name}: loaded"));
+            assert!(err.to_string().contains(expected), "{name}: {err}");
+        }
+        // case and spacing don't matter
+        let path = write(&dir, "case", "%%MatrixMarket  MATRIX Coordinate REAL   General\n2 2 1\n1 2 1.0\n");
+        DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(format!("mtx_headers_case_{tag}")), Some(2)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 }
