@@ -793,6 +793,164 @@ impl<T: Debug + Copy + Clone + Eq> SharedQueueMut<T> {
     }
 }
 
+/// A scratch array in a memmapped file of its own, removed once the array is dropped: an
+/// algorithm's working memory, kept out of the heap however large the graph. Zeroed when
+/// created.
+///
+/// Its elements are never dropped: meant for plain data.
+#[derive(Debug)]
+pub(crate) struct ScratchMem<T> {
+    mem: ManuallyDrop<AbstractedProceduralMemoryMut<T>>,
+    file_name: String,
+}
+
+#[allow(dead_code)]
+impl<T> ScratchMem<T> {
+    /// A zeroed array of `len` elements, in a new file at `file_name` (in place of any there).
+    pub(crate) fn new(file_name: String, len: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let mem = SharedSliceMut::<T>::abst_mem_mut(&file_name, len, true)?;
+        Ok(Self {
+            mem: ManuallyDrop::new(mem),
+            file_name,
+        })
+    }
+
+    /// An array of `len` elements, all `value`.
+    pub(crate) fn filled(file_name: String, len: usize, value: T) -> Result<Self, Box<dyn std::error::Error>>
+    where
+        T: Copy,
+    {
+        let mut mem = Self::new(file_name, len)?;
+        mem.fill(value);
+        Ok(mem)
+    }
+
+    #[inline(always)]
+    pub(crate) fn shared_slice(&self) -> SharedSliceMut<T> {
+        self.mem.shared_slice()
+    }
+}
+
+impl<T> std::ops::Deref for ScratchMem<T> {
+    type Target = [T];
+    #[inline(always)]
+    fn deref(&self) -> &[T] {
+        self.mem.as_slice()
+    }
+}
+
+impl<T> std::ops::DerefMut for ScratchMem<T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [T] {
+        self.mem.as_mut_slice()
+    }
+}
+
+impl<T> Drop for ScratchMem<T> {
+    fn drop(&mut self) {
+        // unmapped first: some platforms won't remove a mapped file
+        unsafe { ManuallyDrop::drop(&mut self.mem) };
+        let _ = remove_if_exists(&self.file_name);
+    }
+}
+
+/// A stack of at most a given number of elements, in a memmapped scratch file (see
+/// [`ScratchMem`]): for depth first searches and the like, whose stacks may grow as large as the
+/// graph.
+///
+/// Unlike [`ScratchMem`]'s, its elements are owned (and dropped) as a [`Vec`]'s are.
+#[derive(Debug)]
+pub(crate) struct ScratchStack<T> {
+    mem: ScratchMem<std::mem::MaybeUninit<T>>,
+    len: usize,
+}
+
+#[allow(dead_code)]
+impl<T> ScratchStack<T> {
+    /// An empty stack of room for `capacity` elements, in a new file at `file_name`.
+    pub(crate) fn new(file_name: String, capacity: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            mem: ScratchMem::new(file_name, capacity)?,
+            len: 0,
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.mem.len()
+    }
+
+    /// Pushes `value` on the stack.
+    ///
+    /// # Panics
+    ///
+    /// If the stack is full.
+    #[inline(always)]
+    pub(crate) fn push(&mut self, value: T) {
+        assert!(self.len < self.capacity(), "error scratch stack of {} elements is full", self.capacity());
+        self.mem[self.len].write(value);
+        self.len += 1;
+    }
+
+    #[inline(always)]
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        // initialized (pushed), and no longer the stack's
+        Some(unsafe { self.mem[self.len].assume_init_read() })
+    }
+
+    #[inline(always)]
+    pub(crate) fn last(&self) -> Option<&T> {
+        self.as_slice().last()
+    }
+
+    #[inline(always)]
+    pub(crate) fn last_mut(&mut self) -> Option<&mut T> {
+        self.as_mut_slice().last_mut()
+    }
+
+    /// Removes (and drops) every element.
+    pub(crate) fn clear(&mut self) {
+        let elements: *mut [T] = self.as_mut_slice();
+        self.len = 0;
+        // initialized, and no longer the stack's
+        unsafe { std::ptr::drop_in_place(elements) };
+    }
+
+    /// The stack's elements, bottom first.
+    #[inline(always)]
+    pub(crate) fn as_slice(&self) -> &[T] {
+        // the first `len` are initialized
+        unsafe { std::slice::from_raw_parts(self.mem.as_ptr() as *const T, self.len) }
+    }
+
+    /// The stack's elements, bottom first.
+    #[inline(always)]
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        // the first `len` are initialized
+        unsafe { std::slice::from_raw_parts_mut(self.mem.as_mut_ptr() as *mut T, self.len) }
+    }
+}
+
+impl<T> Drop for ScratchStack<T> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,6 +959,73 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn scratch_mem_is_zeroed_and_removed_when_dropped() {
+        let dir = std::env::temp_dir().join(format!("scratch_mem_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mem.tmp").to_string_lossy().into_owned();
+        {
+            let mut mem = ScratchMem::<u64>::new(path.clone(), 1000).unwrap();
+            assert!(mem.iter().all(|&x| x == 0));
+            mem[999] = 7;
+            assert_eq!(mem[999], 7);
+            assert!(Path::new(&path).exists());
+            let filled = ScratchMem::<u32>::filled(dir.join("f.tmp").to_string_lossy().into_owned(), 3, 9).unwrap();
+            assert_eq!(&filled[..], &[9, 9, 9]);
+        }
+        assert!(!Path::new(&path).exists());
+        assert!(!dir.join("f.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scratch_stack_behaves_as_a_vec() {
+        use std::rc::Rc;
+        let dir = std::env::temp_dir().join(format!("scratch_stack_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stack.tmp").to_string_lossy().into_owned();
+        let mut s = ScratchStack::<(u32, u64)>::new(path.clone(), 3).unwrap();
+        assert!(s.is_empty() && s.pop().is_none() && s.last().is_none());
+        s.push((1, 10));
+        s.push((2, 20));
+        s.last_mut().unwrap().1 += 1;
+        assert_eq!(s.as_slice(), &[(1, 10), (2, 21)]);
+        assert_eq!(s.pop(), Some((2, 21)));
+        s.push((3, 30));
+        s.push((4, 40));
+        assert_eq!(s.len(), 3);
+        s.as_mut_slice().reverse();
+        assert_eq!(s.as_slice(), &[(4, 40), (3, 30), (1, 10)]);
+        s.clear();
+        assert!(s.is_empty());
+        drop(s);
+        assert!(!Path::new(&path).exists());
+
+        // owned elements are dropped exactly once: popped, cleared or left on the stack
+        let rc = Rc::new(());
+        let mut s = ScratchStack::<Rc<()>>::new(path.clone(), 4).unwrap();
+        for _ in 0..4 {
+            s.push(rc.clone());
+        }
+        drop(s.pop());
+        assert_eq!(Rc::strong_count(&rc), 4);
+        drop(s);
+        assert_eq!(Rc::strong_count(&rc), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "full")]
+    fn scratch_stack_overflow_panics() {
+        let path = std::env::temp_dir()
+            .join(format!("scratch_stack_full_{}.tmp", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let mut s = ScratchStack::<u8>::new(path, 1).unwrap();
+        s.push(1);
+        s.push(2);
+    }
 
     // ---------------- helpers ----------------
 
