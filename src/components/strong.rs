@@ -22,6 +22,8 @@ pub struct StronglyConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the component of each node.
     components: AbstractedProceduralMemoryMut<Ix>,
+    /// Memmapped slice containing the number of nodes of each component.
+    sizes: AbstractedProceduralMemoryMut<usize>,
     /// Number of components.
     count: usize,
 }
@@ -40,13 +42,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
         let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
-        let mut scc = Self {
+        let count = Self::compute(g, &components)?;
+        let sizes = super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, false)?;
+        Ok(Self {
             g,
             components,
-            count: 0,
-        };
-        scc.compute()?;
-        Ok(scc)
+            sizes,
+            count,
+        })
     }
 
     /// Searches for a previously cached result, and if not found computes the strongly
@@ -60,9 +63,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
             && components.as_slice().len() == g.size()
         {
             let count = components.as_slice().iter().map(|c| c.index() + 1).max().unwrap_or(0);
+            let sizes =
+                super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, true)?;
             return Ok(Self {
                 g,
                 components,
+                sizes,
                 count,
             });
         }
@@ -85,13 +91,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
         self.count
     }
 
-    /// Returns the number of nodes of each component.
-    pub fn sizes(&self) -> Vec<usize> {
-        let mut sizes = vec![0; self.count];
-        for c in self.components() {
-            sizes[c.index()] += 1;
-        }
-        sizes
+    /// Returns a slice containing the number of nodes of each component.
+    pub fn sizes(&self) -> &[usize] {
+        self.sizes.as_slice()
+    }
+
+    /// Returns the number of nodes of a given component.
+    pub fn size(&self, component: usize) -> usize {
+        assert!(component < self.count);
+        *self.sizes.get(component)
+    }
+
+    /// The (persistent) memmapped file holding the number of nodes of each component.
+    fn sizes_filename(g: &GraphMemoryMap<N, E, Ix, Dir>) -> Result<String, Box<dyn std::error::Error>> {
+        g.build_pers_cache_filename(CacheFile::StronglyConnectedComponents, Some(0))
     }
 
     /// Removes all cached files pertaining to this algorithm's execution's results.
@@ -100,28 +113,28 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
         this.g.cleanup_cache(CacheFile::StronglyConnectedComponents)?;
         let out_fn = this.g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
         crate::shared_slice::remove_if_exists(out_fn)?;
+        crate::shared_slice::remove_if_exists(Self::sizes_filename(this.g)?)?;
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Labels every node with its component, and returns the number of components.
+    fn compute(
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
+        components_mem: &AbstractedProceduralMemoryMut<Ix>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         // symmetric graphs' strong components are their weak ones: found in parallel
-        if self.g.is_symmetric()? {
-            self.count = super::weak::label_components(
-                self.g,
-                &self.components,
-                CacheFile::StronglyConnectedComponents,
-            )?;
-            return Ok(());
+        if g.is_symmetric()? {
+            return super::weak::label_components(g, components_mem, CacheFile::StronglyConnectedComponents);
         }
-        let node_count = self.g.size();
+        let node_count = g.size();
         if node_count == 0 {
-            return Ok(());
+            return Ok(0);
         }
-        let edge_count = self.g.width();
-        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
+        let edge_count = g.width();
+        let index_ptr = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
+        let neighbours_ptr = SharedSlice::<Ix>::new(g.neighbours_ptr(), edge_count);
 
-        let helper = |seq| self.g.build_cache_filename(CacheFile::StronglyConnectedComponents, Some(seq));
+        let helper = |seq| g.build_cache_filename(CacheFile::StronglyConnectedComponents, Some(seq));
         let helpers = [helper(0)?, helper(1)?, helper(2)?, helper(3)?, helper(4)?];
         // discovery order (1-based: 0 is undiscovered) and lowest discovery order reachable
         let mut order = SharedSliceMut::<usize>::abst_mem_mut(&helpers[0], node_count, true)?;
@@ -138,7 +151,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
             on_stack.as_mut_slice(),
             path.as_mut_slice(),
         );
-        let mut components = self.components.shared_slice();
+        let mut components = components_mem.shared_slice();
 
         let (mut discovered, mut stack_len, mut count) = (0usize, 0usize, 0usize);
         for source in 0..node_count {
@@ -209,13 +222,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
             }
             *components.get_mut(u) = Ix::new(renumber[c]);
         }
-        self.count = count;
-
-        self.components.flush_async()?;
+        components_mem.flush_async()?;
         for f in &helpers {
             let _ = std::fs::remove_file(f);
         }
-        Ok(())
+        Ok(count)
     }
 }
 
@@ -256,6 +267,6 @@ mod test {
         let g = graph("undirected", "symmetric", 6, &[(0, 1), (1, 2), (3, 4)]);
         let scc = StronglyConnectedComponents::new(&g).unwrap();
         assert_eq!(scc.components(), &[0, 0, 0, 1, 1, 2]);
-        assert_eq!(scc.sizes(), vec![3, 2, 1]);
+        assert_eq!(scc.sizes(), &[3, 2, 1]);
     }
 }

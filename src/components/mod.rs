@@ -7,6 +7,37 @@
 pub mod strong;
 pub mod weak;
 
+use crate::graph;
+use crate::shared_slice::*;
+use std::path::Path;
+
+/// The number of nodes of each of `count` components, in a memmapped file (`file`): reused if
+/// it holds `count` sizes, counted from `components` otherwise.
+///
+/// Sizes are `usize`s rather than `Ix`s: a component may have as many nodes as the graph, one
+/// more than the largest node id.
+pub(super) fn component_sizes<Ix: graph::IndexType>(
+    components: &[Ix],
+    count: usize,
+    file: &str,
+    reuse: bool,
+) -> Result<AbstractedProceduralMemoryMut<usize>, Box<dyn std::error::Error>> {
+    if reuse
+        && Path::new(file).exists()
+        && let Ok(sizes) = AbstractedProceduralMemoryMut::<usize>::from_file_name(file)
+        && sizes.as_slice().len() == count
+    {
+        return Ok(sizes);
+    }
+    let mut sizes = SharedSliceMut::<usize>::abst_mem_mut(file, count, true)?;
+    let s = sizes.as_mut_slice();
+    for c in components {
+        s[c.index()] += 1;
+    }
+    sizes.flush_async()?;
+    Ok(sizes)
+}
+
 #[cfg(test)]
 pub(crate) mod test_utils {
     use crate::graph::{DiGraph, Directed};

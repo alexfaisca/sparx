@@ -427,20 +427,19 @@ fn components<I: Ix, Dir: Directedness>(g: &G<I, Dir>, strong: bool) -> Res<Out>
     cleaning(g, || {
         let (components, count, sizes) = if strong {
             let mut c = StronglyConnectedComponents::new(g)?;
-            let r = (ix_array(c.components()), c.count(), c.sizes());
+            let r = (ix_array(c.components()), c.count(), array(c.sizes().iter().map(|&s| s as i64).collect::<Vec<_>>()));
             c.drop_cache()?;
             r
         } else {
             let mut c = ConnectedComponents::new(g)?;
-            let r = (ix_array(c.components()), c.count(), c.sizes());
+            let r = (ix_array(c.components()), c.count(), array(c.sizes().iter().map(|&s| s as i64).collect::<Vec<_>>()));
             c.drop_cache()?;
             r
         };
-        let sizes: Vec<i64> = sizes.into_iter().map(|s| s as i64).collect();
         Ok(dict(vec![
             ("components", components),
             ("count", number(count)),
-            ("sizes", array(sizes)),
+            ("sizes", sizes),
         ]))
     })
 }

@@ -23,6 +23,8 @@ pub struct ConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexTyp
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the component of each node.
     components: AbstractedProceduralMemoryMut<Ix>,
+    /// Memmapped slice containing the number of nodes of each component.
+    sizes: AbstractedProceduralMemoryMut<usize>,
     /// Number of components.
     count: usize,
 }
@@ -42,13 +44,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
         let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
-        let mut cc = Self {
+        let count = Self::compute(g, &components)?;
+        let sizes = super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, false)?;
+        Ok(Self {
             g,
             components,
-            count: 0,
-        };
-        cc.compute()?;
-        Ok(cc)
+            sizes,
+            count,
+        })
     }
 
     /// Searches for a previously cached result, and if not found computes the weakly connected
@@ -63,9 +66,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
         {
             // components are numbered in order: the last one is the largest number
             let count = components.as_slice().iter().map(|c| c.index() + 1).max().unwrap_or(0);
+            let sizes =
+                super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, true)?;
             return Ok(Self {
                 g,
                 components,
+                sizes,
                 count,
             });
         }
@@ -88,13 +94,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
         self.count
     }
 
-    /// Returns the number of nodes of each component.
-    pub fn sizes(&self) -> Vec<usize> {
-        let mut sizes = vec![0; self.count];
-        for c in self.components() {
-            sizes[c.index()] += 1;
-        }
-        sizes
+    /// Returns a slice containing the number of nodes of each component.
+    pub fn sizes(&self) -> &[usize] {
+        self.sizes.as_slice()
+    }
+
+    /// Returns the number of nodes of a given component.
+    pub fn size(&self, component: usize) -> usize {
+        assert!(component < self.count);
+        *self.sizes.get(component)
+    }
+
+    /// The (persistent) memmapped file holding the number of nodes of each component.
+    fn sizes_filename(g: &GraphMemoryMap<N, E, Ix, Dir>) -> Result<String, Box<dyn std::error::Error>> {
+        g.build_pers_cache_filename(CacheFile::ConnectedComponents, Some(0))
     }
 
     /// Removes all cached files pertaining to this algorithm's execution's results.
@@ -103,12 +116,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
         this.g.cleanup_cache(CacheFile::ConnectedComponents)?;
         let out_fn = this.g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
         crate::shared_slice::remove_if_exists(out_fn)?;
+        crate::shared_slice::remove_if_exists(Self::sizes_filename(this.g)?)?;
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.count = label_components(self.g, &self.components, CacheFile::ConnectedComponents)?;
-        Ok(())
+    /// Labels every node with its component, and returns the number of components.
+    fn compute(
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
+        components: &AbstractedProceduralMemoryMut<Ix>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        label_components(g, components, CacheFile::ConnectedComponents)
     }
 }
 
@@ -288,8 +305,20 @@ mod test {
         let cc = ConnectedComponents::new(&g).unwrap();
         assert_eq!(cc.components(), &[0, 0, 0, 1, 1, 2, 3]);
         assert_eq!(cc.count(), 4);
-        assert_eq!(cc.sizes(), vec![3, 2, 1, 1]);
+        assert_eq!(cc.sizes(), &[3, 2, 1, 1]);
+        assert_eq!(cc.size(0), 3);
         let cached = ConnectedComponents::get_or_compute(&g).unwrap();
         assert_eq!(cached.count(), 4);
+        assert_eq!(cached.sizes(), &[3, 2, 1, 1]);
+
+        // sizes live in a file of their own, recounted if it's gone, removed with the cache
+        let s_fn = ConnectedComponents::sizes_filename(&g).unwrap();
+        assert!(Path::new(&s_fn).exists());
+        drop(cached);
+        std::fs::remove_file(&s_fn).unwrap();
+        let mut recounted = ConnectedComponents::get_or_compute(&g).unwrap();
+        assert_eq!(recounted.sizes(), &[3, 2, 1, 1]);
+        recounted.drop_cache().unwrap();
+        assert!(!Path::new(&s_fn).exists());
     }
 }
