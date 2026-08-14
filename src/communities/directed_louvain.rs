@@ -2,13 +2,62 @@ use crate::graph;
 use crate::graph::*;
 use crate::shared_slice::*;
 
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::mem::ManuallyDrop;
 
 /// Default maximum number of local moving phases of [`DirectedLouvain`].
 const DEFAULT_MAX_PASSES: usize = 256;
 /// Default minimum modularity gain for a local moving phase to count as an improvement.
 const DEFAULT_TOLERANCE: f64 = 0.0;
+/// First sequence number of [`directed_modularity`]'s scratch files (those of [`DirectedLouvain`]
+/// start at `0`): the two never share one, even run at once on the same graph.
+const MODULARITY_SCRATCH: usize = 1 << (usize::BITS - 1);
+
+/// Scratch arrays of one run, each in a memmapped file of its own (see [`ScratchMem`]): working
+/// memory as large as the graph stays out of the heap.
+struct Scratch<'a> {
+    name: &'a dyn Fn(usize) -> Result<String, Box<dyn std::error::Error>>,
+    next: Cell<usize>,
+}
+
+impl<'a> Scratch<'a> {
+    fn new(name: &'a dyn Fn(usize) -> Result<String, Box<dyn std::error::Error>>, first: usize) -> Self {
+        Self {
+            name,
+            next: Cell::new(first),
+        }
+    }
+
+    fn file_name(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let seq = self.next.get();
+        self.next.set(seq + 1);
+        (self.name)(seq)
+    }
+
+    /// A zeroed array.
+    fn zeroed<T>(&self, len: usize) -> Result<ScratchMem<T>, Box<dyn std::error::Error>> {
+        ScratchMem::new(self.file_name()?, len)
+    }
+
+    /// An array of `value`s.
+    fn filled<T: Copy>(&self, len: usize, value: T) -> Result<ScratchMem<T>, Box<dyn std::error::Error>> {
+        ScratchMem::filled(self.file_name()?, len, value)
+    }
+
+    /// The array `0, 1, .., len - 1`: every node in a community of its own.
+    fn singletons(&self, len: usize) -> Result<ScratchMem<usize>, Box<dyn std::error::Error>> {
+        let mut mem = self.zeroed::<usize>(len)?;
+        for (i, c) in mem.iter_mut().enumerate() {
+            *c = i;
+        }
+        Ok(mem)
+    }
+
+    /// An empty stack of room for `capacity` elements.
+    fn stack<T>(&self, capacity: usize) -> Result<ScratchStack<T>, Box<dyn std::error::Error>> {
+        ScratchStack::new(self.file_name()?, capacity)
+    }
+}
 
 /// Leicht and Newman's directed modularity of a partition of a [`GraphMemoryMap`] instance
 /// (["Community structure in directed networks"](https://doi.org/10.1103/PhysRevLett.100.118703)):
@@ -45,32 +94,47 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: 
         return Ok(0.0);
     }
 
-    // labels as dense indices: as they are if small enough, renumbered otherwise
-    let labels: Vec<usize> = communities.iter().map(|c| c.index()).collect();
-    let dense: Vec<usize> = if labels.iter().all(|&c| c < node_count) {
-        labels
+    let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
+    let scratch = Scratch::new(&name, MODULARITY_SCRATCH);
+
+    // labels as dense indices: as they are if small enough, by rank among the distinct labels
+    // otherwise (sorted, in a scratch file)
+    let distinct = if communities.iter().all(|c| c.index() < node_count) {
+        None
     } else {
-        let mut ids = HashMap::new();
-        labels
-            .iter()
-            .map(|c| {
-                let next = ids.len();
-                *ids.entry(*c).or_insert(next)
-            })
-            .collect()
+        let mut labels = scratch.zeroed::<usize>(node_count)?;
+        for (l, c) in labels.iter_mut().zip(communities) {
+            *l = c.index();
+        }
+        labels.sort_unstable();
+        let mut len = 0;
+        for i in 0..node_count {
+            if i == 0 || labels[i] != labels[len - 1] {
+                labels[len] = labels[i];
+                len += 1;
+            }
+        }
+        Some((labels, len))
+    };
+    let dense = |u: usize| -> usize {
+        let c = communities[u].index();
+        match &distinct {
+            None => c,
+            Some((labels, len)) => labels[..*len].partition_point(|&l| l < c),
+        }
     };
 
     let offsets = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
     let neighbours = SharedSlice::<Ix>::new(g.neighbours_ptr(), arc_count);
     let (offsets, neighbours) = (offsets.as_slice(), neighbours.as_slice());
 
-    let mut sigma_out = vec![0u64; node_count];
-    let mut sigma_in = vec![0u64; node_count];
+    let mut sigma_out = scratch.zeroed::<u64>(node_count)?;
+    let mut sigma_in = scratch.zeroed::<u64>(node_count)?;
     let mut internal = 0u64;
     for u in 0..node_count {
-        let cu = dense[u];
+        let cu = dense(u);
         for v in &neighbours[offsets[u].index()..offsets[u + 1].index()] {
-            let cv = dense[v.index()];
+            let cv = dense(v.index());
             sigma_out[cu] += 1;
             sigma_in[cv] += 1;
             if cu == cv {
@@ -80,7 +144,7 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: 
     }
     let expected: u128 = sigma_out
         .iter()
-        .zip(&sigma_in)
+        .zip(sigma_in.iter())
         .map(|(&o, &i)| o as u128 * i as u128)
         .sum();
     let m = arc_count as f64;
@@ -117,8 +181,9 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: 
 /// The result is thus a local optimum for single node moves: no node gains modularity by moving
 /// to a neighbour's community.
 ///
-/// The supergraphs are held in memory (as weighted CSRs of out- and in-arcs); the original
-/// graph is read through its CSR and its [`transpose`]. Communities are numbered by their
+/// The supergraphs (weighted CSRs of out- and in-arcs) and every working array are held in
+/// memmapped scratch files, removed as soon as they're no longer needed; the original graph is
+/// read through its CSR and its [`transpose`]. Communities are numbered by their
 /// smallest node, as connected components are.
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
@@ -237,46 +302,50 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
         }
         let base = BaseArcs::new(self.g)?;
         let m = self.g.width() as u64;
+        let g = self.g;
+        let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
+        let scratch = Scratch::new(&name, 0);
 
-        let mut part: Vec<usize> = (0..node_count).collect();
+        let mut part = scratch.singletons(node_count)?;
         let mut passes = 0;
         'outer: while passes < max_passes {
             // local moving on the graph itself: from singletons at first, later refining the
             // partition found on the supergraphs
-            let (moves, gain) = local_move(&base, &mut part, m, tolerance);
+            let (moves, gain) = local_move(&base, &mut part, m, tolerance, &scratch)?;
             passes += 1;
-            let mut count = renumber(&mut part);
+            let mut count = renumber(&mut part, &scratch)?;
             if moves == 0 || gain <= tolerance {
                 break;
             }
-            let mut level = Supergraph::aggregate(&base, &part, count);
+            let mut level = Supergraph::aggregate(&base, &part, count, &scratch)?;
             loop {
                 if passes >= max_passes {
                     break 'outer;
                 }
-                let mut comm: Vec<usize> = (0..level.len()).collect();
-                let (moves, gain) = local_move(&level, &mut comm, m, tolerance);
+                let mut comm = scratch.singletons(level.len())?;
+                let (moves, gain) = local_move(&level, &mut comm, m, tolerance, &scratch)?;
                 passes += 1;
                 if moves == 0 {
                     break;
                 }
-                count = renumber(&mut comm);
+                count = renumber(&mut comm, &scratch)?;
                 for p in part.iter_mut() {
                     *p = comm[*p];
                 }
                 if gain <= tolerance {
                     break;
                 }
-                level = Supergraph::aggregate(&level, &comm, count);
+                level = Supergraph::aggregate(&level, &comm, count, &scratch)?;
             }
         }
 
         // numbered by smallest node
-        self.community_count = renumber(&mut part);
+        self.community_count = renumber(&mut part, &scratch)?;
         let out = self.communities.as_mut_slice();
-        for (o, &p) in out.iter_mut().zip(&part) {
+        for (o, &p) in out.iter_mut().zip(part.iter()) {
             *o = Ix::new(p);
         }
+        drop(part);
         self.communities.flush_async()?;
         self.modularity = directed_modularity(self.g, self.communities.as_slice())?;
         Ok(())
@@ -285,8 +354,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
 
 /// Renumbers `comm`'s labels (all smaller than `comm.len()`) densely, in order of first
 /// appearance, and returns how many there are.
-fn renumber(comm: &mut [usize]) -> usize {
-    let mut ids = vec![usize::MAX; comm.len()];
+fn renumber(comm: &mut [usize], scratch: &Scratch) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut ids = scratch.filled(comm.len(), usize::MAX)?;
     let mut count = 0;
     for c in comm.iter_mut() {
         if ids[*c] == usize::MAX {
@@ -295,7 +364,7 @@ fn renumber(comm: &mut [usize]) -> usize {
         }
         *c = ids[*c];
     }
-    count
+    Ok(count)
 }
 
 /// A weighted directed graph local moving and aggregation run on: the original graph, or a
@@ -303,6 +372,8 @@ fn renumber(comm: &mut [usize]) -> usize {
 trait Arcs {
     /// Number of nodes.
     fn len(&self) -> usize;
+    /// Number of (stored) out-arcs, as many as in-arcs: bounds a supergraph's.
+    fn arc_count(&self) -> usize;
     /// Total weight of a node's out-arcs (self-loops included).
     fn k_out(&self, i: usize) -> u64;
     /// Total weight of a node's in-arcs (self-loops included).
@@ -346,6 +417,10 @@ impl<Ix: graph::IndexType> Arcs for BaseArcs<Ix> {
         self.out_offsets.len() - 1
     }
 
+    fn arc_count(&self) -> usize {
+        self.out_neighbours.len()
+    }
+
     fn k_out(&self, i: usize) -> u64 {
         Self::range(&self.out_offsets, i).len() as u64
     }
@@ -368,50 +443,56 @@ impl<Ix: graph::IndexType> Arcs for BaseArcs<Ix> {
 }
 
 /// A weighted directed supergraph, as CSRs of `(neighbour, weight)` out- and in-arcs (one per
-/// neighbour, self-loops included).
+/// neighbour, self-loops included), in scratch files.
 struct Supergraph {
-    out_offsets: Vec<usize>,
-    out_arcs: Vec<(usize, u64)>,
-    in_offsets: Vec<usize>,
-    in_arcs: Vec<(usize, u64)>,
-    k_out: Vec<u64>,
-    k_in: Vec<u64>,
+    out_offsets: ScratchMem<usize>,
+    out_arcs: ScratchStack<(usize, u64)>,
+    in_offsets: ScratchMem<usize>,
+    in_arcs: ScratchStack<(usize, u64)>,
+    k_out: ScratchMem<u64>,
+    k_in: ScratchMem<u64>,
 }
 
 impl Supergraph {
     /// The supergraph of `a`'s communities `comm` (dense, `0..count`): an arc `c -> d` weighs
     /// as much as all arcs from `c`'s nodes to `d`'s.
-    fn aggregate<A: Arcs>(a: &A, comm: &[usize], count: usize) -> Self {
+    fn aggregate<A: Arcs>(
+        a: &A,
+        comm: &[usize],
+        count: usize,
+        scratch: &Scratch,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // nodes by community
-        let mut start = vec![0usize; count + 1];
+        let mut start = scratch.zeroed::<usize>(count + 1)?;
         for &c in comm {
             start[c + 1] += 1;
         }
         for c in 0..count {
             start[c + 1] += start[c];
         }
-        let mut next = start.clone();
-        let mut members = vec![0usize; comm.len()];
+        let mut next = scratch.zeroed::<usize>(count)?;
+        next.copy_from_slice(&start[..count]);
+        let mut members = scratch.zeroed::<usize>(comm.len())?;
         for (i, &c) in comm.iter().enumerate() {
             members[next[c]] = i;
             next[c] += 1;
         }
+        drop(next);
 
+        // no more arcs between communities than between their nodes
         let mut s = Self {
-            out_offsets: Vec::with_capacity(count + 1),
-            out_arcs: Vec::new(),
-            in_offsets: Vec::with_capacity(count + 1),
-            in_arcs: Vec::new(),
-            k_out: vec![0; count],
-            k_in: vec![0; count],
+            out_offsets: scratch.zeroed(count + 1)?,
+            out_arcs: scratch.stack(a.arc_count())?,
+            in_offsets: scratch.zeroed(count + 1)?,
+            in_arcs: scratch.stack(a.arc_count())?,
+            k_out: scratch.zeroed(count)?,
+            k_in: scratch.zeroed(count)?,
         };
-        s.out_offsets.push(0);
-        s.in_offsets.push(0);
-        let mut acc = vec![0u64; count];
-        let mut touched = Vec::new();
-        fn flush(acc: &mut [u64], touched: &mut Vec<usize>, arcs: &mut Vec<(usize, u64)>) {
-            touched.sort_unstable();
-            for &d in touched.iter() {
+        let mut acc = scratch.zeroed::<u64>(count)?;
+        let mut touched = scratch.stack::<usize>(count)?;
+        fn flush(acc: &mut [u64], touched: &mut ScratchStack<usize>, arcs: &mut ScratchStack<(usize, u64)>) {
+            touched.as_mut_slice().sort_unstable();
+            for &d in touched.as_slice() {
                 arcs.push((d, acc[d]));
                 acc[d] = 0;
             }
@@ -430,7 +511,7 @@ impl Supergraph {
                 });
             }
             flush(&mut acc, &mut touched, &mut s.out_arcs);
-            s.out_offsets.push(s.out_arcs.len());
+            s.out_offsets[c + 1] = s.out_arcs.len();
             for &i in nodes {
                 s.k_in[c] += a.k_in(i);
                 a.in_arcs(i, |j, w| {
@@ -442,15 +523,19 @@ impl Supergraph {
                 });
             }
             flush(&mut acc, &mut touched, &mut s.in_arcs);
-            s.in_offsets.push(s.in_arcs.len());
+            s.in_offsets[c + 1] = s.in_arcs.len();
         }
-        s
+        Ok(s)
     }
 }
 
 impl Arcs for Supergraph {
     fn len(&self) -> usize {
         self.k_out.len()
+    }
+
+    fn arc_count(&self) -> usize {
+        self.out_arcs.len()
     }
 
     fn k_out(&self, i: usize) -> u64 {
@@ -462,13 +547,13 @@ impl Arcs for Supergraph {
     }
 
     fn out_arcs(&self, i: usize, mut f: impl FnMut(usize, u64)) {
-        for &(j, w) in &self.out_arcs[self.out_offsets[i]..self.out_offsets[i + 1]] {
+        for &(j, w) in &self.out_arcs.as_slice()[self.out_offsets[i]..self.out_offsets[i + 1]] {
             f(j, w);
         }
     }
 
     fn in_arcs(&self, i: usize, mut f: impl FnMut(usize, u64)) {
-        for &(j, w) in &self.in_arcs[self.in_offsets[i]..self.in_offsets[i + 1]] {
+        for &(j, w) in &self.in_arcs.as_slice()[self.in_offsets[i]..self.in_offsets[i + 1]] {
             f(j, w);
         }
     }
@@ -485,21 +570,33 @@ impl Arcs for Supergraph {
 /// the smallest community.
 ///
 /// Returns the number of moves and the modularity gained.
-fn local_move<A: Arcs>(a: &A, comm: &mut [usize], m: u64, tolerance: f64) -> (usize, f64) {
+fn local_move<A: Arcs>(
+    a: &A,
+    comm: &mut [usize],
+    m: u64,
+    tolerance: f64,
+    scratch: &Scratch,
+) -> Result<(usize, f64), Box<dyn std::error::Error>> {
     let n = a.len();
-    let mut sigma_out = vec![0u64; n];
-    let mut sigma_in = vec![0u64; n];
+    let mut sigma_out = scratch.zeroed::<u64>(n)?;
+    let mut sigma_in = scratch.zeroed::<u64>(n)?;
     for i in 0..n {
         sigma_out[comm[i]] += a.k_out(i);
         sigma_in[comm[i]] += a.k_in(i);
     }
-    let mut size = vec![0usize; n];
+    let mut size = scratch.zeroed::<usize>(n)?;
     for i in 0..n {
         size[comm[i]] += 1;
     }
-    let mut free: Vec<usize> = (0..n).filter(|&c| size[c] == 0).collect();
-    let mut acc = vec![0u64; n];
-    let mut touched = Vec::new();
+    // labels of no community: at most every one, but that of the community left
+    let mut free = scratch.stack::<usize>(n)?;
+    for c in 0..n {
+        if size[c] == 0 {
+            free.push(c);
+        }
+    }
+    let mut acc = scratch.zeroed::<u64>(n)?;
+    let mut touched = scratch.stack::<usize>(n)?;
     let m_sq = (m as f64) * (m as f64);
     let (mut moves, mut gain) = (0, 0.0);
     loop {
@@ -526,7 +623,7 @@ fn local_move<A: Arcs>(a: &A, comm: &mut [usize], m: u64, tolerance: f64) -> (us
             };
             let stay = score(d, acc[d]);
             let (mut best, mut best_score) = (d, stay);
-            for &c in &touched {
+            for &c in touched.as_slice() {
                 let s = score(c, acc[c]);
                 if s > best_score || (s == best_score && best != d && c < best) {
                     (best, best_score) = (c, s);
@@ -549,7 +646,7 @@ fn local_move<A: Arcs>(a: &A, comm: &mut [usize], m: u64, tolerance: f64) -> (us
                 sweep_moves += 1;
                 sweep_gain += best_score - stay;
             }
-            for &c in &touched {
+            for &c in touched.as_slice() {
                 acc[c] = 0;
             }
             touched.clear();
@@ -561,7 +658,7 @@ fn local_move<A: Arcs>(a: &A, comm: &mut [usize], m: u64, tolerance: f64) -> (us
             break;
         }
     }
-    (moves, gain)
+    Ok((moves, gain))
 }
 
 #[cfg(test)]
