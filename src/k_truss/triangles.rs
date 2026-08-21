@@ -321,9 +321,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         let edge_over = g.edge_over()?;
         let edge_reciprocal = g.edge_reciprocal()?;
 
-        let mut counts = vec![0u32; g.width()];
+        // read back into a scratch file rather than the heap: one count per arc
+        let c_fn = g.build_cache_filename(CacheFile::Triangles, Some(0))?;
+        let mut counts = ScratchMem::<u32>::new(c_fn, g.width())?;
         backend.triangles(graph, edge_over.as_slice(), edge_reciprocal.as_slice(), &mut counts)?;
-        for (t, c) in triangles.triangles.as_slice().iter().zip(counts) {
+        for (t, &c) in triangles.triangles.as_slice().iter().zip(counts.iter()) {
             if c as usize > Tx::MAX {
                 return Err(format!(
                     "error an edge is in {c} triangles, more than can be counted ({})",
