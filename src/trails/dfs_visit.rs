@@ -278,8 +278,10 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
         let skip_parent_edge = !self.g.directed();
 
         // explicit DFS stack: pairs each pending node with an in-place, resumable neighbour
-        // iterator (no per-node allocation/copy of its adjacency list).
-        let mut next: Vec<(G::Ix, G::Neigh<'_>)> = Vec::with_capacity(self.g.s());
+        // iterator (no per-node allocation/copy of its adjacency list). It holds a path from the
+        // source, so at most one entry per node.
+        let s_fn = self.build_cache_filename(CacheFile::DFS, Some(2))?;
+        let mut next = ScratchStack::<(G::Ix, G::Neigh<'_>)>::new(s_fn, self.g.s())?;
 
         next.push((source, self.g.neigh(source)));
         *par.get_mut(self.source) = source;

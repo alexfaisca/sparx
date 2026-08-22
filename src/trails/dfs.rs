@@ -177,7 +177,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<
         let (mut visited,) = proc_mem;
         let mut ord = self.order.shared_slice();
 
-        let mut next = Vec::with_capacity(self.g.size());
+        // a node's unvisited neighbours are pushed once, when it's visited: at most one entry per
+        // arc, and the source's
+        let s_fn = self.build_cache_filename(CacheFile::DFS, Some(2))?;
+        let mut next = ScratchStack::<usize>::new(s_fn, self.g.width() + 1)?;
 
         next.push(self.source);
         // the loop below marks a node visited and writes it into `ord` the first time it's

@@ -247,7 +247,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // closed trails need as many arcs in as out of every node (free for symmetric graphs)
         if Dir::DIRECTED && !g.is_symmetric()? {
-            let mut arcs_in = vec![0usize; g.size()];
+            let a_fn = g.build_cache_filename(CacheFile::EulerIndex, Some(0))?;
+            let mut arcs_in = ScratchMem::<usize>::new(a_fn, g.size())?;
             for v in &g[..] {
                 arcs_in[v.index()] += 1;
             }
@@ -326,7 +327,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
         let mut start_vertex_counter = 0usize;
         let mut cycles = self.euler_trails.shared_slice();
         let mut write_idx = 0usize;
-        let mut indices = Vec::<usize>::with_capacity(128);
+        // each trail starts at a node left without unused arcs once it's found: one per node
+        let mut indices =
+            ScratchStack::<usize>::new(self.build_cache_filename(CacheFile::EulerIndex, Some(1))?, node_count)?;
+        // each push onto the stack (and each cycle node but the first) follows an unused arc:
+        // neither outgrows the graph's arcs, and the starting node's
+        let arc_count = self.g.width();
+        let mut stack = ScratchStack::<usize>::new(self.build_cache_filename(CacheFile::EulerTrail, Some(2))?, arc_count + 1)?;
+        let mut cycle = ScratchStack::<Ix>::new(self.build_cache_filename(CacheFile::EulerTrail, Some(3))?, arc_count + 1)?;
         // find cycles until no unused edges remain
         loop {
             let start_v = loop {
@@ -351,9 +359,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
             };
 
             // Hierholzer's DFS
-            let mut stack: Vec<usize> = Vec::with_capacity(node_count);
-            let mut cycle: Vec<Ix> = Vec::with_capacity(node_count);
-
             stack.push(start_v);
             while let Some(&v) = stack.last() {
                 if edge_count.get(v).index() > 0 {
@@ -367,7 +372,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
                 }
             }
             if !cycle.is_empty() {
-                cycle.reverse();
+                cycle.as_mut_slice().reverse();
 
                 let cycle_slice = cycle.as_slice();
                 let end = cycle_slice.len() - 1;
@@ -383,6 +388,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
             }
         }
 
+        let indices = indices.as_slice();
         if indices.len() == 1 {
             *self.euler_indices.get_mut(0) = Ix::new(indices[0]);
         } else {
