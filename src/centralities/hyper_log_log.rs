@@ -57,6 +57,41 @@ precisions!(
     Precision16 => 16,
 );
 
+/// `a = max(a, b)` register-wise, returning whether `a` changed.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+#[inline(always)]
+fn union_portable(a: &mut [u8], b: &[u8]) -> bool {
+    let mut changed = 0u8;
+    for (a, &b) in a.iter_mut().zip(b) {
+        changed |= (b > *a) as u8;
+        *a = (*a).max(b);
+    }
+    changed != 0
+}
+
+/// [`union_portable`] with SSE2 (part of x86_64's baseline), 16 registers at a time: inlined into
+/// *HyperBall*'s loop, the portable one isn't vectorized, and runs 4 to 6 times slower.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn union_sse2(a: &mut [u8], b: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+    // registers come in multiples of 16 (precisions start at 4)
+    assert!(a.len() == b.len() && a.len() % 16 == 0);
+    // SAFETY: SSE2 is always available on x86_64, and every access is within `a` or `b`
+    // (16 bytes at offsets below their common length, a multiple of 16), unaligned ones allowed
+    unsafe {
+        let mut diff = _mm_setzero_si128();
+        for i in (0..a.len()).step_by(16) {
+            let x = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
+            let y = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+            let max = _mm_max_epu8(x, y);
+            diff = _mm_or_si128(diff, _mm_xor_si128(max, x));
+            _mm_storeu_si128(a.as_mut_ptr().add(i) as *mut __m128i, max);
+        }
+        _mm_movemask_epi8(_mm_cmpeq_epi8(diff, _mm_setzero_si128())) != 0xFFFF
+    }
+}
+
 /// *HyperLogLog* counter with `2^P::EXPONENT` byte-sized registers.
 #[repr(transparent)]
 pub struct HyperLogLog<P: Precision> {
@@ -116,7 +151,13 @@ impl<P: Precision> HyperLogLog<P> {
     /// Adds `element` to the counter.
     #[inline(always)]
     pub fn insert(&mut self, element: u64) {
-        let hash = Self::hash(element);
+        self.insert_hash(Self::hash(element));
+    }
+
+    /// Adds an element of hash `hash`: its first `EXPONENT` bits select a register, which is
+    /// raised to the rank of the rest (one plus their leading zeros, at most `Q + 1`).
+    #[inline(always)]
+    fn insert_hash(&mut self, hash: u64) {
         let index = (hash >> Self::Q) as usize;
         // the remaining `Q` bits, left aligned, padded with ones so that the rank never exceeds
         // `Q + 1`
@@ -128,17 +169,14 @@ impl<P: Precision> HyperLogLog<P> {
     /// Merges `other` into `self` (set union), returning whether any register changed.
     #[inline(always)]
     pub fn union(&mut self, other: &Self) -> bool {
-        let mut changed = 0u8;
-        for (a, &b) in self
-            .registers
-            .as_mut()
-            .iter_mut()
-            .zip(other.registers.as_ref())
+        #[cfg(target_arch = "x86_64")]
         {
-            changed |= (b > *a) as u8;
-            *a = (*a).max(b);
+            union_sse2(self.registers.as_mut(), other.registers.as_ref())
         }
-        changed != 0
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            union_portable(self.registers.as_mut(), other.registers.as_ref())
+        }
     }
 
     /// The counter's registers.
@@ -161,27 +199,94 @@ impl<P: Precision> HyperLogLog<P> {
     }
 
     /// Estimates the number of distinct elements added to the counter.
+    ///
+    /// The relative standard error is about `1.04 / sqrt(REGISTERS)` across the whole range,
+    /// up to `2^62` elements: the estimates of counters whose every register saturated (past
+    /// `2^64` distinct hashes) are infinite. Estimates are unbiased but at small cardinalities
+    /// (below a few times `REGISTERS`), which are underestimated by `0.5 / REGISTERS` to
+    /// `1 / REGISTERS` (relatively): a single element is counted as `0.967` by 16 registers, as
+    /// `0.99998` by 65536.
     pub fn estimate_cardinality(&self) -> f64 {
+        let (sum, zeros, saturated) = if Self::REGISTERS >= 64 {
+            self.register_stats_split()
+        } else {
+            self.register_stats_fused()
+        };
+        Self::estimate_from(sum, zeros, saturated)
+    }
+
+    /// `sum(2^-r)` over the registers `r`, and the number of zero (`C_0`) and saturated
+    /// (`C_{Q+1}`) registers, in a single pass, in independent lanes so that it vectorizes.
+    /// Faster than [`register_stats_split`](Self::register_stats_split) for few registers.
+    fn register_stats_fused(&self) -> (f64, u32, u32) {
         const LANES: usize = 8;
         let max = (Self::Q + 1) as u8;
-
-        // a single pass computing sum(2^-r), and the number of zero (`C_0`) and saturated
-        // (`C_{Q+1}`) registers, in independent lanes so that it vectorizes
         let mut sum = [0f64; LANES];
         let mut zeros = [0u32; LANES];
         let mut saturated = [0u32; LANES];
         for chunk in self.registers.as_ref().chunks_exact(LANES) {
             for l in 0..LANES {
                 let r = chunk[l];
-                sum[l] += f64::from_bits((1023 - r as u64) << 52);
+                sum[l] += Self::weight(r);
                 zeros[l] += (r == 0) as u32;
                 saturated[l] += (r == max) as u32;
             }
         }
-        let sum: f64 = sum.iter().sum();
-        let zeros = zeros.iter().sum::<u32>() as f64;
-        let saturated = saturated.iter().sum::<u32>() as f64;
+        (
+            sum.iter().sum(),
+            zeros.iter().sum(),
+            saturated.iter().sum(),
+        )
+    }
 
+    /// Same as [`register_stats_fused`](Self::register_stats_fused), but counting zero and
+    /// saturated registers in a pass of their own, in byte-wide lanes: counted alongside the
+    /// `f64` sum, they'd be vectorized at its (8 times narrower) width. About twice as fast for
+    /// many registers.
+    fn register_stats_split(&self) -> (f64, u32, u32) {
+        const LANES: usize = 8;
+        const BYTE_LANES: usize = 32;
+        let registers = self.registers.as_ref();
+        let max = (Self::Q + 1) as u8;
+
+        let mut sum = [0f64; LANES];
+        for chunk in registers.chunks_exact(LANES) {
+            for l in 0..LANES {
+                sum[l] += Self::weight(chunk[l]);
+            }
+        }
+
+        // in blocks whose byte-wide counts can't overflow
+        let (mut zeros, mut saturated) = (0u32, 0u32);
+        for block in registers.chunks(u8::MAX as usize * BYTE_LANES) {
+            let mut z = [0u8; BYTE_LANES];
+            let mut s = [0u8; BYTE_LANES];
+            let chunks = block.chunks_exact(BYTE_LANES);
+            let rest = chunks.remainder();
+            for chunk in chunks {
+                for l in 0..BYTE_LANES {
+                    z[l] += (chunk[l] == 0) as u8;
+                    s[l] += (chunk[l] == max) as u8;
+                }
+            }
+            zeros += z.iter().map(|&c| c as u32).sum::<u32>()
+                + rest.iter().filter(|&&r| r == 0).count() as u32;
+            saturated += s.iter().map(|&c| c as u32).sum::<u32>()
+                + rest.iter().filter(|&&r| r == max).count() as u32;
+        }
+        (sum.iter().sum(), zeros, saturated)
+    }
+
+    /// `2^-r`, built from its bits.
+    #[inline(always)]
+    fn weight(r: u8) -> f64 {
+        f64::from_bits((1023 - r as u64) << 52)
+    }
+
+    /// Ertl's improved estimate from the registers' `sum(2^-r)` and zero and saturated counts.
+    fn estimate_from(sum: f64, zeros: u32, saturated: u32) -> f64 {
+        let max = (Self::Q + 1) as u8;
+        let (zeros, saturated) = (zeros as f64, saturated as f64);
         let m = Self::REGISTERS as f64;
         if zeros == m {
             return 0.;
@@ -189,7 +294,7 @@ impl<P: Precision> HyperLogLog<P> {
 
         // unrolled `z = m * tau(1 - C_{q+1} / m); for k = q..=1 { z = (z + C_k) / 2 }` plus
         // `m * sigma(C_0 / m)`, where the loop amounts to sum(C_k * 2^-k) for k in 1..=q
-        let max_weight = f64::from_bits((1023 - max as u64) << 52);
+        let max_weight = Self::weight(max);
         let middle = sum - zeros - saturated * max_weight;
         let z = m * Self::tau(1. - saturated / m) * (2. * max_weight)
             + middle
@@ -365,3 +470,7 @@ mod test {
         unbiased_with_expected_rmse::<Precision10>();
     }
 }
+
+#[cfg(test)]
+#[path = "hyper_log_log_test.rs"]
+mod extended_test;

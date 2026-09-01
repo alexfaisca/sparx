@@ -656,10 +656,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             max_iterations: hb.max_t,
         };
         let counters = HyperLogLog::<P>::registers_of_mut(hb.counters.as_mut_slice());
-        let mut accumulators = vec![[0f32; 2]; node_count];
+        // read back into a scratch file rather than the heap: two accumulators per node
+        let a_fn = g.build_cache_filename(CacheFile::HyperBall, Some(1))?;
+        let mut accumulators = ScratchMem::<[f32; 2]>::new(a_fn, node_count)?;
         let _iters = backend.hyperball(graph, params, counters, &mut accumulators)?;
 
-        for (u, [distance, inverse_distance]) in accumulators.into_iter().enumerate() {
+        for (u, &[distance, inverse_distance]) in accumulators.iter().enumerate() {
             *hb.distances.get_mut(u) = W::from_f32(distance);
             *hb.inverse_distances.get_mut(u) = W::from_f32(inverse_distance);
         }
@@ -869,6 +871,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
         let counters = self.counters.shared_slice();
         let swap = swap.shared_slice();
+        // each node's counter's estimate: a changed counter's previous one is never estimated
+        // again (each node's is only read and written by its thread)
+        let e_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(2))?;
+        let estimates = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, node_count, true)?;
 
         let mut t: W = W::one(); // first iteration is initialization
         let mut inv_t: W = W::one(); // first iteration is initialization
@@ -887,6 +893,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
                     let mut counters = counters;
                     let mut swap = swap;
+                    let mut estimates = estimates.shared_slice();
                     let mut distance_accumulator = self.distances.shared_slice();
                     let mut inverse_distance_accumulator = self.inverse_distances.shared_slice();
 
@@ -907,6 +914,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                             // `counters` initially aliases `self.counters`, results are written
                             // to `swap`, after each iteration both are swapped
                             let mut swapped = false;
+                            for u in begin..end {
+                                *estimates.get_mut(u) = counters.get(u).estimate_cardinality();
+                            }
                             loop {
                                 #[cfg(feature = "bench")]
                                 let iter_start = std::time::Instant::now();
@@ -935,10 +945,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
                                     // unchanged registers imply an unchanged estimate
                                     if ball_changed {
-                                        let count_diff = W::from_f64(
-                                            a.estimate_cardinality()
-                                                - counters.get(u).estimate_cardinality(),
-                                        );
+                                        let estimate = a.estimate_cardinality();
+                                        let count_diff =
+                                            W::from_f64(estimate - *estimates.get(u));
+                                        *estimates.get_mut(u) = estimate;
                                         if count_diff > W::zero() {
                                             // update accumulators
                                             *distance_accumulator.get_mut(u) += t * count_diff;
