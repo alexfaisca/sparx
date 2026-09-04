@@ -1094,9 +1094,10 @@ graph_class!(UGraph, "Graph", {
         )
     }
 
-    /// Coreness of each node, by `"bz"` (Batagelj–Zaversnik) or `"liu"` (Liu et al.), as `width`
+    /// Coreness of each node, by `"liu"` (Liu et al., parallel, the default) or `"bz"`
+    /// (Batagelj–Zaversnik, sequential), as `width`
     /// integers (every node's degree must fit one).
-    #[pyo3(signature = (*, algorithm = "bz", width = "u8"))]
+    #[pyo3(signature = (*, algorithm = "liu", width = "u8"))]
     fn k_core<'py>(
         &self,
         py: Python<'py>,
