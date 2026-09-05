@@ -10,11 +10,8 @@ use _verify::verify_trails;
 #[cfg(test)]
 mod _verify {
     use crate::{
-        graph::{
-            self, GraphMemoryMap,
-            cache::utils::{FileType, H, cache_file_name},
-        },
-        shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut},
+        graph::{self, GraphMemoryMap},
+        shared_slice::AbstractedProceduralMemoryMut,
     };
 
     #[allow(dead_code)]
@@ -56,17 +53,9 @@ mod _verify {
         .into());
         }
 
-        let edge_checker = SharedSliceMut::<bool>::abst_mem_mut(
-            cache_file_name("", &FileType::Test(H::H), None)?.as_str(),
-            graph.width(),
-            true,
-        )?;
-        let mut check = edge_checker.shared_slice();
-        let mut k = 0;
-        for e_idx in 0..graph.width() {
-            *check.get_mut(e_idx) = false;
-            k += 1;
-        }
+        // whether each edge was used by a trail
+        let mut check = vec![false; graph.width()];
+        let k = graph.width();
 
         let trails: Vec<(usize, usize)> = euler_index
             .as_slice()
@@ -98,14 +87,14 @@ mod _verify {
                     if dest_node == n_node {
                         let b_idx = unsafe { edge_indexes.add(c_node).read() }.index();
                         let e_idx = b_idx + idx;
-                        if !*check.get(e_idx) {
+                        if !check[e_idx] {
                             // print!(
                             //     "{e_idx} (for {c_node} between ({} {}))-> ",
                             //     unsafe { edge_indexes.add(*c_node).read() },
                             //     unsafe { edge_indexes.add(*c_node + 1).read() }
                             // );
                             // println!("{}", unsafe { graph.edges_ptr().add(e_idx).read() });
-                            *check.get_mut(e_idx) = true;
+                            check[e_idx] = true;
                             found = true;
                             break;
                         }
@@ -121,8 +110,8 @@ mod _verify {
         }
 
         let mut i = 0;
-        for e_idx in 0..graph.width() {
-            if !*check.get(e_idx) {
+        for used in check.iter() {
+            if !used {
                 i += 1;
             }
         }

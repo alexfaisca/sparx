@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test${{ matrix.gpu && ' (gpu, on lavapipe)' || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.gpu }}
+      # the GPU tests run on Mesa's software Vulkan driver (lavapipe) when no GPU is present
+      - name: Install a software Vulkan driver
+        if: matrix.gpu
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - name: Test
+        run: cargo test --release ${{ matrix.gpu && '--features gpu' || '' }}
+
+  features:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Every target, with the optional features
+        run: |
+          cargo build --release --all-targets --features bench
+          cargo build --release --all-targets --features gpu,bench
+      - name: Each input format alone
+        run: |
+          cargo build --release --lib --no-default-features --features mtx
+          cargo build --release --lib --no-default-features --features ggcat
+          cargo build --release --lib --no-default-features --features nodes_edges
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --features gpu,bench
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --features gpu
+
+  python:
+    name: Python bindings (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # the extension targets the stable ABI from 3.9 on: test the oldest and a recent Python
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build and install
+        run: pip install "./python[test]"
+      - name: Test
+        run: pytest python/tests

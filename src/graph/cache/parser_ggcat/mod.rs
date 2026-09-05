@@ -51,7 +51,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // parse optional inputs && fallback to defaults for the Nones found
         let id = id.map_or(path_str.to_string(), |id| id);
         let batching = Some(Self::DEFAULT_BATCHING_SIZE);
-        let (input, tmp_path) = Self::read_input_file(path)?;
+        let (input, tmp_path) = Self::read_input_file(path, &id, 0)?;
 
         // init cache
         let mut cache = Self::init_with_id(&id, batching)?;
@@ -103,7 +103,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let id = id.map_or(path_str.to_string(), |id| id);
         let batching = Some(batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b));
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { false });
-        let (input, tmp_path) = Self::read_input_file(path)?;
+        let (input, tmp_path) = Self::read_input_file(path, &id, 0)?;
 
         // init cache
         let mut cache = Self::init_with_id(&id, batching)?;
@@ -144,7 +144,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { true });
 
         // self.parallel_fst_from_ggcat_with_reader(path, batching, in_fst, get_physical())?;
-        let (input, tmp) = Self::read_input_file(path)?;
+        let (input, tmp) = Self::read_input_file(path, &self.cache_id()?, 0)?;
 
         self.parallel_parse_fst_ggcat_bytes_mmap(
             &input[..],
@@ -794,4 +794,34 @@ mod test {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// Concurrent parses of the same compressed input (under different cache ids) used to share
+    /// the helper file its contents were decompressed into, corrupting each other: they must all
+    /// succeed, with identical graphs.
+    #[test]
+    fn concurrent_parses_of_the_same_compressed_input() {
+        let path = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ggcat/random_graph_9_5.lz4"
+        ));
+        let graphs: Vec<(usize, usize, Vec<usize>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        let (graph, _cache) =
+                            crate::graph::test_utils::open_fixture(path, Some(2)).unwrap();
+                        let neighbours = (0..graph.size())
+                            .flat_map(|u| graph.neighbours(u).unwrap())
+                            .collect();
+                        (graph.size(), graph.width(), neighbours)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(graphs[0].1 > 0);
+        assert!(graphs.iter().all(|g| *g == graphs[0]));
+    }
 }
+

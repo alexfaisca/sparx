@@ -3,7 +3,7 @@ use portable_atomic::{AtomicF32, AtomicF64, Ordering};
 /// Floating-point weight type usable for edge/node weights in algorithms such as GVE-Louvain
 /// community detection, abstracting over `f32`/`f64` so the (hot, streamed-through-repeatedly)
 /// weight arrays can be narrowed for reduced memory traffic --- same motivation, and same
-/// `Plain`/`Atomic` pairing convention, as [`crate::graph::cache::AccumulatorAtomic`].
+/// `Plain`/`Atomic` pairing convention, as `AccumulatorAtomic` (crate internal).
 ///
 /// # Safety
 ///

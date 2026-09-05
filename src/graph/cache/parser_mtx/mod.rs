@@ -167,6 +167,38 @@ mod test {
         f.flush().unwrap();
     }
 
+    /// A failed parse leaves no partial cache entry behind (and a missing input is named).
+    #[test]
+    fn failed_parses_leave_no_cache_files() {
+        let dir = unique_test_dir("mtx_failed_parse");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry_files = |id: &str| -> Vec<std::path::PathBuf> {
+            let hash = crate::graph::cache::utils::id_from_filename(id).unwrap();
+            glob::glob(&format!("{}*{hash}.*", crate::graph::cache::utils::CACHE_DIR))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+
+        let missing = dir.join("missing.mtx");
+        let id = format!("mtx_missing_{}", unique_run_tag());
+        let err = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&missing, Some(id.clone()), None, None)
+            .expect_err("a missing input should fail");
+        assert!(err.to_string().contains("missing.mtx"), "{err}");
+        assert_eq!(entry_files(&id), Vec::<std::path::PathBuf>::new());
+
+        // an edge to a node past the header's node count
+        let malformed = dir.join("malformed.mtx");
+        let mut f = std::fs::File::create(&malformed).unwrap();
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern general\n3 3 2\n1 2\n9 1").unwrap();
+        drop(f);
+        let id = format!("mtx_malformed_{}", unique_run_tag());
+        GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&malformed, Some(id.clone()), None, None)
+            .expect_err("a malformed input should fail");
+        assert_eq!(entry_files(&id), Vec::<std::path::PathBuf>::new());
+    }
+
     /// Regression test for the `Ix`-generic cache pipeline: parsing the same `.mtx` input with
     /// both `usize` and `u32` as the index type must produce identical graphs (same node/edge
     /// counts and neighbour lists), and the resulting cache's metadata must faithfully reflect
