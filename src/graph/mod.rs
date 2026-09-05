@@ -544,6 +544,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         self.graph_cache.metadata()
     }
 
+    /// Returns the path of the graph's cache entry's metadata file, which [`open`](Self::open)
+    /// accepts to reopen the graph later without parsing its dataset again.
+    pub fn cache_filename(&self) -> String {
+        self.graph_cache.metadata_filename()
+    }
+
     /// Converts this [`GraphMemoryMap`] instance's underlying cache entry into a brand new cache
     /// entry that uses a different index type, `NewIx`, re-encoding the `CSR` offsets/neighbors
     /// arrays at the new width, and opens it as a new [`GraphMemoryMap`] instance.
@@ -1083,8 +1089,17 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         Bfs::new(self, source)
     }
 
+    /// Removes the graph's cache entry, along with every file left in the cache under its id
+    /// (algorithms' results that weren't dropped, scratch files of interrupted runs, ...),
+    /// which would be of no use without the graph.
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut this = ManuallyDrop::new(self);
+
+        let id = this.graph_id()?;
+        let cache_dir = Path::new(&this.cache_filename())
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
 
         let er_fn = this.build_cache_filename(CacheFile::EdgeReciprocal, None)?;
         let eo_fn = this.build_cache_filename(CacheFile::EdgeOver, None)?;
@@ -1092,7 +1107,14 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         let _r = std::fs::remove_file(er_fn);
         let _r = std::fs::remove_file(eo_fn);
 
-        this.graph_cache.drop_cache()
+        this.graph_cache.drop_cache()?;
+
+        // cache files are named `<kind>[_<seq>]_<id>.<ext>`
+        let pattern = cache_dir.join(format!("*{id}.*"));
+        for f in glob::glob(&pattern.to_string_lossy())?.flatten() {
+            let _r = std::fs::remove_file(f);
+        }
+        Ok(())
     }
 }
 
@@ -3162,8 +3184,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 /// Yields `N` by value (`N: Copy`). For a zero-sized `N` (e.g. the default [`VoidLabel`], used
 /// whenever a graph carries no node data), no memory is ever read --- every item is simply
 /// `N::new(0)`, which is the type's only possible value --- since indexing a zero-sized element
-/// past position 0 in the backing mmap is not something [`SharedSlice`]'s generic ZST handling
-/// supports (see [`SharedSlice::from_file`]).
+/// past position 0 in the backing mmap is not something `SharedSlice`'s generic ZST handling
+/// supports (see `SharedSlice::from_file`).
 pub struct NodeLabels<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
     ptr: *const N,
     begin: usize,
@@ -3595,7 +3617,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Dr
 ///
 /// Yields `source` itself first, then every other node reachable from it, each exactly once, in
 /// depth-first discovery order. Its "visited" marker and explicit stack are both memory-mapped
-/// (see [`GrowableIdBuffer`]), not heap-allocated, so traversing a graph far larger than
+/// (see `GrowableIdBuffer`), not heap-allocated, so traversing a graph far larger than
 /// available RAM is sound. Unlike [`DFSVisit`](crate::trails::dfs_visit::DFSVisit), it exposes
 /// no hooks beyond the node sequence itself --- for edge classification (tree/back/forward-cross
 /// edges), discovery/finish timestamps, or parent tracking, use `DFSVisit`'s visitor API
@@ -4708,5 +4730,43 @@ mod test {
         par_iso.sort_unstable();
         assert_eq!(par_iso, seq_iso, "par_iter_isolated_nodes at scale");
     }
-}
 
+    /// Dropping a graph's cache also removes what algorithms left under its id, but nothing of
+    /// other graphs.
+    #[test]
+    fn drop_cache_removes_every_file_of_the_graph() {
+        use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
+        use crate::k_truss::triangles::Triangles;
+        type G = GraphMemoryMap<VoidLabel, VoidLabel, usize>;
+
+        let dir = unique_test_dir("drop_cache");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("triangle.mtx");
+        std::fs::write(
+            &path,
+            "%%MatrixMarket matrix coordinate pattern symmetric\n3 3 3\n2 1\n3 1\n3 2\n",
+        )
+        .unwrap();
+        let tag = crate::graph::test_utils::unique_run_tag();
+        let open = |name: &str| G::from_file(&path, Some(format!("{name}_{tag}")), Some(1)).unwrap();
+        let files_of = |g: &G| -> Vec<std::path::PathBuf> {
+            let id = g.graph_id().unwrap();
+            let pattern = format!("{}*{id}.*", crate::graph::cache::utils::CACHE_DIR);
+            glob::glob(&pattern).unwrap().flatten().collect()
+        };
+
+        let (mut g, other) = (open("dropped"), open("kept"));
+        // results that aren't dropped, and a scratch file
+        AlgoBatageljZaversnik::new(&g).unwrap();
+        Triangles::new(&g).unwrap();
+        std::fs::write(g.build_cache_filename(CacheFile::General, Some(3)).unwrap(), b"").unwrap();
+        AlgoBatageljZaversnik::new(&other).unwrap();
+
+        let (files, other_files) = (files_of(&g), files_of(&other));
+        assert!(files.len() > 6, "{files:?}");
+        g.drop_cache().unwrap();
+        assert!(files.iter().all(|f| !f.exists()), "left behind: {files:?}");
+        assert_eq!(files_of(&other), other_files);
+    }
+}

@@ -1,9 +1,15 @@
 [package]
-name = "graph_derive"
+# published as `sparx-graph-derive` (`graph_derive` is taken on crates.io)
+name = "sparx-graph-derive"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+description = "Derive macros for sparx-graph's node and edge labels"
+repository = "https://github.com/alexfaisca/sparx"
+license = "Apache-2.0"
 
 [lib]
+name = "graph_derive"
 proc-macro = true
 
 [dependencies]

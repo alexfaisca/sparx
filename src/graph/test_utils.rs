@@ -23,6 +23,7 @@ type ExactValueCache = DashMap<String, OnceCell<String>>;
 static TEST_CACHE: OnceCell<TestCache> = OnceCell::new();
 static EXACT_VALUE_CACHE: OnceCell<ExactValueCache> = OnceCell::new();
 
+#[cfg(test)]
 thread_local! {
     /// Ids of the graph caches created on this thread, one list per live fixture guard (see
     /// [`CacheGuard::dir`]), innermost last.
@@ -30,6 +31,7 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
 /// Records a graph cache's id (as in its files' names) for the innermost live fixture guard on
 /// this thread, if any.
 pub(crate) fn register_cache_id(id: String) {
@@ -40,6 +42,7 @@ pub(crate) fn register_cache_id(id: String) {
     });
 }
 
+#[cfg(test)]
 /// Removes, when dropped (also when a test fails), cached graphs' files --- their own and those of
 /// every algorithm run on them, all named after the graph's unique id --- and a test's fixture
 /// directory. Files in the cache's subdirectories (e.g. exact values) are left alone.
@@ -50,6 +53,7 @@ pub(crate) struct CacheGuard {
     collects: bool,
 }
 
+#[cfg(test)]
 impl CacheGuard {
     /// Guards `graph`'s cached files, and `fixture_dir` if given.
     pub(crate) fn new<N: graph::N, E: graph::E, Ix: graph::IndexType>(
@@ -75,6 +79,7 @@ impl CacheGuard {
     }
 }
 
+#[cfg(test)]
 impl Drop for CacheGuard {
     fn drop(&mut self) {
         if self.collects {
@@ -94,6 +99,7 @@ impl Drop for CacheGuard {
     }
 }
 
+#[cfg(test)]
 /// A test graph, removing its cached files and fixture directory when dropped (see
 /// [`CacheGuard`]); derefs to its [`GraphMemoryMap`].
 pub(crate) struct TestGraph<N: graph::N = (), E: graph::E = (), Ix: graph::IndexType = usize> {
@@ -102,6 +108,7 @@ pub(crate) struct TestGraph<N: graph::N = (), E: graph::E = (), Ix: graph::Index
     _guard: CacheGuard,
 }
 
+#[cfg(test)]
 impl<N: graph::N, E: graph::E, Ix: graph::IndexType> TestGraph<N, E, Ix> {
     pub(crate) fn new(graph: GraphMemoryMap<N, E, Ix>, fixture_dir: Option<PathBuf>) -> Self {
         let _guard = CacheGuard::new(&graph, fixture_dir);
@@ -109,12 +116,27 @@ impl<N: graph::N, E: graph::E, Ix: graph::IndexType> TestGraph<N, E, Ix> {
     }
 }
 
+#[cfg(test)]
 impl<N: graph::N, E: graph::E, Ix: graph::IndexType> std::ops::Deref for TestGraph<N, E, Ix> {
     type Target = GraphMemoryMap<N, E, Ix>;
 
     fn deref(&self) -> &Self::Target {
         &self.graph
     }
+}
+
+#[cfg(test)]
+/// Parses a (committed, read only) fixture graph under a unique id, so that tests running
+/// algorithms on the same fixture concurrently never share cached files, with a guard removing
+/// those files (but not the fixture) when the test is done.
+pub(crate) fn open_fixture(
+    path: &Path,
+    threads: Option<u8>,
+) -> Result<(GraphMemoryMap, CacheGuard), Box<dyn std::error::Error>> {
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let graph = GraphMemoryMap::from_file(path, Some(format!("{name}_{}", unique_run_tag())), threads)?;
+    let guard = CacheGuard::new(&graph, None);
+    Ok((graph, guard))
 }
 
 pub(crate) fn mem_cache() -> &'static TestCache {

@@ -32,6 +32,24 @@ static BITS_U64: usize = std::mem::size_of::<u64>();
 
 const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
 
+/// A graph built for one run, whose cache is dropped with it: also when the run fails or panics.
+struct ScratchGraph<N: graph::N, E: graph::E, Ix: graph::IndexType>(GraphMemoryMap<N, E, Ix>);
+
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType> std::ops::Deref for ScratchGraph<N, E, Ix> {
+    type Target = GraphMemoryMap<N, E, Ix>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType> Drop for ScratchGraph<N, E, Ix> {
+    fn drop(&mut self) {
+        if let Err(e) = self.0.drop_cache() {
+            eprintln!("error dropping the graph's cache: {e}");
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "'SparX'",
@@ -259,11 +277,10 @@ fn sandbox_parse<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>
     path: P,
     threads: Option<u8>,
     id: Option<String>,
-) -> Result<GraphMemoryMap<N, E, Ix>, Box<dyn std::error::Error>> {
-    // This assumes UTF-8 but avoids full conversion
+) -> Result<(), Box<dyn std::error::Error>> {
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -278,204 +295,7 @@ fn sandbox_parse<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>
     println!();
     _burkhardt_et_al.drop_cache()?;
 
-    // let time = Instant::now();
-    // let mut _pkt = AlgoPKT::new(&graph_mmaped)?;
-    // println!("k-truss pkt {:?}", time.elapsed());
-    // println!();
-    // _pkt.drop_cache()?;
-
-    // for i in 0..1 {
-    //     let time = Instant::now();
-    //     let mut _pkt = AlgoPKT::new(&graph_mmaped)?;
-    //     for (idx, t) in _pkt.k_trusses().iter().enumerate() {
-    //         if *t != b[idx] {
-    //             println!("{idx} should be {} but is {t}", b[idx]);
-    //         }
-    //     }
-    //     println!("k-truss pkt {:?}", time.elapsed());
-    //     println!();
-    //     _pkt.drop_cache()?;
-    // }
-
-    //
-    // let time = Instant::now();
-    // let mut _bz = AlgoBatageljZaversnik::new(&graph_mmaped)?;
-    // println!("k-core batagelj zaversnik {:?}", time.elapsed());
-    // _bz.drop_cache()?;
-
-    // let time = Instant::now();
-    // let mut _liu_et_al = AlgoLiuEtAl::new(&graph_mmaped)?;
-    // println!("k-core liu et al {:?}", time.elapsed());
-    // println!();
-    // _liu_et_al.drop_cache()?;
-
-    // let time = Instant::now();
-    // let mut _louvain = AlgoGVELouvain::<_, _, _, f64>::new(&graph_mmaped)?;
-    // println!("found {} communities", _louvain.community_count());
-    // println!("partition modularity {} ", _louvain.partition_modularity());
-    // println!("louvain finished in {:?}", time.elapsed());
-    // println!(
-    //     "partition modularity according to graph_mmaped method {}",
-    //     graph_mmaped.modularity(_louvain.communities(), _louvain.community_count())?
-    // );
-    // _louvain.drop_cache()?;
-    // println!();
-    //
-    // let time = Instant::now();
-    // let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new(&graph_mmaped)?;
-    // println!("hyperball {:?}", time.elapsed());
-    // hyperball.drop_cache()?;
-
-    // _louvain.coalesce_isolated_nodes()?;
-    // println!("found {} communities", _louvain.community_count());
-    // println!("partition modularity {} ", _louvain.partition_modularity());
-    // println!("louvain finished in {:?}", time.elapsed());
-    // println!(
-    //     "partition modularity according to graph_mmaped method {}",
-    //     graph_mmaped.modularity(_louvain.communities(), _louvain.community_count())?
-    // );
-    // println!();
-    // _louvain.drop_cache()?;
-
-    // let time = Instant::now();
-    // graph_cache.rebuild_fst_from_ggcat_file(path, None, None)?;
-    // println!("cache fst rebuilt {:?}", time.elapsed());
-
-    // let time = Instant::now();
-    // let graph_mmaped: GraphMemoryMap<N, E, Ix> =
-    //     GraphMemoryMap::<EdgeType, Edge>::init(graph_cache.clone(), threads)?;
-    // println!("graph initialized {:?}", time.elapsed());
-    // label_search(&graph_mmaped);
-
-    /* ********************************************************************************* */
-    // Lookup test
-    /* ********************************************************************************* */
-
-    // metalabel_search(&graph_mmaped);
-
-    /* ********************************************************************************* */
-    // End of lookup test
-    /* ********************************************************************************* */
-    //
-
-    // let e_fn = cache_file_name(
-    //     &graph_mmaped.cache_index_filename(),
-    //     FileType::ExactClosenessCentrality(H::H),
-    //     None,
-    // )?;
-    // let node_count = graph_mmaped.size();
-    // println!("compute closeness centrality {e_fn}",);
-    // // let file = File::open(&e_fn)?;
-    // // let vals = unsafe { MmapOptions::new().map(&file)? };
-    // // let mut z = 0;
-    // // for i in 0..node_count {
-    // //     let val = unsafe { (vals.as_ptr() as *const f64).add(i).read() };
-    // //     if val == 0. {
-    // //         z += 1;
-    // //     }
-    // // }
-    // // println!("found {z} zeroes");
-    // let mut e = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, node_count, true)?;
-    // for u in 0..node_count {
-    //     if u % 1000 == 0 {
-    //         println!("reached {u} of {node_count}");
-    //     }
-    //     let bfs = BFSDists::new(&graph_mmaped, u)?;
-    //     if bfs.recheable() <= 1 || bfs.total_distances() == 0. {
-    //         println!("found isolated node at {u}");
-    //         *e.get_mut(u) = 0.0;
-    //     } else {
-    //         *e.get_mut(u) = bfs.recheable() as f64 / bfs.total_distances();
-    //     }
-    // }
-    // e.flush()?;
-    // let mut i = 0;
-    // loop {
-    //     if i >= graph_mmaped.size() {
-    //         break;
-    //     }
-    //     let time = Instant::now();
-    //     let mut bfs = BFSDists::new(&graph_mmaped, i)?;
-    //     println!(
-    //         "source {i} -> bfs reacheable {} total_dist {}",
-    //         bfs.recheable(),
-    //         bfs.total_distances()
-    //     );
-    //     println!("bfs computed in {:?}", time.elapsed());
-    //     println!();
-    //     i += 10340;
-    //     bfs.drop_cache()?;
-    // }
-
-    // let time = Instant::now();
-    // let mut _dfs = DFS::new(&graph_mmaped, 0)?;
-    // println!("dfs computed in {:?}", time.elapsed());
-    //
-    // let time = Instant::now();
-    // let mut _euler_trail = AlgoHierholzer::new(&graph_mmaped)?;
-    // println!("found {} euler trails", _euler_trail.trail_number());
-    // println!("euler trail built {:?}", time.elapsed());
-    // println!();
-    // _euler_trail.drop_cache()?;
-
-    // let time = Instant::now();
-    // hyperball.compute_harmonic_centrality(None)?;
-    // println!("harmonic centrality {:?}", time.elapsed());
-    // println!();
-    //
-
-    //
-    //
-    // let time = Instant::now();
-    // let conductivity = ClusteringCoefficient::new(&graph_mmaped)?;
-    // println!(
-    //     "graph transitivity {:?}",
-    //     conductivity.get_graph_transitivity()
-    // );
-    // println!(
-    //     "average clustering coefficient {:?}",
-    //     conductivity.get_average_clustering_coefficient()
-    // );
-    // println!("clustering coefficient finished in {:?}", time.elapsed());
-    // println!();
-
-    // let g = GraphMemoryMap::<N, E, Ix>::open(
-    //     "./.cache/metadata_5013817c269e634c07b3adc5178df93b89f991de411b2cf94e6a3d33b80f063f.toml",
-    //     None,
-    //     Some(32),
-    // )?;
-
-    // println!("graph metadata is {:?}", g.metadata()?);
-    // drop(g);
-
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
-
-    // let mut i = 0;
-    // while i < graph_mmaped.size().map_or(0, |s| s) {
-    //     let time = Instant::now();
-    //     let _approx_dirichlet_hkpr =
-    //         ApproxDirHKPR::new(&graph_mmaped, 0.008, i, 100000, 4000000, 0.05)?;
-    //     let _ = _approx_dirichlet_hkpr.compute()?;
-    //     println!("ApproxDirichletHeatKernelK {:?}", time.elapsed());
-    //     i += 12934600;
-    // }
-    //
-    // let b = graph_mmaped.apply_mask_to_nodes(|u| -> bool { u % 2 == 0 }, Some("evennodes"))?;
-    // println!("graph even nodes {:?}", b);
-
-    // let time = Instant::now();
-    // let a = graph_mmaped.export_petgraph_stripped()?;
-    // println!("rustworkx_core export {:?} {:?}", a, time.elapsed());
-    // let time = Instant::now();
-    // use rustworkx_core::centrality::betweenness_centrality;
-    // println!(
-    //     "rustworkx_core export {:?} {:?}",
-    //     betweenness_centrality(&a, false, true, 50),
-    //     time.elapsed()
-    // );
-    Ok(graph_mmaped)
+    Ok(())
 }
 
 fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>(
@@ -485,8 +305,8 @@ fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -535,9 +355,6 @@ fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!("hyperball {:?}", time.elapsed());
     hyperball.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -549,8 +366,8 @@ fn cache_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -569,9 +386,6 @@ fn cache_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _hierholzers.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -583,8 +397,8 @@ fn cache_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -600,12 +414,10 @@ fn cache_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
         let hk_relax = HKRelax::new(&graph_mmaped, 45., 0.01, vec![i], None, None)?;
         let _ = hk_relax.compute()?;
         println!("HKRelax {:?}", time.elapsed());
-        i += size / 50;
+        // 50 seeds, spread over the graph (each node, in graphs of less than 50)
+        i += (size / 50).max(1);
     }
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -617,8 +429,8 @@ fn pages_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -627,9 +439,6 @@ fn pages_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     );
     println!();
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -641,8 +450,8 @@ fn pages_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -661,9 +470,6 @@ fn pages_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _hierholzers.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -675,8 +481,8 @@ fn pages_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -690,9 +496,6 @@ fn pages_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!("k-core batagelj zaversnik {:?}", time.elapsed());
     _bz.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -704,8 +507,8 @@ fn pages_profile_3<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -720,9 +523,6 @@ fn pages_profile_3<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _liu_et_al.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -734,8 +534,8 @@ fn pages_profile_4<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -750,9 +550,6 @@ fn pages_profile_4<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _burkhardt_et_al.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -764,8 +561,8 @@ fn pages_profile_5<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -780,9 +577,6 @@ fn pages_profile_5<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _pkt.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -794,8 +588,8 @@ fn pages_profile_6<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -816,9 +610,6 @@ fn pages_profile_6<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _louvain.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -830,8 +621,8 @@ fn pages_profile_7<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -845,9 +636,6 @@ fn pages_profile_7<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!("hyperball {:?}", time.elapsed());
     hyperball.drop_cache()?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -865,8 +653,8 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
         utils,
     };
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
 
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
@@ -936,9 +724,6 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
     let rho = utils::spearman_rho(avg_arr[0].as_slice(), exact.as_slice());
     println!("{e_mae} | {e_mape} | {rho}");
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -968,8 +753,8 @@ fn hk_relax_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pat
     let runs_per_params = 10000;
 
     let time = Instant::now();
-    let mut graph_mmaped: GraphMemoryMap<N, E, Ix> =
-        GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?;
+    let graph_mmaped =
+        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -1059,9 +844,6 @@ fn hk_relax_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pat
 
     append_records(&out_file, &results)?;
 
-    println!("droping");
-    graph_mmaped.drop_cache()?;
-    println!("dropped");
 
     Ok(())
 }
@@ -1074,8 +856,11 @@ pub fn general_profile<P: AsRef<Path>>(
     static RUNS: usize = 15;
     let dataset = filename_only(&path)?;
     let time = Instant::now();
-    let mut graph: GraphMemoryMap<(), (), usize> =
-        GraphMemoryMap::<(), (), usize>::from_file(path.as_ref(), None, threads)?;
+    let graph = ScratchGraph(GraphMemoryMap::<(), (), usize>::from_file(
+        path.as_ref(),
+        None,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph.size(),
@@ -1084,7 +869,7 @@ pub fn general_profile<P: AsRef<Path>>(
     );
     let threads = threads.unwrap_or(1).max(1) as usize;
 
-    // 1) K-core — Batagelj–Zaversnik (50 runs)
+    // 1) K-core — Batagelj–Zaversnik
     for _ in 0..RUNS {
         let t = Instant::now();
         AlgoBatageljZaversnik::new(&graph)?;
@@ -1100,23 +885,23 @@ pub fn general_profile<P: AsRef<Path>>(
         )?;
     }
 
-    // // 2) K-core — Liu et al. (51 runs)
-    // for _ in 0..RUNS {
-    //     let t = Instant::now();
-    //     AlgoLiuEtAl::new(&graph)?;
-    //     let us = t.elapsed().as_micros();
-    //     append_kcore(
-    //         &KCoreRecord {
-    //             dataset,
-    //             algo: "liu",
-    //             runtime_micros: us,
-    //             threads,
-    //         },
-    //         defaults::KCORE,
-    //     )?;
-    // }
+    // 2) K-core — Liu et al.
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        AlgoLiuEtAl::new(&graph)?;
+        let us = t.elapsed().as_micros();
+        append_kcore(
+            &KCoreRecord {
+                dataset,
+                algo: "liu",
+                runtime_micros: us,
+                threads,
+            },
+            defaults::KCORE,
+        )?;
+    }
 
-    // 3) K-truss — Burkhardt (50 runs)
+    // 3) K-truss — Burkhardt
     for _ in 0..RUNS {
         let t = Instant::now();
         AlgoBurkhardtEtAl::new(&graph)?;
@@ -1132,131 +917,121 @@ pub fn general_profile<P: AsRef<Path>>(
         )?;
     }
 
-    // // 4) K-truss — PKT (50 runs)
-    // for _ in 0..RUNS {
-    //     let t = Instant::now();
-    //     AlgoPKT::new(&graph)?;
-    //     let us = t.elapsed().as_micros();
-    //     append_ktruss(
-    //         &KTrussRecord {
-    //             dataset,
-    //             algo: "pkt",
-    //             runtime_micros: us,
-    //             threads,
-    //         },
-    //         defaults::KTRUSS,
-    //     )?;
-    // }
+    // 4) K-truss — PKT
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        AlgoPKT::new(&graph)?;
+        let us = t.elapsed().as_micros();
+        append_ktruss(
+            &KTrussRecord {
+                dataset,
+                algo: "pkt",
+                runtime_micros: us,
+                threads,
+            },
+            defaults::KTRUSS,
+        )?;
+    }
 
-    // // 5) Louvain (50 runs) — summary + per-pass rows (linked by run_id)
-    // for _ in 0..RUNS {
-    //     let run_id = louvain_new_run_id();
-    //     let mut pass_rows: Vec<LouvainPassRecord> = Vec::new();
-    //     let total_start = Instant::now();
-    //     let mut pass_idx: u32 = 0;
-    //
-    //     let l = AlgoGVELouvain::new(&graph)?;
-    //     let total_us = total_start.elapsed().as_micros();
-    //     for &(iters, coms, elapsed) in l.get_iters().iter() {
-    //         pass_rows.push(LouvainPassRecord {
-    //             run_id,
-    //             pass_idx,
-    //             iters_for_pass: iters,
-    //             coms_in_pass: coms,
-    //             runtime_micros: elapsed,
-    //         });
-    //         pass_idx += 1;
-    //     }
-    //
-    //     append_louvain_summary(
-    //         &LouvainSummaryRecord {
-    //             run_id,
-    //             dataset,
-    //             modularity: l.partition_modularity(),
-    //             runtime_micros: total_us,
-    //             levels: l.get_iters().len(),
-    //             passes_total: Some(pass_idx),
-    //             threads,
-    //         },
-    //         defaults::LOUV_SUM,
-    //     )?;
-    //     append_louvain_passes_bulk(&pass_rows, defaults::LOUV_PASS)?;
-    // }
+    // 5) Louvain — summary + per-pass rows (linked by run_id)
+    for _ in 0..RUNS {
+        let run_id = louvain_new_run_id();
+        let mut pass_rows: Vec<LouvainPassRecord> = Vec::new();
+        let total_start = Instant::now();
+        let mut pass_idx: u32 = 0;
 
-    // for _ in 0..RUNS {
-    //     let t = Instant::now();
-    //     let h = HyperBall4::new(&graph)?;
-    //     let us = t.elapsed().as_micros();
-    //     append_hyperball(
-    //         &HyperBallRecord {
-    //             dataset,
-    //             precision_p: 4,
-    //             iterations: h.get_iters(),
-    //             runtime_micros: us,
-    //             threads,
-    //         },
-    //         defaults::HYPERBALL,
-    //     )?;
-    // }
-    //
-    // println!("going for hyp 6");
-    //
-    // for _ in 0..RUNS {
-    //     let t = Instant::now();
-    //     let h = HyperBall6::new(&graph)?;
-    //     let us = t.elapsed().as_micros();
-    //     println!("+1");
-    //     append_hyperball(
-    //         &HyperBallRecord {
-    //             dataset,
-    //             precision_p: 6,
-    //             iterations: h.get_iters(),
-    //             runtime_micros: us,
-    //             threads,
-    //         },
-    //         defaults::HYPERBALL,
-    //     )?;
-    // }
-    // println!("going for hyp 8");
-    //
-    // for _ in 0..RUNS {
-    //     let t = Instant::now();
-    //     let h = HyperBall8::new(&graph).unwrap();
-    //     println!("+1");
-    //     let us = t.elapsed().as_micros();
-    //     append_hyperball(
-    //         &HyperBallRecord {
-    //             dataset,
-    //             precision_p: 8,
-    //             iterations: h.get_iters(),
-    //             runtime_micros: us,
-    //             threads,
-    //         },
-    //         defaults::HYPERBALL,
-    //     )?;
-    // }
-    // println!("going for hyp 10");
-    //
-    // for _ in 0..RUNS {
-    //     let t = Instant::now();
-    //     let h = HyperBall10::new(&graph).unwrap();
-    //     let us = t.elapsed().as_micros();
-    //     append_hyperball(
-    //         &HyperBallRecord {
-    //             dataset,
-    //             precision_p: 10,
-    //             iterations: h.get_iters(),
-    //             runtime_micros: us,
-    //             threads,
-    //         },
-    //         defaults::HYPERBALL,
-    //     )?;
-    //     println!("+1");
-    // }
+        let l = AlgoGVELouvain::<_, _, _, f64>::new(&graph)?;
+        let total_us = total_start.elapsed().as_micros();
+        for &(iters, coms, elapsed) in l.get_iters().iter() {
+            pass_rows.push(LouvainPassRecord {
+                run_id,
+                pass_idx,
+                iters_for_pass: iters,
+                coms_in_pass: coms,
+                runtime_micros: elapsed,
+            });
+            pass_idx += 1;
+        }
 
-    println!("droping");
-    graph.drop_cache()?;
-    println!("dropped");
+        append_louvain_summary(
+            &LouvainSummaryRecord {
+                run_id,
+                dataset,
+                modularity: l.partition_modularity(),
+                runtime_micros: total_us,
+                levels: l.get_iters().len(),
+                passes_total: Some(pass_idx),
+                threads,
+            },
+            defaults::LOUV_SUM,
+        )?;
+        append_louvain_passes_bulk(&pass_rows, defaults::LOUV_PASS)?;
+    }
+
+    // 6) HyperBall, at precisions 4, 6, 8 and 10
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let h = HyperBall4::new(&graph)?;
+        let us = t.elapsed().as_micros();
+        append_hyperball(
+            &HyperBallRecord {
+                dataset,
+                precision_p: 4,
+                iterations: h.get_iters(),
+                runtime_micros: us,
+                threads,
+            },
+            defaults::HYPERBALL,
+        )?;
+    }
+
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let h = HyperBall6::new(&graph)?;
+        let us = t.elapsed().as_micros();
+        append_hyperball(
+            &HyperBallRecord {
+                dataset,
+                precision_p: 6,
+                iterations: h.get_iters(),
+                runtime_micros: us,
+                threads,
+            },
+            defaults::HYPERBALL,
+        )?;
+    }
+
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let h = HyperBall8::new(&graph)?;
+        let us = t.elapsed().as_micros();
+        append_hyperball(
+            &HyperBallRecord {
+                dataset,
+                precision_p: 8,
+                iterations: h.get_iters(),
+                runtime_micros: us,
+                threads,
+            },
+            defaults::HYPERBALL,
+        )?;
+    }
+
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let h = HyperBall10::new(&graph)?;
+        let us = t.elapsed().as_micros();
+        append_hyperball(
+            &HyperBallRecord {
+                dataset,
+                precision_p: 10,
+                iterations: h.get_iters(),
+                runtime_micros: us,
+                threads,
+            },
+            defaults::HYPERBALL,
+        )?;
+    }
 
     Ok(())
 }

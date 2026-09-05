@@ -27,6 +27,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
   - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
+- [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Memory Benchmarks](#memory-benchmarks)
   - [Wall-Time Benchmarks](#wall-time-benchmarks)
@@ -57,9 +58,9 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 
 ## Pre-requisites
 
-- **Rust ≥ 1.87**
+- **Rust ≥ 1.95**
 
-If you don’t already have Rust installed or need to update to at least version 1.87, the recommended way is via [rustup](https://rustup.rs):
+If you don’t already have Rust installed or need to update to at least version 1.95, the recommended way is via [rustup](https://rustup.rs):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -71,7 +72,7 @@ After installing Rust, restart your shell and verify:
 rustc --version
 ```
 
-If the installation was successful, a version number ≥ 1.87 should be printed.
+If the installation was successful, a version number ≥ 1.95 should be printed.
 
 ## Installation
 
@@ -153,14 +154,16 @@ parentdir/
 
 #### 1. Installing *SparX* directly from Git.
 
-  To install *SparX* directly from Git, simply add it to the `[dependencies]` section in `myapp/Cargo.toml`:
+  The crate is named `sparx-graph` (`sparx` is taken on crates.io), but its library is `sparx`, so code
+  always uses `use sparx::...`. To install *SparX* directly from Git, simply add it to the
+  `[dependencies]` section in `myapp/Cargo.toml`:
 
 ```toml
  [dependencies]
   # commit or tag of the version you want to use should be in rev
-  sparx = { git = "https://github.com/alexfaisca/sparx.git", rev = "v0.1.0" }
+  sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", rev = "v0.1.0" }
   # optionally, select features to be enabled:
-  # sparx = { git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
+  # sparx = { package = "sparx-graph", git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
 ```
 
 #### 2. Installing and linking *SparX* directly inside a Rust project.
@@ -182,9 +185,9 @@ parentdir/
   members = [".", "sparx"]
 
 [dependencies]
-  sparx = { path = "./sparx" }
+  sparx = { package = "sparx-graph", path = "./sparx" }
   # optionally, select features to be enabled:
-  # sparx = { path = "./sparx", features = ["mtx","ggcat","rayon"] }
+  # sparx = { package = "sparx-graph", path = "./sparx", features = ["mtx","ggcat","rayon"] }
 ```
 
 
@@ -222,9 +225,9 @@ workspace/
 
 ```toml
 [dependencies]
-  sparx = { path = "../sparx" }
+  sparx = { package = "sparx-graph", path = "../sparx" }
   # optionally, select features to be enabled:
-  # sparx = { path = "../sparx", features = ["mtx","ggcat","rayon"] }
+  # sparx = { package = "sparx-graph", path = "../sparx", features = ["mtx","ggcat","rayon"] }
 ```
 
 ## Loading & Inspecting a Graph
@@ -455,6 +458,26 @@ error. `WGPU_BACKEND` and `WGPU_ADAPTER_NAME` select a backend/adapter --- witho
 lavapipe (a software Vulkan driver) runs the same kernels on the CPU, which is how the GPU tests
 (`cargo test --features gpu`) run on machines without one.
 
+## Python
+
+The [`python/`](python/) bindings (PyO3) expose a `sparx.Graph` whose algorithms run with the GIL
+released and return `numpy` arrays --- see [`python/README.md`](python/README.md).
+
+```python
+import sparx
+
+with sparx.Graph("./datasets/graphs/kmer_V2a.mtx", index="u32") as g:
+    coreness = g.k_core()
+    trussness = g.k_truss(algorithm="pkt", width="u16")
+    cycle_trusses = g.k_truss(kind="cycle")
+    closeness = g.hyperball(precision=8)["closeness"]
+```
+
+```sh
+pip install ./python        # or, for development: cd python && maturin develop --release
+pytest python/tests         # checked against networkx
+```
+
 # Reproducibility
 
 ## Memory Benchmarks
@@ -527,3 +550,7 @@ To bench wall-time with different thread counts the `-t16` can be altered to cha
 
     1. If `-t0` or `-t1` are supplied, the program runs single-threaded.
     2. If `-tx`, where `x > 1`, is supplied, the program runs with `x` threads.
+
+# License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

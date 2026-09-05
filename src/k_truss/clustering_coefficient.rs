@@ -4,6 +4,7 @@ use crate::shared_slice::*;
 
 use crossbeam::thread;
 use portable_atomic::{AtomicF64, AtomicUsize, Ordering};
+use std::mem::ManuallyDrop;
 use std::sync::{Arc, Barrier};
 
 use super::count::{TriangleCount, TriangleCounter};
@@ -85,6 +86,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     /// Getter for graph's global clustering coefficient --- graph transitivity.
     pub fn get_graph_transitivity(&self) -> f64 {
         self.transitivity
+    }
+
+    /// Removes all cached files pertaining to this algorithm's execution's results.
+    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let this = ManuallyDrop::new(self);
+        let out_fn = this.g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
+        std::fs::remove_file(out_fn)?;
+        Ok(())
     }
 
     #[inline(always)]
