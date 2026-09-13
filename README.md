@@ -29,6 +29,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
   - [Coreness widths](#coreness-widths)
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
+  - [SIMD](#simd)
   - [Directed graphs](#directed-graphs)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
@@ -508,6 +509,37 @@ in a single one (typically up to 4 GB, e.g. ~1B edges); runs that don't fit fail
 error. `WGPU_BACKEND` and `WGPU_ADAPTER_NAME` select a backend/adapter --- without a GPU, Mesa's
 lavapipe (a software Vulkan driver) runs the same kernels on the CPU, which is how the GPU tests
 (`cargo test --features gpu`) run on machines without one.
+
+## SIMD
+
+Builds inside this repository use `target-cpu=native` (set in `.cargo/config.toml`), so the
+compiler vectorizes loops with every instruction set the machine has (AVX, AVX2, ...). Crates
+that depend on *SparX* don't inherit it: to get the same code, build them with
+
+```sh
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+The Python wheels of a release are built for their architecture's baseline instead, so that they
+run on any CPU of it.
+
+*HyperBall*'s *HyperLogLog* counters are where SIMD matters most:
+
+- Each register is stored in its own byte rather than bit-packed, so merging two counters (the
+  hot loop) is a byte-wise maximum over two arrays. Registers packed into 6 bits each take 25%
+  less memory, but unpacking them made *HyperBall* about 20% slower at precisions 4 to 6 and no
+  faster at precision 8.
+- On x86_64 the merge uses SSE2 explicitly: SSE2 is part of the architecture's baseline, so this
+  holds for every build, wheels included. Written as a plain loop, the merge isn't vectorized once
+  inlined into *HyperBall*'s loop, and runs 4 to 6 times slower. With SSE2, *HyperBall* takes
+  about half the time at precision 4 on graphs of 20 to 50 million nodes. Other architectures
+  use the plain loop.
+- Cardinality estimates sum each register's `2^-r` in independent lanes, building the value from
+  its bits rather than computing a power. From 64 registers on, the zero and saturated registers
+  are counted in a byte-wide pass of their own, which halves the estimate's cost.
+
+Every vectorized path computes exactly what the plain one does, and the tests check this at
+every precision.
 
 ## Directed Graphs
 
