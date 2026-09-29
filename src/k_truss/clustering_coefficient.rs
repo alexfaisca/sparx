@@ -3,7 +3,6 @@ use crate::graph::*;
 use crate::shared_slice::*;
 
 use crossbeam::thread;
-use portable_atomic::{AtomicF64, AtomicUsize, Ordering};
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Barrier};
 
@@ -151,27 +150,26 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         // Thread syncronization
         let synchronize = Arc::new(Barrier::new(threads));
 
-        let total_possible_triangles = Arc::new(AtomicF64::new(0.));
-        let local_clustering_sum = Arc::new(AtomicF64::new(0.));
-        let total_triangles = Arc::new(AtomicUsize::new(0));
-
-        thread::scope(|scope| {
+        // each thread's sums: of its nodes' possible triangles (connected triples) and local
+        // coefficients, and of its edges' triangle counts --- added up once, in thread order (a
+        // shared atomic sum would have every thread contend for it at every node, and add up in a
+        // different order every run)
+        let sums = thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(threads);
             for tid in 0..threads {
                 let mut local = self.local.shared_slice();
                 let tris = tris.clone();
-
-                let total_possible_triangles = total_possible_triangles.clone();
-                let total_triangles = total_triangles.clone();
-                let local_clustering_sum = local_clustering_sum.clone();
 
                 let synchronize = synchronize.clone();
 
                 let begin = std::cmp::min(tid * thread_load, node_count);
                 let end = std::cmp::min(begin + thread_load, node_count);
 
-                scope.spawn(move |_| {
+                handles.push(scope.spawn(move |_| -> (f64, f64, usize) {
                     // sum of the thread's edges' triangle counts
                     let mut total_triangles_t: usize = 0;
+                    let mut possible_triangles_t = 0.;
+                    let mut clustering_sum_t = 0.;
 
                     for u in begin..end {
                         // distinct neighbours: lists are sorted, so parallel edges are adjacent
@@ -192,11 +190,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                         } else {
                             0.
                         };
-                        total_possible_triangles.fetch_add(n_possible_triangles, Ordering::Relaxed);
+                        possible_triangles_t += n_possible_triangles;
                         *local.get_mut(u) = n_possible_triangles;
                     }
 
-                    total_triangles.add(total_triangles_t, Ordering::Relaxed);
                     synchronize.wait();
 
                     for u in begin..end {
@@ -212,20 +209,28 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                             0.
                         };
                         *local.get_mut(u) = local_conductivity;
-                        local_clustering_sum.fetch_add(local_conductivity, Ordering::Relaxed);
+                        clustering_sum_t += local_conductivity;
                     }
-                });
+                    (possible_triangles_t, clustering_sum_t, total_triangles_t)
+                }));
             }
+            handles.into_iter().map(|h| h.join()).collect::<Result<Vec<_>, _>>()
         })
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
+        let (mut triples, mut local_clustering_sum, mut total_triangles) = (0., 0., 0usize);
+        for (possible, clustering, triangles) in sums {
+            triples += possible;
+            local_clustering_sum += clustering;
+            total_triangles += triangles;
+        }
 
-        self.local_average = local_clustering_sum.load(Ordering::Relaxed) / node_count as f64;
+        self.local_average = local_clustering_sum / node_count as f64;
         // every triangle counts once for each of its 6 (directed) edges, so the sum of all
         // edges' counts is 6 * triangles, and transitivity = 3 * triangles / connected triples
         // (0 without connected triples, as networkx's `transitivity`)
-        let triples = total_possible_triangles.load(Ordering::Relaxed);
         self.transitivity = if triples > 0. {
-            total_triangles.load(Ordering::Relaxed) as f64 / 2. / triples
+            total_triangles as f64 / 2. / triples
         } else {
             0.
         };
