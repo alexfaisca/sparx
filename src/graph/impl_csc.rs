@@ -141,7 +141,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
         let synchronize = Arc::new(Barrier::new(threads));
 
-        thread::scope(|scope|-> Result<(), Box<dyn std::error::Error>> {
+        // edges `u -> v` below (`v < u`) and above (`v > u`) their node, all threads'
+        let (below, above) = thread::scope(|scope| -> Result<(usize, usize), Box<dyn std::error::Error>> {
             let mut threads_res = vec![];
             for tid in 0..threads {
                 let mut er = er.shared_slice();
@@ -152,7 +153,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 let begin = std::cmp::min(tid * thread_load, node_count);
                 let end = std::cmp::min(begin + thread_load, node_count);
 
-                threads_res.push(scope.spawn(move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                threads_res.push(scope.spawn(move |_| -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
 
                     let mut edges_start = index_ptr.get(begin).index();
 
@@ -176,12 +177,14 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                     synchronize.wait();
 
                     // a closure, so that every thread reaches the next barrier even on errors
-                    let mut matched = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    let mut matched = || -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
                         // every run of parallel edges u -> v (v <= u) is paired, in order, with the
                         // run of edges v -> u in v's own neighbours, as long (the graph being
                         // symmetric), and found by binary search within v's neighbours above v
+                        let (mut below, mut above) = (0, 0);
                         for u in begin..end {
                             let stop = eo.get(u).index();
+                            above += index_ptr.get(u + 1).index() - stop;
                             let mut e = index_ptr.get(u).index();
                             while e < stop {
                                 let v = neighbours_ptr.get(e).index();
@@ -216,18 +219,26 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                                         *er.get_mut(e + k) = Ix::new(lo + k);
                                         *er.get_mut(lo + k) = Ix::new(e + k);
                                     }
+                                    below += run;
                                 }
                                 e += run;
                             }
                         }
-                        Ok(())
+                        Ok((below, above))
                     };
                     let matched = matched();
 
                     synchronize.wait();
-                    matched?;
+                    let counts = matched?;
 
-                    // check: every edge u -> v is paired with an edge v -> u, paired back with it
+                    // every edge below its node was paired with one above its own (an edge
+                    // v -> u for each u -> v, in a run as long), and no two with the same one
+                    // (each run with v's run of edges to u): so every edge above its node was
+                    // paired too if there are as many as below, which is checked once all threads
+                    // are done. Debug builds also check every pair (two random reads per edge)
+                    if !cfg!(debug_assertions) {
+                        return Ok(counts);
+                    }
                     for u in begin..end {
                         for edge_offset in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                             let v = neighbours_ptr.get(edge_offset).index();
@@ -242,21 +253,31 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                         }
                     }
 
-                    Ok(())
+                    Ok(counts)
                 }));
             }
 
             // check for errors
+            let (mut below, mut above) = (0, 0);
             for (tid, r) in threads_res.into_iter().enumerate() {
-                r.join()
+                let (b, a) = r
+                    .join()
                     .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
                     .map_err(|e| -> Box<dyn std::error::Error> {
                         format!("error in initialization (thread {tid}): {:?}", e).into()
                     })?;
+                below += b;
+                above += a;
             }
-            Ok(())
+            Ok((below, above))
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
+        if below != above {
+            return Err(format!(
+                "error the graph isn't symmetric: {above} edges u -> v (v > u) but {below} with an edge v -> u"
+            )
+            .into());
+        }
 
         er.flush()?;
         eo.flush()?;
