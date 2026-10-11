@@ -30,6 +30,19 @@ jobs:
       - name: Test
         run: cargo test --release ${{ matrix.gpu && '--features gpu' || '' }}
 
+  performance:
+    name: Performance regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: performance
+      # each check compares two timings of the same run, so runners of any speed will do
+      - name: Check
+        run: cargo test --release --test perf_regression -- --ignored --nocapture --test-threads=1
+
   features:
     name: Feature combinations
     runs-on: ubuntu-latest
