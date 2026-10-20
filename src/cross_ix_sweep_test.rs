@@ -14,7 +14,9 @@
 //! producing a non-trivial degree distribution (useful for k-core/k-truss/triangle structure).
 #![cfg(test)]
 
-use crate::centralities::exact::{ExactClosenessCentrality, ExactHarmonicCentrality, ExactLinCentrality};
+use crate::centralities::exact::{
+    ExactClosenessCentrality, ExactHarmonicCentrality, ExactLinCentrality,
+};
 use crate::centralities::hyper_ball::HyperBall8;
 use crate::communities::gve_louvain::AlgoGVELouvain;
 use crate::communities::hk_relax::HKRelax;
@@ -151,10 +153,18 @@ fn run_all_algorithms<Ix: IndexType>(
         .collect::<Vec<u64>>();
 
     let bfs = BFSDists::new(&graph, 0)?;
-    let bfs_distances = bfs.get_distances().iter().map(|d| d.index()).collect::<Vec<usize>>();
+    let bfs_distances = bfs
+        .get_distances()
+        .iter()
+        .map(|d| d.index())
+        .collect::<Vec<usize>>();
     let bfs_reachable = bfs.recheable();
 
-    let dfs_order = DFS::new(&graph, 0)?.get_order().iter().map(|d| d.index()).collect::<Vec<usize>>();
+    let dfs_order = DFS::new(&graph, 0)?
+        .get_order()
+        .iter()
+        .map(|d| d.index())
+        .collect::<Vec<usize>>();
 
     let dfs_log = Arc::new(Mutex::new(vec![0usize]));
     {
@@ -300,7 +310,8 @@ fn sweep_with_opts(
         macro_rules! check_field {
             ($field:ident) => {
                 assert_eq!(
-                    result.$field, baseline.$field,
+                    result.$field,
+                    baseline.$field,
                     "[{tier}] Ix={width}: field `{}` diverged from the usize baseline",
                     stringify!($field)
                 );

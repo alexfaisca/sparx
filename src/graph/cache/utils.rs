@@ -219,18 +219,21 @@ pub(crate) fn cleanup_cache(
     })?;
     for entry in cache_entries {
         // (another instance may have removed it meanwhile)
-        crate::shared_slice::remove_if_exists(entry.map_err(|e| -> Box<dyn std::error::Error> {
-            format!("error cleaning up cache entry: {e}").into()
-        })?)?;
+        crate::shared_slice::remove_if_exists(entry.map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("error cleaning up cache entry: {e}").into()
+            },
+        )?)?;
     }
     Ok(())
 }
 
 /// Remove all cached `.tmp` files in `dir`.
 fn remove_tmp_files_from(dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let cache_entries = glob(&format!("{dir}/*.tmp")).map_err(
-        |e| -> Box<dyn std::error::Error> { format!("error cleaning up cache: {e}").into() },
-    )?;
+    let cache_entries =
+        glob(&format!("{dir}/*.tmp")).map_err(|e| -> Box<dyn std::error::Error> {
+            format!("error cleaning up cache: {e}").into()
+        })?;
     for entry in cache_entries {
         std::fs::remove_file(entry.map_err(|e| -> Box<dyn std::error::Error> {
             format!("error cleaning up cache entry: {e}").into()

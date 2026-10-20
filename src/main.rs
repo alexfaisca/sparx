@@ -279,8 +279,11 @@ fn sandbox_parse<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path>>
     id: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -305,8 +308,11 @@ fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -355,7 +361,6 @@ fn cache_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!("hyperball {:?}", time.elapsed());
     hyperball.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -366,8 +371,11 @@ fn cache_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -386,7 +394,6 @@ fn cache_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _hierholzers.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -397,8 +404,11 @@ fn cache_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -418,7 +428,6 @@ fn cache_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
         i += (size / 50).max(1);
     }
 
-
     Ok(())
 }
 
@@ -429,8 +438,11 @@ fn pages_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -438,7 +450,6 @@ fn pages_profile_0<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
         time.elapsed()
     );
     println!();
-
 
     Ok(())
 }
@@ -450,8 +461,11 @@ fn pages_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -470,7 +484,6 @@ fn pages_profile_1<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _hierholzers.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -481,8 +494,11 @@ fn pages_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -496,7 +512,6 @@ fn pages_profile_2<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!("k-core batagelj zaversnik {:?}", time.elapsed());
     _bz.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -507,8 +522,11 @@ fn pages_profile_3<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -523,7 +541,6 @@ fn pages_profile_3<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _liu_et_al.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -534,8 +551,11 @@ fn pages_profile_4<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -550,7 +570,6 @@ fn pages_profile_4<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _burkhardt_et_al.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -561,8 +580,11 @@ fn pages_profile_5<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -577,7 +599,6 @@ fn pages_profile_5<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _pkt.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -588,8 +609,11 @@ fn pages_profile_6<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -610,7 +634,6 @@ fn pages_profile_6<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     println!();
     _louvain.drop_cache()?;
 
-
     Ok(())
 }
 
@@ -621,8 +644,11 @@ fn pages_profile_7<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This assumes UTF-8 but avoids full conversion
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -635,7 +661,6 @@ fn pages_profile_7<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Path
     let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new(&graph_mmaped)?;
     println!("hyperball {:?}", time.elapsed());
     hyperball.drop_cache()?;
-
 
     Ok(())
 }
@@ -653,8 +678,11 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
         utils,
     };
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
 
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
@@ -724,7 +752,6 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
     let rho = utils::spearman_rho(avg_arr[0].as_slice(), exact.as_slice());
     println!("{e_mae} | {e_mape} | {rho}");
 
-
     Ok(())
 }
 
@@ -753,8 +780,11 @@ fn hk_relax_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pat
     let runs_per_params = 10000;
 
     let time = Instant::now();
-    let graph_mmaped =
-        ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(path.as_ref(), id, threads)?);
+    let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(
+        path.as_ref(),
+        id,
+        threads,
+    )?);
     println!(
         "graph built (|V| = {:?}, |E| = {}) {:?}",
         graph_mmaped.size(),
@@ -843,7 +873,6 @@ fn hk_relax_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pat
     }
 
     append_records(&out_file, &results)?;
-
 
     Ok(())
 }

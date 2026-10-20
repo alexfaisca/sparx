@@ -148,7 +148,11 @@ impl UndirectedMode {
 }
 
 /// A graph loaded as whichever type fits it: a [`Graph`] if it's symmetric, a [`DiGraph`] if not.
-pub enum AnyGraph<N: super::N = super::label::VoidLabel, E: super::E = super::label::VoidLabel, Ix: IndexType = super::DefaultIx> {
+pub enum AnyGraph<
+    N: super::N = super::label::VoidLabel,
+    E: super::E = super::label::VoidLabel,
+    Ix: IndexType = super::DefaultIx,
+> {
     /// A symmetric graph.
     Undirected(Graph<N, E, Ix>),
     /// A graph with an arc without a reverse.
@@ -278,7 +282,8 @@ impl<N: super::N, E: super::E, Ix: IndexType, Dir: Directedness> GraphMemoryMap<
 
     /// An arc `u -> v` without a reverse `v -> u` (with multiplicity), if the graph has any.
     fn asymmetric_arc(&self) -> Result<Option<(usize, usize)>, Box<dyn std::error::Error>> {
-        let offsets = unsafe { std::slice::from_raw_parts(self.offsets_ptr(), self.offsets_size()) };
+        let offsets =
+            unsafe { std::slice::from_raw_parts(self.offsets_ptr(), self.offsets_size()) };
         find_asymmetric_arc(offsets, &self[..], self.thread_num())
     }
 
@@ -416,7 +421,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> DiGraph<N, E, Ix> {
         let cache = if itself {
             self.graph_cache.clone()
         } else {
-            self.graph_cache.derive_undirected(&transpose.graph_cache, mode)?
+            self.graph_cache
+                .derive_undirected(&transpose.graph_cache, mode)?
         };
         let undirected = Graph::init_from_cache(cache, Some(self.thread_count))?;
         Ok(slot.get_or_init(|| Box::new(undirected)))
@@ -447,7 +453,10 @@ impl<N: super::N, E: super::E, Ix: IndexType> DiGraph<N, E, Ix> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::cache::{CacheMetadata, utils::{CACHE_DIR, id_from_filename}};
+    use crate::graph::cache::{
+        CacheMetadata,
+        utils::{CACHE_DIR, id_from_filename},
+    };
     use crate::graph::label::VoidLabel;
     use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
     use std::collections::BTreeMap;
@@ -471,28 +480,45 @@ mod tests {
         format!("direction_{name}_{}", unique_run_tag())
     }
 
-    fn digraph(name: &str, header: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph<(), (), usize, Directed> {
+    fn digraph(
+        name: &str,
+        header: &str,
+        n: usize,
+        edges: &[(usize, usize)],
+    ) -> TestGraph<(), (), usize, Directed> {
         let path = write_mtx(name, header, n, edges);
         let g = DiGraph::from_file(&path, Some(id(name)), Some(3)).expect("parse should succeed");
         TestGraph::new(g, path.parent().map(Path::to_path_buf))
     }
 
-    pub(super) fn lists<N: crate::graph::N, E: crate::graph::E, Ix: IndexType, Dir: Directedness>(
+    pub(super) fn lists<
+        N: crate::graph::N,
+        E: crate::graph::E,
+        Ix: IndexType,
+        Dir: Directedness,
+    >(
         g: &GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Vec<Vec<usize>> {
-        (0..g.size()).map(|u| g.neighbours(u).unwrap().collect()).collect()
+        (0..g.size())
+            .map(|u| g.neighbours(u).unwrap().collect())
+            .collect()
     }
 
     /// Files of the cache entry whose (hashed) id is `hashed`.
     fn files_of(hashed: &str) -> Vec<PathBuf> {
-        glob::glob(&format!("{CACHE_DIR}*{hashed}.*")).unwrap().flatten().collect()
+        glob::glob(&format!("{CACHE_DIR}*{hashed}.*"))
+            .unwrap()
+            .flatten()
+            .collect()
     }
 
     /// Random multigraph with self-loops, reciprocal and parallel arcs.
     fn random_arcs(n: usize, m: usize, seed: u64) -> Vec<(usize, usize)> {
         let mut state = seed;
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as usize
         };
         let mut arcs: Vec<_> = (0..m).map(|_| (next() % n, next() % n)).collect();
@@ -507,15 +533,29 @@ mod tests {
             ("general_directed", "general", vec![(0, 1), (1, 2)], false),
             ("general_both_ways", "general", vec![(0, 1), (1, 0)], true),
             ("general_loops", "general", vec![(0, 0), (2, 2)], true),
-            ("multiplicity", "general", vec![(0, 1), (0, 1), (1, 0)], false),
+            (
+                "multiplicity",
+                "general",
+                vec![(0, 1), (0, 1), (1, 0)],
+                false,
+            ),
         ] {
             let g = digraph(name, header, 3, &edges);
             assert_eq!(g.metadata().unwrap().symmetric, Some(symmetric), "{name}");
             assert_eq!(g.is_symmetric().unwrap(), symmetric, "{name}");
-            assert!(g.is_directed(), "{name}: a DiGraph is a directed graph type");
+            assert!(
+                g.is_directed(),
+                "{name}: a DiGraph is a directed graph type"
+            );
             // and reopened from the cache, without parsing
-            let reopened = DiGraph::<VoidLabel, VoidLabel, usize>::open(g.cache_filename(), None, None).unwrap();
-            assert_eq!(reopened.symmetric.get(), Some(&symmetric), "{name}, reopened");
+            let reopened =
+                DiGraph::<VoidLabel, VoidLabel, usize>::open(g.cache_filename(), None, None)
+                    .unwrap();
+            assert_eq!(
+                reopened.symmetric.get(),
+                Some(&symmetric),
+                "{name}, reopened"
+            );
         }
     }
 
@@ -525,9 +565,15 @@ mod tests {
             "d", "id", 3, 2, 8, false, false, false, 0, 0, None, None,
         );
         assert!(!meta.to_toml().contains("symmetric"));
-        assert_eq!(CacheMetadata::from_toml(&meta.to_toml()).unwrap().symmetric, None);
+        assert_eq!(
+            CacheMetadata::from_toml(&meta.to_toml()).unwrap().symmetric,
+            None
+        );
         meta.symmetric = Some(false);
-        assert_eq!(CacheMetadata::from_toml(&meta.to_toml()).unwrap().symmetric, Some(false));
+        assert_eq!(
+            CacheMetadata::from_toml(&meta.to_toml()).unwrap().symmetric,
+            Some(false)
+        );
     }
 
     /// Only symmetric graphs load as `Graph`s; a directed one fails, naming an unreciprocated
@@ -538,22 +584,44 @@ mod tests {
         let both_ways = write_mtx("graph_both_ways", "general", 3, &[(0, 1), (1, 0)]);
         let directed = write_mtx("graph_directed", "general", 3, &[(0, 1), (1, 2)]);
         for path in [&symmetric, &both_ways] {
-            let g = Graph::<VoidLabel, VoidLabel, usize>::from_file(path, Some(id("graph_ok")), Some(2)).unwrap();
+            let g = Graph::<VoidLabel, VoidLabel, usize>::from_file(
+                path,
+                Some(id("graph_ok")),
+                Some(2),
+            )
+            .unwrap();
             let g = TestGraph::new(g, None);
             assert!(!g.is_directed() && g.is_symmetric().unwrap());
         }
         let refused_id = id("graph_refused");
-        let err = Graph::<VoidLabel, VoidLabel, usize>::from_file(&directed, Some(refused_id.clone()), Some(2))
-            .err()
-            .expect("a directed graph isn't a Graph");
-        assert!(err.to_string().contains("arc 0 -> 1 has no reverse"), "{err}");
+        let err = Graph::<VoidLabel, VoidLabel, usize>::from_file(
+            &directed,
+            Some(refused_id.clone()),
+            Some(2),
+        )
+        .err()
+        .expect("a directed graph isn't a Graph");
+        assert!(
+            err.to_string().contains("arc 0 -> 1 has no reverse"),
+            "{err}"
+        );
         assert!(err.to_string().contains("DiGraph"), "{err}");
-        assert!(files_of(&id_from_filename(&refused_id).unwrap()).is_empty(), "refused entry left behind");
+        assert!(
+            files_of(&id_from_filename(&refused_id).unwrap()).is_empty(),
+            "refused entry left behind"
+        );
 
         // an existing directed entry can't be opened as a `Graph`, and isn't removed for it
-        let d = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&directed, Some(id("graph_open")), Some(2)).unwrap();
+        let d = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(
+            &directed,
+            Some(id("graph_open")),
+            Some(2),
+        )
+        .unwrap();
         let d = TestGraph::new(d, None);
-        assert!(Graph::<VoidLabel, VoidLabel, usize>::open(d.cache_filename(), None, None).is_err());
+        assert!(
+            Graph::<VoidLabel, VoidLabel, usize>::open(d.cache_filename(), None, None).is_err()
+        );
         assert!(Path::new(&d.cache_filename()).exists());
         for path in [symmetric, both_ways, directed] {
             std::fs::remove_dir_all(path.parent().unwrap()).ok();
@@ -564,18 +632,32 @@ mod tests {
     fn any_graph_and_conversions_pick_the_type_that_fits() {
         let symmetric = write_mtx("any_symmetric", "general", 2, &[(0, 1), (1, 0)]);
         let directed = write_mtx("any_directed", "general", 2, &[(0, 1)]);
-        match AnyGraph::<VoidLabel, VoidLabel, usize>::from_file(&symmetric, Some(id("any_s")), Some(2)).unwrap() {
+        match AnyGraph::<VoidLabel, VoidLabel, usize>::from_file(
+            &symmetric,
+            Some(id("any_s")),
+            Some(2),
+        )
+        .unwrap()
+        {
             AnyGraph::Undirected(g) => drop(TestGraph::new(g, None)),
             AnyGraph::Directed(_) => panic!("a symmetric graph is a Graph"),
         }
-        let d = match AnyGraph::<VoidLabel, VoidLabel, usize>::from_file(&directed, Some(id("any_d")), Some(2)).unwrap() {
+        let d = match AnyGraph::<VoidLabel, VoidLabel, usize>::from_file(
+            &directed,
+            Some(id("any_d")),
+            Some(2),
+        )
+        .unwrap()
+        {
             AnyGraph::Directed(d) => d,
             AnyGraph::Undirected(_) => panic!("a directed graph is a DiGraph"),
         };
         // a directed graph doesn't become a Graph, a Graph always becomes a DiGraph and back
         let d = d.try_into_undirected().err().expect("directed");
         let d = TestGraph::new(d, None);
-        let g = Graph::<VoidLabel, VoidLabel, usize>::from_file(&symmetric, Some(id("any_g")), Some(2)).unwrap();
+        let g =
+            Graph::<VoidLabel, VoidLabel, usize>::from_file(&symmetric, Some(id("any_g")), Some(2))
+                .unwrap();
         let as_directed = g.into_directed();
         assert!(as_directed.is_directed());
         let g = as_directed.try_into_undirected().ok().expect("symmetric");
@@ -587,7 +669,11 @@ mod tests {
     }
 
     /// Each node's undirected neighbours in a mode, by brute force over the arcs.
-    fn undirected_by_brute_force(n: usize, arcs: &[(usize, usize)], mode: UndirectedMode) -> Vec<Vec<usize>> {
+    fn undirected_by_brute_force(
+        n: usize,
+        arcs: &[(usize, usize)],
+        mode: UndirectedMode,
+    ) -> Vec<Vec<usize>> {
         let count = |u: usize, v: usize| arcs.iter().filter(|&&a| a == (u, v)).count();
         (0..n)
             .map(|u| {
@@ -624,17 +710,37 @@ mod tests {
         assert_eq!(transpose.width(), g.width());
         for v in 0..n {
             assert_eq!(g.in_degree(v).unwrap(), expected_in[v].len());
-            assert_eq!(g.in_neighbours(v).unwrap().collect::<Vec<_>>(), expected_in[v]);
+            assert_eq!(
+                g.in_neighbours(v).unwrap().collect::<Vec<_>>(),
+                expected_in[v]
+            );
         }
 
-        for mode in [UndirectedMode::Collapse, UndirectedMode::Each, UndirectedMode::Mutual] {
+        for mode in [
+            UndirectedMode::Collapse,
+            UndirectedMode::Each,
+            UndirectedMode::Mutual,
+        ] {
             let undirected = g.to_undirected_with(mode).unwrap();
-            assert_eq!(lists(undirected), undirected_by_brute_force(n, &arcs, mode), "{mode:?}");
-            assert!(undirected.is_symmetric().unwrap() && !undirected.is_directed(), "{mode:?}");
+            assert_eq!(
+                lists(undirected),
+                undirected_by_brute_force(n, &arcs, mode),
+                "{mode:?}"
+            );
+            assert!(
+                undirected.is_symmetric().unwrap() && !undirected.is_directed(),
+                "{mode:?}"
+            );
             // built once
-            assert!(std::ptr::eq(g.to_undirected_with(mode).unwrap(), undirected), "{mode:?}");
+            assert!(
+                std::ptr::eq(g.to_undirected_with(mode).unwrap(), undirected),
+                "{mode:?}"
+            );
         }
-        assert!(std::ptr::eq(g.to_undirected().unwrap(), g.to_undirected_with(UndirectedMode::Collapse).unwrap()));
+        assert!(std::ptr::eq(
+            g.to_undirected().unwrap(),
+            g.to_undirected_with(UndirectedMode::Collapse).unwrap()
+        ));
         assert!(std::ptr::eq(g.view(Direction::Out).unwrap(), &*g));
         assert!(std::ptr::eq(g.view(Direction::In).unwrap(), transpose));
         assert!(std::ptr::eq(g.transpose().unwrap(), transpose));
@@ -644,15 +750,32 @@ mod tests {
     /// parallel arcs, and every mode is built when it has.
     #[test]
     fn undirected_modes_of_symmetric_digraphs() {
-        for (name, arcs) in [("simple", vec![(1, 0), (2, 1), (3, 3)]), ("parallel", vec![(1, 0), (1, 0), (2, 1), (3, 3), (3, 3)])] {
+        for (name, arcs) in [
+            ("simple", vec![(1, 0), (2, 1), (3, 3)]),
+            ("parallel", vec![(1, 0), (1, 0), (2, 1), (3, 3), (3, 3)]),
+        ] {
             let g = digraph(name, "symmetric", 4, &arcs);
             let stored = lists(&*g);
-            let all_arcs: Vec<(usize, usize)> = (0..4).flat_map(|u| stored[u].iter().map(move |&v| (u, v))).collect();
-            for mode in [UndirectedMode::Collapse, UndirectedMode::Each, UndirectedMode::Mutual] {
+            let all_arcs: Vec<(usize, usize)> = (0..4)
+                .flat_map(|u| stored[u].iter().map(move |&v| (u, v)))
+                .collect();
+            for mode in [
+                UndirectedMode::Collapse,
+                UndirectedMode::Each,
+                UndirectedMode::Mutual,
+            ] {
                 let undirected = g.to_undirected_with(mode).unwrap();
-                assert_eq!(lists(undirected), undirected_by_brute_force(4, &all_arcs, mode), "{name} {mode:?}");
+                assert_eq!(
+                    lists(undirected),
+                    undirected_by_brute_force(4, &all_arcs, mode),
+                    "{name} {mode:?}"
+                );
                 let same_entry = undirected.cache_filename() == g.cache_filename();
-                assert_eq!(same_entry, name == "simple" && mode != UndirectedMode::Each, "{name} {mode:?}");
+                assert_eq!(
+                    same_entry,
+                    name == "simple" && mode != UndirectedMode::Each,
+                    "{name} {mode:?}"
+                );
             }
         }
     }
@@ -660,7 +783,12 @@ mod tests {
     /// A symmetric `DiGraph` is its own transpose, and its undirected graph is the same entry.
     #[test]
     fn views_of_symmetric_digraphs_cost_nothing() {
-        let g = digraph("symmetric_digraph", "symmetric", 4, &[(1, 0), (2, 1), (3, 3)]);
+        let g = digraph(
+            "symmetric_digraph",
+            "symmetric",
+            4,
+            &[(1, 0), (2, 1), (3, 3)],
+        );
         assert!(std::ptr::eq(g.transpose().unwrap(), &*g));
         assert!(std::ptr::eq(g.view(Direction::In).unwrap(), &*g));
         let undirected = g.to_undirected().unwrap();
@@ -672,22 +800,40 @@ mod tests {
     #[test]
     fn derived_graphs_are_reused_and_dropped_with_the_graph() {
         let path = write_mtx("reuse", "general", 3, &[(0, 1), (1, 2), (2, 0), (0, 2)]);
-        let mut g = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id("reuse")), Some(2)).unwrap();
-        let expected = (lists(g.transpose().unwrap()), lists(g.to_undirected().unwrap()));
+        let mut g =
+            DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id("reuse")), Some(2))
+                .unwrap();
+        let expected = (
+            lists(g.transpose().unwrap()),
+            lists(g.to_undirected().unwrap()),
+        );
         let derived_files = |g: &DiGraph<VoidLabel, VoidLabel, usize>| -> Vec<PathBuf> {
             ["transpose", "undirected"]
                 .iter()
-                .flat_map(|kind| files_of(&id_from_filename(&g.graph_cache.derived_id(kind).unwrap()).unwrap()))
+                .flat_map(|kind| {
+                    files_of(&id_from_filename(&g.graph_cache.derived_id(kind).unwrap()).unwrap())
+                })
                 .collect()
         };
         assert!(!derived_files(&g).is_empty());
 
         // a fresh instance finds them on disk
-        let reopened = DiGraph::<VoidLabel, VoidLabel, usize>::open(g.cache_filename(), None, Some(2)).unwrap();
-        assert_eq!((lists(reopened.transpose().unwrap()), lists(reopened.to_undirected().unwrap())), expected);
+        let reopened =
+            DiGraph::<VoidLabel, VoidLabel, usize>::open(g.cache_filename(), None, Some(2))
+                .unwrap();
+        assert_eq!(
+            (
+                lists(reopened.transpose().unwrap()),
+                lists(reopened.to_undirected().unwrap())
+            ),
+            expected
+        );
 
         g.drop_cache().unwrap();
-        assert!(derived_files(&reopened).is_empty(), "derived graphs left behind");
+        assert!(
+            derived_files(&reopened).is_empty(),
+            "derived graphs left behind"
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -697,15 +843,27 @@ mod tests {
     fn rebuilt_graphs_do_not_reuse_stale_derived_graphs() {
         let id = id("rebuilt");
         let first = write_mtx("rebuilt_a", "general", 3, &[(0, 1), (1, 2)]);
-        let g = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&first, Some(id.clone()), Some(2)).unwrap();
-        assert_eq!(lists(g.transpose().unwrap()), vec![vec![], vec![0], vec![1]]);
+        let g =
+            DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&first, Some(id.clone()), Some(2))
+                .unwrap();
+        assert_eq!(
+            lists(g.transpose().unwrap()),
+            vec![vec![], vec![0], vec![1]]
+        );
         drop(g);
 
         let second = write_mtx("rebuilt_b", "general", 3, &[(2, 0), (2, 1)]);
-        let g = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&second, Some(id), Some(2)).unwrap();
+        let g =
+            DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&second, Some(id), Some(2)).unwrap();
         let g = TestGraph::new(g, None);
-        assert_eq!(lists(g.transpose().unwrap()), vec![vec![2], vec![2], vec![]]);
-        assert_eq!(lists(g.to_undirected().unwrap()), vec![vec![2], vec![2], vec![0, 1]]);
+        assert_eq!(
+            lists(g.transpose().unwrap()),
+            vec![vec![2], vec![2], vec![]]
+        );
+        assert_eq!(
+            lists(g.to_undirected().unwrap()),
+            vec![vec![2], vec![2], vec![0, 1]]
+        );
         for path in [first, second] {
             std::fs::remove_dir_all(path.parent().unwrap()).ok();
         }
@@ -736,7 +894,8 @@ mod tests {
             "%%MatrixMarket matrix coordinate integer general\n3 3 4\n1 2 10\n1 3 20\n2 1 30\n3 3 40\n",
         )
         .unwrap();
-        let g = DiGraph::<VoidLabel, Weight, usize>::from_file(&path, Some(id("labels")), Some(2)).unwrap();
+        let g = DiGraph::<VoidLabel, Weight, usize>::from_file(&path, Some(id("labels")), Some(2))
+            .unwrap();
         let g = TestGraph::new(g, Some(dir));
 
         fn labelled<Dir: Directedness>(
@@ -744,23 +903,39 @@ mod tests {
         ) -> BTreeMap<usize, Vec<(usize, usize)>> {
             (0..g.size())
                 .map(|u| {
-                    let edges = g.index_node(u).zip(g.neighbours(u).unwrap()).map(|(e, v)| (v, g.edge_label(e).0)).collect();
+                    let edges = g
+                        .index_node(u)
+                        .zip(g.neighbours(u).unwrap())
+                        .map(|(e, v)| (v, g.edge_label(e).0))
+                        .collect();
                     (u, edges)
                 })
                 .collect()
         }
         assert_eq!(
             labelled(g.transpose().unwrap()),
-            BTreeMap::from([(0, vec![(1, 30)]), (1, vec![(0, 10)]), (2, vec![(0, 20), (2, 40)])])
+            BTreeMap::from([
+                (0, vec![(1, 30)]),
+                (1, vec![(0, 10)]),
+                (2, vec![(0, 20), (2, 40)])
+            ])
         );
         // collapsed: the first arc's label, out-arcs first
         assert_eq!(
             labelled(g.to_undirected().unwrap()),
-            BTreeMap::from([(0, vec![(1, 10), (2, 20)]), (1, vec![(0, 30)]), (2, vec![(0, 20), (2, 40)])])
+            BTreeMap::from([
+                (0, vec![(1, 10), (2, 20)]),
+                (1, vec![(0, 30)]),
+                (2, vec![(0, 20), (2, 40)])
+            ])
         );
         assert_eq!(
             labelled(g.to_undirected_with(UndirectedMode::Each).unwrap()),
-            BTreeMap::from([(0, vec![(1, 10), (1, 30), (2, 20)]), (1, vec![(0, 30), (0, 10)]), (2, vec![(0, 20), (2, 40)])])
+            BTreeMap::from([
+                (0, vec![(1, 10), (1, 30), (2, 20)]),
+                (1, vec![(0, 30), (0, 10)]),
+                (2, vec![(0, 20), (2, 40)])
+            ])
         );
         // mutual: only 0 - 1 (both ways) and the self-loop
         assert_eq!(
@@ -778,21 +953,35 @@ mod directed_algorithms_tests {
     use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
     use crate::trails::bfs::BFSDists;
 
-    fn digraph(name: &str, n: usize, arcs: &[(usize, usize)]) -> TestGraph<(), (), usize, Directed> {
+    fn digraph(
+        name: &str,
+        n: usize,
+        arcs: &[(usize, usize)],
+    ) -> TestGraph<(), (), usize, Directed> {
         let dir = unique_test_dir("direction_algorithms");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{name}.mtx"));
-        let mut text = format!("%%MatrixMarket matrix coordinate pattern general\n{n} {n} {}\n", arcs.len());
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate pattern general\n{n} {n} {}\n",
+            arcs.len()
+        );
         for (u, v) in arcs {
             text += &format!("{} {}\n", u + 1, v + 1);
         }
         std::fs::write(&path, text).unwrap();
         let id = format!("direction_algorithms_{name}_{}", unique_run_tag());
-        TestGraph::new(DiGraph::from_file(&path, Some(id), Some(2)).unwrap(), Some(dir))
+        TestGraph::new(
+            DiGraph::from_file(&path, Some(id), Some(2)).unwrap(),
+            Some(dir),
+        )
     }
 
     fn close(got: &[f64], want: &[f64], tolerance: f64) -> bool {
-        got.len() == want.len() && got.iter().zip(want).all(|(g, w)| (g - w).abs() <= tolerance)
+        got.len() == want.len()
+            && got
+                .iter()
+                .zip(want)
+                .all(|(g, w)| (g - w).abs() <= tolerance)
     }
 
     /// On 0 -> 1 -> 2: outgoing distances are from a node, incoming ones to it (networkx's
@@ -802,16 +991,41 @@ mod directed_algorithms_tests {
         let g = digraph("path", 3, &[(0, 1), (1, 2)]);
         let undirected = g.to_undirected().unwrap();
         // unreached nodes are at distance 0, like the source
-        assert_eq!(BFSDists::new_directed(&g, 0, Direction::Out).unwrap().get_distances(), &[0, 1, 2]);
-        assert_eq!(BFSDists::new_directed(&g, 2, Direction::In).unwrap().get_distances(), &[2, 1, 0]);
-        assert_eq!(BFSDists::new(undirected, 2).unwrap().get_distances(), &[2, 1, 0]);
+        assert_eq!(
+            BFSDists::new_directed(&g, 0, Direction::Out)
+                .unwrap()
+                .get_distances(),
+            &[0, 1, 2]
+        );
+        assert_eq!(
+            BFSDists::new_directed(&g, 2, Direction::In)
+                .unwrap()
+                .get_distances(),
+            &[2, 1, 0]
+        );
+        assert_eq!(
+            BFSDists::new(undirected, 2).unwrap().get_distances(),
+            &[2, 1, 0]
+        );
 
         let closeness = |c: ExactClosenessCentrality<'_, (), (), usize, f64, _>| -> Vec<f64> {
             (0..3).map(|v| c.get_node_centrality(v)).collect()
         };
         // (n - 1) / total distance to the nodes reached
-        assert!(close(&closeness(ExactClosenessCentrality::new_directed(&g, Some(false), Direction::Out).unwrap()), &[2. / 3., 2., 0.], 1e-12));
-        assert!(close(&closeness(ExactClosenessCentrality::new_directed(&g, Some(false), Direction::In).unwrap()), &[0., 2., 2. / 3.], 1e-12));
+        assert!(close(
+            &closeness(
+                ExactClosenessCentrality::new_directed(&g, Some(false), Direction::Out).unwrap()
+            ),
+            &[2. / 3., 2., 0.],
+            1e-12
+        ));
+        assert!(close(
+            &closeness(
+                ExactClosenessCentrality::new_directed(&g, Some(false), Direction::In).unwrap()
+            ),
+            &[0., 2., 2. / 3.],
+            1e-12
+        ));
         let both: Vec<f64> = {
             let c = ExactClosenessCentrality::<_, _, _, f64>::new(undirected, Some(false)).unwrap();
             (0..3).map(|v| c.get_node_centrality(v)).collect()
@@ -819,31 +1033,56 @@ mod directed_algorithms_tests {
         assert!(close(&both, &[2. / 3., 1., 2. / 3.], 1e-12));
 
         // networkx's harmonic_centrality (incoming): [0, 1, 1.5]
-        let harmonic = ExactHarmonicCentrality::<_, _, _, f64, _>::new_directed(&g, None, Direction::In).unwrap();
+        let harmonic =
+            ExactHarmonicCentrality::<_, _, _, f64, _>::new_directed(&g, None, Direction::In)
+                .unwrap();
         let harmonic: Vec<f64> = (0..3).map(|v| harmonic.get_node_centrality(v)).collect();
         assert!(close(&harmonic, &[0., 1., 1.5], 1e-12));
 
         // HyperBall's estimates agree (exactly enough, on 3 nodes)
         let mut in_ball = HyperBall8::new_directed(&g, Direction::In).unwrap();
-        let estimated = in_ball.get_or_compute_closeness_centrality(true).unwrap().to_vec();
-        let exact = ExactClosenessCentrality::<_, _, _, f64, _>::new_directed(&g, Some(true), Direction::In).unwrap();
+        let estimated = in_ball
+            .get_or_compute_closeness_centrality(true)
+            .unwrap()
+            .to_vec();
+        let exact = ExactClosenessCentrality::<_, _, _, f64, _>::new_directed(
+            &g,
+            Some(true),
+            Direction::In,
+        )
+        .unwrap();
         let exact: Vec<f64> = (0..3).map(|v| exact.get_node_centrality(v)).collect();
-        assert!(close(&estimated, &exact, 0.05), "{estimated:?} vs {exact:?}");
+        assert!(
+            close(&estimated, &exact, 0.05),
+            "{estimated:?} vs {exact:?}"
+        );
     }
 
     #[test]
     fn hierholzer_needs_balanced_directed_graphs() {
         use crate::trails::hierholzer::AlgoHierholzer;
         let unbalanced = digraph("path", 3, &[(0, 1), (1, 2)]);
-        let err = AlgoHierholzer::new(&unbalanced).err().expect("a path has no closed trail");
-        assert!(err.to_string().contains("node 0 has 0 in and 1 out"), "{err}");
+        let err = AlgoHierholzer::new(&unbalanced)
+            .err()
+            .expect("a path has no closed trail");
+        assert!(
+            err.to_string().contains("node 0 has 0 in and 1 out"),
+            "{err}"
+        );
 
         // two cycles sharing node 1: one closed trail over all 5 arcs
         let eulerian = digraph("cycles", 4, &[(0, 1), (1, 0), (1, 2), (2, 3), (3, 1)]);
         let euler = AlgoHierholzer::new(&eulerian).unwrap();
         assert_eq!(euler.trail_number(), 1);
-        let trail: Vec<usize> = euler.get_trail(0).unwrap().iter().map(|v| v.index()).collect();
-        let mut arcs: Vec<(usize, usize)> = (0..trail.len()).map(|i| (trail[i], trail[(i + 1) % trail.len()])).collect();
+        let trail: Vec<usize> = euler
+            .get_trail(0)
+            .unwrap()
+            .iter()
+            .map(|v| v.index())
+            .collect();
+        let mut arcs: Vec<(usize, usize)> = (0..trail.len())
+            .map(|i| (trail[i], trail[(i + 1) % trail.len()]))
+            .collect();
         arcs.sort();
         assert_eq!(arcs, vec![(0, 1), (1, 0), (1, 2), (2, 3), (3, 1)]);
     }

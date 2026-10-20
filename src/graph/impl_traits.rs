@@ -14,8 +14,12 @@ fn widen_to_ix<Ix: crate::graph::IndexType>(x: usize) -> Ix {
 
 type IxNeighbours<N, E, Ix> = std::iter::Map<NeighbourIter<N, E, Ix>, fn(usize) -> Ix>;
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness> dfs_visit::Graph
-    for GraphMemoryMap<N, E, Ix, Dir>
+impl<
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: crate::graph::Directedness,
+> dfs_visit::Graph for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Ix = Ix;
 
@@ -61,8 +65,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: c
     }
 }
 
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness> bfs_visit::Graph
-    for GraphMemoryMap<N, E, Ix, Dir>
+impl<
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: crate::graph::Directedness,
+> bfs_visit::Graph for GraphMemoryMap<N, E, Ix, Dir>
 {
     type Ix = Ix;
 
@@ -141,7 +149,8 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph =
+            crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         let guard = crate::graph::test_utils::CacheGuard::new(&graph, None);
         (graph, guard)
@@ -154,8 +163,14 @@ mod test {
             let real: Vec<usize> = graph.neighbours(u).unwrap().collect();
             let via_dfs_trait: Vec<usize> = dfs_visit::Graph::neigh(&graph, u).collect();
             let via_bfs_trait: Vec<usize> = bfs_visit::Graph::neigh(&graph, u).collect();
-            assert_eq!(real, via_dfs_trait, "dfs_visit::Graph::neigh mismatch for node {u}");
-            assert_eq!(real, via_bfs_trait, "bfs_visit::Graph::neigh mismatch for node {u}");
+            assert_eq!(
+                real, via_dfs_trait,
+                "dfs_visit::Graph::neigh mismatch for node {u}"
+            );
+            assert_eq!(
+                real, via_bfs_trait,
+                "bfs_visit::Graph::neigh mismatch for node {u}"
+            );
         }
     }
 
@@ -202,7 +217,11 @@ mod test {
 
         let mut discovered = discovered_log.lock().unwrap().clone();
         discovered.sort_unstable();
-        assert_eq!(discovered, vec![0, 1, 2, 3], "DFS should discover every node reachable from 0");
+        assert_eq!(
+            discovered,
+            vec![0, 1, 2, 3],
+            "DFS should discover every node reachable from 0"
+        );
     }
 
     #[test]
@@ -216,7 +235,11 @@ mod test {
 
         let mut discovered = discovered_log.lock().unwrap().clone();
         discovered.sort_unstable();
-        assert_eq!(discovered, vec![0, 1, 2, 3], "BFS should discover every node reachable from 0");
+        assert_eq!(
+            discovered,
+            vec![0, 1, 2, 3],
+            "BFS should discover every node reachable from 0"
+        );
     }
 
     /// A strict chain (0 -> 1 -> 2 -> 3), where node 0 is *not* directly adjacent to 2 or 3.
@@ -240,7 +263,8 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph =
+            crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         let guard = crate::graph::test_utils::CacheGuard::new(&graph, None);
         (graph, guard)

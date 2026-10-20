@@ -23,7 +23,13 @@ type ProceduralMemoryBFSDists<Ix> = (
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
 /// [`DiGraph`]: ../../graph/type.DiGraph.html
-pub struct BFSDists<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
+pub struct BFSDists<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     /// Graph in which the BFS is to be performed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     source: usize,
@@ -52,8 +58,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> BFSDists<'a, N, E, Ix, 
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSDists<'a, N, E, Ix, Dir> {
-
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    BFSDists<'a, N, E, Ix, Dir>
+{
     pub fn new(
         g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
@@ -125,7 +132,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSD
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSDists<'a, N, E, Ix, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    BFSDists<'a, N, E, Ix, Dir>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -146,7 +155,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSD
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -211,7 +222,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> BFSD
         })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(
+        &self,
+    ) -> Result<ProceduralMemoryBFSDists<Ix>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
         let q_fn = self.build_cache_filename(CacheFile::BFS, Some(0))?;
@@ -279,7 +292,8 @@ mod test {
         header: &str,
         n: usize,
         edges: &[(usize, usize)],
-    ) -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
+    ) -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed>
+    {
         let dir = unique_test_dir("bfs_dists_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{name}.mtx"));
@@ -290,9 +304,12 @@ mod test {
             writeln!(f, "{} {}", u + 1, v + 1).unwrap();
         }
         drop(f);
-        let graph =
-            crate::graph::DiGraph::from_file(&path, Some(format!("bfs_{name}_{}", unique_run_tag())), None)
-                .expect("graph parse should succeed");
+        let graph = crate::graph::DiGraph::from_file(
+            &path,
+            Some(format!("bfs_{name}_{}", unique_run_tag())),
+            None,
+        )
+        .expect("graph parse should succeed");
         crate::graph::test_utils::TestGraph::new(graph, Some(dir))
     }
 

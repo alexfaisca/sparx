@@ -47,7 +47,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix, Direc
 
 #[allow(dead_code)]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<'a, N, E, Ix, Dir> {
-
     /// Performs DFS in a [`GraphMemoryMap`] instance.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#

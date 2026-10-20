@@ -33,7 +33,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         AlgoBurkhardtEtAl::new(self)
     }
     /// Performs k-truss decomposition on the graph using Burkhardt et al's algorithm.
-    pub fn k_truss_bea(&self) -> Result<AlgoBurkhardtEtAl<'_, N, E, Ix>, Box<dyn std::error::Error>> {
+    pub fn k_truss_bea(
+        &self,
+    ) -> Result<AlgoBurkhardtEtAl<'_, N, E, Ix>, Box<dyn std::error::Error>> {
         AlgoBurkhardtEtAl::new(self)
     }
     /// Performs k-truss decomposition on the graph using the Parallel K-Truss algorithm.

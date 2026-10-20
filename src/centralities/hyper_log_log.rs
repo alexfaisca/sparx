@@ -232,11 +232,7 @@ impl<P: Precision> HyperLogLog<P> {
                 saturated[l] += (r == max) as u32;
             }
         }
-        (
-            sum.iter().sum(),
-            zeros.iter().sum(),
-            saturated.iter().sum(),
-        )
+        (sum.iter().sum(), zeros.iter().sum(), saturated.iter().sum())
     }
 
     /// Same as [`register_stats_fused`](Self::register_stats_fused), but counting zero and

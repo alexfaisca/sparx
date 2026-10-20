@@ -16,13 +16,7 @@ use std::path::Path;
 /// [`TriangleCount`]: ../count/trait.TriangleCount.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct Triangles<
-    'a,
-    N: graph::N,
-    E: graph::E,
-    Ix: graph::IndexType,
-    Tx: TriangleCount = u8,
-> {
+pub struct Triangles<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount = u8> {
     /// Graph for which each edge's triangles are computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
     /// Memmapped slice containing the number of triangles of each edge.
@@ -240,11 +234,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
                                         std::cmp::Ordering::Equal => {
                                             // runs of parallel edges to the common neighbour
                                             let mut p_run = p;
-                                            while p_run < x_end && neighbours_ptr.get(p_run).index() == a {
+                                            while p_run < x_end
+                                                && neighbours_ptr.get(p_run).index() == a
+                                            {
                                                 p_run += 1;
                                             }
                                             let mut q_run = q;
-                                            while q_run < y_end && neighbours_ptr.get(q_run).index() == a {
+                                            while q_run < y_end
+                                                && neighbours_ptr.get(q_run).index() == a
+                                            {
                                                 q_run += 1;
                                             }
                                             for x_z in p..p_run {
@@ -324,7 +322,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         // read back into a scratch file rather than the heap: one count per arc
         let c_fn = g.build_cache_filename(CacheFile::Triangles, Some(0))?;
         let mut counts = ScratchMem::<u32>::new(c_fn, g.width())?;
-        backend.triangles(graph, edge_over.as_slice(), edge_reciprocal.as_slice(), &mut counts)?;
+        backend.triangles(
+            graph,
+            edge_over.as_slice(),
+            edge_reciprocal.as_slice(),
+            &mut counts,
+        )?;
         for (t, &c) in triangles.triangles.as_slice().iter().zip(counts.iter()) {
             if c as usize > Tx::MAX {
                 return Err(format!(
@@ -380,7 +383,9 @@ pub(crate) mod test {
     }
 
     pub(crate) fn clique_edges(n: usize) -> Vec<(usize, usize)> {
-        (0..n).flat_map(|u| (u + 1..n).map(move |v| (u, v))).collect()
+        (0..n)
+            .flat_map(|u| (u + 1..n).map(move |v| (u, v)))
+            .collect()
     }
 
     /// Undirected DNA de Bruijn graph of order `k`, without self-loops or duplicate edges.
@@ -468,26 +473,45 @@ pub(crate) mod test {
     pub(crate) fn fixtures() -> Vec<(&'static str, TestGraph)> {
         vec![
             ("clique6", undirected_graph("clique6", 6, &clique_edges(6))),
-            ("debruijn4", undirected_graph("debruijn4", 256, &de_bruijn_edges(4))),
-            ("grid", undirected_graph("grid", 400, &triangulated_grid_edges(20))),
-            ("random", undirected_graph("random", 300, &random_edges(300, 0.08, 7))),
+            (
+                "debruijn4",
+                undirected_graph("debruijn4", 256, &de_bruijn_edges(4)),
+            ),
+            (
+                "grid",
+                undirected_graph("grid", 400, &triangulated_grid_edges(20)),
+            ),
+            (
+                "random",
+                undirected_graph("random", 300, &random_edges(300, 0.08, 7)),
+            ),
             // isolated nodes and a self-loop
             (
                 "sparse",
-                undirected_graph("sparse", 30, &[(0, 1), (1, 2), (0, 2), (5, 5), (5, 6), (20, 21)]),
+                undirected_graph(
+                    "sparse",
+                    30,
+                    &[(0, 1), (1, 2), (0, 2), (5, 5), (5, 6), (20, 21)],
+                ),
             ),
             // parallel edges: every 5th edge of a random graph tripled
-            ("multi", undirected_graph("multi", 80, &{
-                let mut edges = random_edges(80, 0.2, 11);
-                let parallel: Vec<_> = edges.iter().step_by(5).copied().collect();
-                edges.extend(parallel.iter().chain(&parallel));
-                edges
-            })),
+            (
+                "multi",
+                undirected_graph("multi", 80, &{
+                    let mut edges = random_edges(80, 0.2, 11);
+                    let parallel: Vec<_> = edges.iter().step_by(5).copied().collect();
+                    edges.extend(parallel.iter().chain(&parallel));
+                    edges
+                }),
+            ),
         ]
     }
 
     fn counts(t: &Triangles<VoidLabel, VoidLabel, usize>) -> Vec<usize> {
-        t.all_triangles().iter().map(|c| c.load(Ordering::Relaxed) as usize).collect()
+        t.all_triangles()
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed) as usize)
+            .collect()
     }
 
     #[test]
@@ -518,4 +542,3 @@ pub(crate) mod test {
         }
     }
 }
-

@@ -103,7 +103,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_tx(g, threads)
     }
-
 }
 
 #[allow(dead_code)]
@@ -158,12 +157,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         pkt.compute_with_triangles(proc_mem, triangles)?;
         Ok(pkt)
     }
-
-
-
-
-
-
 }
 
 #[allow(dead_code)]
@@ -225,7 +218,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         self.g.width()
     }
 
-
     fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
         let mem = self.scratch_mem()?;
         // pre-initialize the memmapped files if they don't exist
@@ -266,8 +258,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         triangles.drop_cache()?;
         Ok(())
     }
-
-
 }
 
 /// Shared by the decompositions of undirected graphs' triangles and directed graphs'.
@@ -288,7 +278,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
         let processed = SharedSliceMut::<bool>::abst_mem_mut(&file(2)?, edge_count, true)?;
         let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&file(3)?, edge_count, true)?;
         let in_next = SharedSliceMut::<bool>::abst_mem_mut(&file(4)?, edge_count, true)?;
-
 
         Ok((curr, next, processed, in_curr, in_next))
     }

@@ -21,7 +21,10 @@ struct Scratch<'a> {
 }
 
 impl<'a> Scratch<'a> {
-    fn new(name: &'a dyn Fn(usize) -> Result<String, Box<dyn std::error::Error>>, first: usize) -> Self {
+    fn new(
+        name: &'a dyn Fn(usize) -> Result<String, Box<dyn std::error::Error>>,
+        first: usize,
+    ) -> Self {
         Self {
             name,
             next: Cell::new(first),
@@ -40,7 +43,11 @@ impl<'a> Scratch<'a> {
     }
 
     /// An array of `value`s.
-    fn filled<T: Copy>(&self, len: usize, value: T) -> Result<ScratchMem<T>, Box<dyn std::error::Error>> {
+    fn filled<T: Copy>(
+        &self,
+        len: usize,
+        value: T,
+    ) -> Result<ScratchMem<T>, Box<dyn std::error::Error>> {
         ScratchMem::filled(self.file_name()?, len, value)
     }
 
@@ -490,7 +497,11 @@ impl Supergraph {
         };
         let mut acc = scratch.zeroed::<u64>(count)?;
         let mut touched = scratch.stack::<usize>(count)?;
-        fn flush(acc: &mut [u64], touched: &mut ScratchStack<usize>, arcs: &mut ScratchStack<(usize, u64)>) {
+        fn flush(
+            acc: &mut [u64],
+            touched: &mut ScratchStack<usize>,
+            arcs: &mut ScratchStack<(usize, u64)>,
+        ) {
             touched.as_mut_slice().sort_unstable();
             for &d in touched.as_slice() {
                 arcs.push((d, acc[d]));
@@ -953,7 +964,11 @@ mod test {
             let mut moved = comm.clone();
             moved[i] = n; // a community of its own
             let q_moved = brute_force_modularity(n, &arcs, &moved);
-            assert!(q_moved <= q + 1e-12, "{comm:?}: isolating {i} gains {}", q_moved - q);
+            assert!(
+                q_moved <= q + 1e-12,
+                "{comm:?}: isolating {i} gains {}",
+                q_moved - q
+            );
         }
     }
 
@@ -969,16 +984,52 @@ mod test {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "%%MatrixMarket matrix coordinate pattern general").unwrap();
         writeln!(f, "{} {} {}", groups * size, groups * size, arcs.len()).unwrap();
-        for &(u, v) in &arcs { writeln!(f, "{} {}", u + 1, v + 1).unwrap(); }
+        for &(u, v) in &arcs {
+            writeln!(f, "{} {}", u + 1, v + 1).unwrap();
+        }
         drop(f);
         let expected: Vec<usize> = (0..groups * size).map(|v| v / size).collect();
-        let g16 = TestGraph::new(crate::graph::DiGraph::<(), (), u16>::from_file(&path, Some(format!("r16_{}", unique_run_tag())), Some(2)).unwrap(), None);
+        let g16 = TestGraph::new(
+            crate::graph::DiGraph::<(), (), u16>::from_file(
+                &path,
+                Some(format!("r16_{}", unique_run_tag())),
+                Some(2),
+            )
+            .unwrap(),
+            None,
+        );
         let l = DirectedLouvain::new(&g16).unwrap();
-        assert_eq!(l.communities().iter().map(|c| c.index()).collect::<Vec<_>>(), expected);
-        let lab: Vec<u16> = (0..groups * size).map(|v| 60000 + (v / size) as u16).collect();
-        assert_close(directed_modularity(&g16, &lab).unwrap(), l.partition_modularity(), "u16 big labels");
-        let g8 = TestGraph::new(crate::graph::DiGraph::<(), (), u8>::from_file(&path, Some(format!("r8_{}", unique_run_tag())), Some(2)).unwrap(), Some(dir));
+        assert_eq!(
+            l.communities()
+                .iter()
+                .map(|c| c.index())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let lab: Vec<u16> = (0..groups * size)
+            .map(|v| 60000 + (v / size) as u16)
+            .collect();
+        assert_close(
+            directed_modularity(&g16, &lab).unwrap(),
+            l.partition_modularity(),
+            "u16 big labels",
+        );
+        let g8 = TestGraph::new(
+            crate::graph::DiGraph::<(), (), u8>::from_file(
+                &path,
+                Some(format!("r8_{}", unique_run_tag())),
+                Some(2),
+            )
+            .unwrap(),
+            Some(dir),
+        );
         let l = DirectedLouvain::new(&g8).unwrap();
-        assert_eq!(l.communities().iter().map(|c| c.index()).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            l.communities()
+                .iter()
+                .map(|c| c.index())
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 }

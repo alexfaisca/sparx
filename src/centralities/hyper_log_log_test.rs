@@ -27,12 +27,18 @@ struct Rng(u64);
 
 /// The `HLL_TEST_SEED` environment variable's value (0 if unset).
 fn seed() -> u64 {
-    std::env::var("HLL_TEST_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+    std::env::var("HLL_TEST_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self((seed ^ 0x5851_F42D_4C95_7F2D).wrapping_add(self::seed().wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+        Self(
+            (seed ^ 0x5851_F42D_4C95_7F2D)
+                .wrapping_add(self::seed().wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+        )
     }
 
     fn next(&mut self) -> u64 {
@@ -148,7 +154,11 @@ fn poisson_counter<P: Precision>(n: f64, rng: &mut Rng) -> HyperLogLog<P> {
     for r in c.registers.as_mut() {
         // the smallest k with exp(-lambda 2^-k) >= u, from u's exponential -ln(u)
         let e = -rng.unit().ln();
-        let k = if e >= lambda { 0 } else { (lambda / e).log2().ceil() as usize };
+        let k = if e >= lambda {
+            0
+        } else {
+            (lambda / e).log2().ceil() as usize
+        };
         *r = k.min(HyperLogLog::<P>::Q + 1) as u8;
     }
     c
@@ -171,10 +181,22 @@ fn register_states<P: Precision>(rng: &mut Rng) -> Vec<HyperLogLog<P>> {
     }
     for _ in 0..16 {
         state(&mut |_| (rng.next() % (max as u64 + 1)) as u8);
-        state(&mut |_| if rng.below(8) == 0 { 1 + rng.below(max as usize) as u8 } else { 0 });
+        state(&mut |_| {
+            if rng.below(8) == 0 {
+                1 + rng.below(max as usize) as u8
+            } else {
+                0
+            }
+        });
         let base = 1 + rng.below(max as usize - 4) as u8;
         state(&mut |_| base + rng.below(4) as u8);
-        state(&mut |_| if rng.below(4) == 0 { max } else { rng.below(max as usize) as u8 });
+        state(&mut |_| {
+            if rng.below(4) == 0 {
+                max
+            } else {
+                rng.below(max as usize) as u8
+            }
+        });
         state(&mut |i| [0, 1, max][i % 3]);
     }
     // one register set
@@ -236,9 +258,9 @@ fn assert_within<P: Precision>(estimate: f64, n: f64, what: &str) {
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
-    bytes
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 // --- tests at every precision ---
@@ -255,7 +277,10 @@ fn layout<P: Precision>() {
     let mut counters = vec![HyperLogLog::<P>::default(); 3];
     counters[1].insert(7);
     counters[2].insert(8);
-    let expected: Vec<u8> = counters.iter().flat_map(|c| c.registers().to_vec()).collect();
+    let expected: Vec<u8> = counters
+        .iter()
+        .flat_map(|c| c.registers().to_vec())
+        .collect();
     let bytes = HyperLogLog::<P>::registers_of_mut(&mut counters);
     assert_eq!(bytes, expected.as_slice());
     bytes[m::<P>() + 1] = 5;
@@ -289,7 +314,12 @@ fn crafted_hashes<P: Precision>() {
         for k in 0..q {
             let mut c = HyperLogLog::<P>::default();
             c.insert_hash(top | 1 << (q - 1 - k));
-            assert_eq!(c.registers()[index], k as u8 + 1, "index {index}, rank {}", k + 1);
+            assert_eq!(
+                c.registers()[index],
+                k as u8 + 1,
+                "index {index}, rank {}",
+                k + 1
+            );
             assert_eq!(c.registers().iter().filter(|&&r| r != 0).count(), 1);
             // the lower bits don't matter
             let mut d = HyperLogLog::<P>::default();
@@ -317,14 +347,28 @@ fn insert_matches_reference<P: Precision>() {
     let mut rng = Rng::new(P::EXPONENT as u64);
     let mut counter = HyperLogLog::<P>::default();
     let mut expected = vec![0u8; m::<P>()];
-    let extremes = [0, 1, u64::MAX, u64::MAX - 1, 1 << 63, (1 << 63) - 1, u32::MAX as u64];
-    let elements = extremes.into_iter().chain((0..trials(200_000)).map(|_| rng.next()));
+    let extremes = [
+        0,
+        1,
+        u64::MAX,
+        u64::MAX - 1,
+        1 << 63,
+        (1 << 63) - 1,
+        u32::MAX as u64,
+    ];
+    let elements = extremes
+        .into_iter()
+        .chain((0..trials(200_000)).map(|_| rng.next()));
     for (i, e) in elements.enumerate() {
         counter.insert(e);
         let (index, rank) = reference_rank::<P>(HyperLogLog::<P>::hash(e));
         expected[index] = expected[index].max(rank);
         if i % 997 == 0 {
-            assert_eq!(counter.registers(), expected.as_slice(), "after {i} elements");
+            assert_eq!(
+                counter.registers(),
+                expected.as_slice(),
+                "after {i} elements"
+            );
         }
     }
     assert_eq!(counter.registers(), expected.as_slice());
@@ -390,7 +434,11 @@ fn union_algebra<P: Precision>() {
             for i in 0..m::<P>() {
                 assert_eq!(ab.registers()[i], a.registers()[i].max(b.registers()[i]));
             }
-            assert_eq!(changed, ab != a, "whether registers changed, {x} and {y} elements");
+            assert_eq!(
+                changed,
+                ab != a,
+                "whether registers changed, {x} and {y} elements"
+            );
             // commutative, idempotent, associative
             let mut ba = b;
             ba.union(&a);
@@ -404,7 +452,9 @@ fn union_algebra<P: Precision>() {
             right.union(&bc);
             assert_eq!(left, right, "(a b) c and a (b c)");
             // never lower than either, so neither are estimates
-            assert!(ab.estimate_cardinality() >= a.estimate_cardinality().max(b.estimate_cardinality()));
+            assert!(
+                ab.estimate_cardinality() >= a.estimate_cardinality().max(b.estimate_cardinality())
+            );
         }
     }
 }
@@ -425,7 +475,11 @@ fn union_of_many<P: Precision>() {
     }
     assert_eq!(union, all);
     let n = ((counters + 1) * per_counter / 2) as f64;
-    assert_within::<P>(union.estimate_cardinality(), n, &format!("union of {counters} counters"));
+    assert_within::<P>(
+        union.estimate_cardinality(),
+        n,
+        &format!("union of {counters} counters"),
+    );
 }
 
 /// The SSE2 union (on x86_64) is the portable one: the same registers, and whether they changed.
@@ -451,7 +505,11 @@ fn stats_paths_agree<P: Precision>() {
         // the same sum (in the same order) and counts, bit for bit
         let (fused, split) = (c.register_stats_fused(), c.register_stats_split());
         assert_eq!(fused.0.to_bits(), split.0.to_bits(), "sums");
-        assert_eq!((fused.1, fused.2), (split.1, split.2), "zero and saturated counts");
+        assert_eq!(
+            (fused.1, fused.2),
+            (split.1, split.2),
+            "zero and saturated counts"
+        );
         let max = max_rank::<P>();
         let zeros = c.registers().iter().filter(|&&r| r == 0).count() as u32;
         let saturated = c.registers().iter().filter(|&&r| r == max).count() as u32;
@@ -464,15 +522,28 @@ fn stats_paths_agree<P: Precision>() {
 fn estimate_matches_reference<P: Precision>() {
     let mut rng = Rng::new(40 + P::EXPONENT as u64);
     for c in register_states::<P>(&mut rng) {
-        let (estimate, reference) = (c.estimate_cardinality(), reference_estimate::<P>(c.registers()));
-        assert!(close(estimate, reference), "estimate {estimate}, reference {reference} of {c:?}");
+        let (estimate, reference) = (
+            c.estimate_cardinality(),
+            reference_estimate::<P>(c.registers()),
+        );
+        assert!(
+            close(estimate, reference),
+            "estimate {estimate}, reference {reference} of {c:?}"
+        );
     }
     // from actual insertions too
     let mut c = HyperLogLog::<P>::default();
     for e in 0..trials(1 << 18) as u64 {
         c.insert(e);
         if e.is_power_of_two() {
-            assert!(close(c.estimate_cardinality(), reference_estimate::<P>(c.registers())), "{} elements", e + 1);
+            assert!(
+                close(
+                    c.estimate_cardinality(),
+                    reference_estimate::<P>(c.registers())
+                ),
+                "{} elements",
+                e + 1
+            );
         }
     }
 }
@@ -491,7 +562,10 @@ fn estimates_well_defined<P: Precision>() {
         } else if empty {
             assert_eq!(estimate, 0.);
         } else {
-            assert!(estimate.is_finite() && estimate > 0., "estimate {estimate} of {c:?}");
+            assert!(
+                estimate.is_finite() && estimate > 0.,
+                "estimate {estimate} of {c:?}"
+            );
         }
     }
     // a single saturated register (and no other): like any single element's
@@ -545,7 +619,9 @@ fn accuracy_small<P: Precision>() {
             c
         });
         if n * 16 > m {
-            let errors: Vec<f64> = counters.map(|c| c.estimate_cardinality() / n as f64 - 1.).collect();
+            let errors: Vec<f64> = counters
+                .map(|c| c.estimate_cardinality() / n as f64 - 1.)
+                .collect();
             assert_accurate::<P>(&format!("{n} inserted elements"), &errors, 1.05, 1.1);
             continue;
         }
@@ -574,7 +650,11 @@ fn accuracy_small<P: Precision>() {
             P::EXPONENT
         );
         if expected >= 25. {
-            assert!((collisions as f64) >= expected - 6. * expected.sqrt(), "precision {}, {n} elements: {collisions} collisions, {expected:.2} expected", P::EXPONENT);
+            assert!(
+                (collisions as f64) >= expected - 6. * expected.sqrt(),
+                "precision {}, {n} elements: {collisions} collisions, {expected:.2} expected",
+                P::EXPONENT
+            );
         }
     }
 }
@@ -583,7 +663,11 @@ fn accuracy_small<P: Precision>() {
 fn accuracy_large<P: Precision>() {
     let mut next = seed() << 40;
     for (n, t) in [(100_000, 40), (1_000_000, 16), (4_000_000, 4)] {
-        let t = if cfg!(debug_assertions) { (t / 4).max(2) } else { t };
+        let t = if cfg!(debug_assertions) {
+            (t / 4).max(2)
+        } else {
+            t
+        };
         // few trials: each within bounds
         for _ in 0..t {
             let mut c = HyperLogLog::<P>::default();
@@ -608,7 +692,12 @@ fn accuracy_huge<P: Precision>() {
         let errors: Vec<f64> = (0..t)
             .map(|_| poisson_counter::<P>(n, &mut rng).estimate_cardinality() / n - 1.)
             .collect();
-        assert_accurate::<P>(&format!("2^{k} elements (Poisson model)"), &errors, 1.05, 1.1);
+        assert_accurate::<P>(
+            &format!("2^{k} elements (Poisson model)"),
+            &errors,
+            1.05,
+            1.1,
+        );
     }
 }
 
@@ -643,13 +732,22 @@ fn hash_distribution<P: Precision>() {
         }
     }
     let expected = n as f64 / m as f64;
-    let chi2: f64 = counts.iter().map(|&c| (c as f64 - expected).powi(2) / expected).sum();
+    let chi2: f64 = counts
+        .iter()
+        .map(|&c| (c as f64 - expected).powi(2) / expected)
+        .sum();
     let dof = (m - 1) as f64;
-    assert!((chi2 - dof).abs() <= 6. * (2. * dof).sqrt(), "register indices: chi^2 {chi2} for {dof} degrees of freedom");
+    assert!(
+        (chi2 - dof).abs() <= 6. * (2. * dof).sqrt(),
+        "register indices: chi^2 {chi2} for {dof} degrees of freedom"
+    );
     for (k, &count) in ranks.iter().enumerate().skip(1) {
         let p = 0.5f64.powi(k as i32);
         let sd = (n as f64 * p * (1. - p)).sqrt();
-        assert!((count as f64 - n as f64 * p).abs() <= 6. * sd, "rank {k}: {count} of {n}");
+        assert!(
+            (count as f64 - n as f64 * p).abs() <= 6. * sd,
+            "rank {k}: {count} of {n}"
+        );
     }
 }
 
@@ -660,7 +758,12 @@ fn golden<P: Precision>(expected: u64) {
     for e in (0..10_000).chain(u64::MAX - 10_000..=u64::MAX) {
         c.insert(e);
     }
-    assert_eq!(checksum(c.registers()), expected, "precision {}: registers changed", P::EXPONENT);
+    assert_eq!(
+        checksum(c.registers()),
+        expected,
+        "precision {}: registers changed",
+        P::EXPONENT
+    );
 }
 
 macro_rules! at_every_precision {
@@ -739,9 +842,15 @@ fn sigma_and_tau_match_their_series() {
         (0.9375, 1.11564101701775087e1, 2.06408558497793958e-2),
         (0.999, 7.20989735083682831e2, 3.33285688872287018e-4),
     ] {
-        assert!((H::sigma(x) - sigma).abs() <= 1e-14 * sigma.max(1.), "sigma({x}) = {}", H::sigma(x));
+        assert!(
+            (H::sigma(x) - sigma).abs() <= 1e-14 * sigma.max(1.),
+            "sigma({x}) = {}",
+            H::sigma(x)
+        );
         assert!((H::tau(x) - tau).abs() <= 1e-14, "tau({x}) = {}", H::tau(x));
-        assert!(close(H::sigma(x), reference_sigma(x)) && (H::tau(x) - reference_tau(x)).abs() <= 1e-15);
+        assert!(
+            close(H::sigma(x), reference_sigma(x)) && (H::tau(x) - reference_tau(x)).abs() <= 1e-15
+        );
     }
     assert_eq!(H::sigma(1.), f64::INFINITY);
     assert_eq!(H::tau(1.), 0.);
@@ -754,8 +863,15 @@ fn hash_is_a_mixing_bijection() {
     assert_eq!(H::hash(0), 0xE220_A839_7B1D_CDAF);
     assert_eq!(H::hash(0x9E37_79B9_7F4A_7C15), 0x6E78_9E6A_A1B9_65F4);
     let mut seen = std::collections::HashSet::new();
-    for e in (0..1u64 << 16).chain((1..1u64 << 16).map(|e| e << 48)).chain(u64::MAX - 1000..=u64::MAX) {
-        assert!(seen.insert(H::hash(e)), "two elements hash to {}", H::hash(e));
+    for e in (0..1u64 << 16)
+        .chain((1..1u64 << 16).map(|e| e << 48))
+        .chain(u64::MAX - 1000..=u64::MAX)
+    {
+        assert!(
+            seen.insert(H::hash(e)),
+            "two elements hash to {}",
+            H::hash(e)
+        );
     }
     // flipping any input bit flips half of the output bits on average
     let mut rng = Rng::new(90);
@@ -769,7 +885,10 @@ fn hash_is_a_mixing_bijection() {
             .sum();
         let mean = flipped as f64 / samples as f64;
         // 32 +- 6 standard deviations (4 bits each, over the samples)
-        assert!((mean - 32.).abs() <= 6. * 4. / (samples as f64).sqrt(), "input bit {bit}: {mean} output bits flip");
+        assert!(
+            (mean - 32.).abs() <= 6. * 4. / (samples as f64).sqrt(),
+            "input bit {bit}: {mean} output bits flip"
+        );
     }
 }
 
@@ -785,7 +904,11 @@ fn single_elements_estimates_are_exact() {
                 0.5f64.powi(r) * c.estimate_cardinality()
             })
             .sum();
-        assert!((mean - exact).abs() <= 1e-12, "precision {}: {mean}, exactly {exact}", P::EXPONENT);
+        assert!(
+            (mean - exact).abs() <= 1e-12,
+            "precision {}: {mean}, exactly {exact}",
+            P::EXPONENT
+        );
     }
     check::<Precision4>(0.9673592502470956);
     check::<Precision8>(0.9977466459500857);

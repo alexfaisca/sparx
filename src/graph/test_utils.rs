@@ -119,7 +119,9 @@ pub(crate) struct TestGraph<
 }
 
 #[cfg(test)]
-impl<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness> TestGraph<N, E, Ix, Dir> {
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>
+    TestGraph<N, E, Ix, Dir>
+{
     pub(crate) fn new(graph: GraphMemoryMap<N, E, Ix, Dir>, fixture_dir: Option<PathBuf>) -> Self {
         let _guard = CacheGuard::new(&graph, fixture_dir);
         Self { graph, _guard }
@@ -145,8 +147,12 @@ pub(crate) fn open_fixture(
     path: &Path,
     threads: Option<u8>,
 ) -> Result<(GraphMemoryMap, CacheGuard), Box<dyn std::error::Error>> {
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let graph = GraphMemoryMap::from_file(path, Some(format!("{name}_{}", unique_run_tag())), threads)?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let graph =
+        GraphMemoryMap::from_file(path, Some(format!("{name}_{}", unique_run_tag())), threads)?;
     let guard = CacheGuard::new(&graph, None);
     Ok((graph, guard))
 }
@@ -167,7 +173,11 @@ pub(crate) fn exact_value_cache() -> &'static ExactValueCache {
 pub(crate) fn unique_run_tag() -> String {
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}_{:?}_{id}", std::process::id(), std::thread::current().id())
+    format!(
+        "{}_{:?}_{id}",
+        std::process::id(),
+        std::thread::current().id()
+    )
 }
 
 /// Returns a genuinely unique scratch directory for a test fixture file.

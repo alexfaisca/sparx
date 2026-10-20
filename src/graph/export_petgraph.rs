@@ -1,8 +1,12 @@
 use super::*;
 
 #[allow(dead_code)]
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness>
-    GraphMemoryMap<N, E, Ix, Dir>
+impl<
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: crate::graph::Directedness,
+> GraphMemoryMap<N, E, Ix, Dir>
 {
     // /// Export the [`GraphMemoryMap`] instance to petgraph's [`DiGraph`](https://docs.rs/petgraph/latest/petgraph/graph/type.DiGraph.html) format keeping all edge and node labelings[^1].
     // ///

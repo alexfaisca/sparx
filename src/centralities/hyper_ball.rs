@@ -1,8 +1,8 @@
 use crate::graph::{self, *};
 use crate::shared_slice::*;
 
-use crossbeam::thread;
 use crate::centralities::hyper_log_log::{HyperLogLog, Precision};
+use crossbeam::thread;
 use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::mem::ManuallyDrop;
 use std::path::Path;
@@ -20,19 +20,32 @@ type ProceduralMemoryHB<P, W> = (
     AbstractedProceduralMemoryMut<W>,
 );
 
-pub type HyperBall4<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision4, f64, Dir>;
-pub type HyperBall5<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision5, f64, Dir>;
-pub type HyperBall6<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision6, f64, Dir>;
-pub type HyperBall7<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision7, f64, Dir>;
-pub type HyperBall8<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision8, f64, Dir>;
-pub type HyperBall9<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision9, f64, Dir>;
-pub type HyperBall10<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision10, f64, Dir>;
-pub type HyperBall11<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision11, f64, Dir>;
-pub type HyperBall12<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision12, f64, Dir>;
-pub type HyperBall13<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision13, f64, Dir>;
-pub type HyperBall14<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision14, f64, Dir>;
-pub type HyperBall15<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision15, f64, Dir>;
-pub type HyperBall16<'a, N, E, Ix, Dir = Undirected> = HyperBallInner<'a, N, E, Ix, Precision16, f64, Dir>;
+pub type HyperBall4<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision4, f64, Dir>;
+pub type HyperBall5<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision5, f64, Dir>;
+pub type HyperBall6<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision6, f64, Dir>;
+pub type HyperBall7<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision7, f64, Dir>;
+pub type HyperBall8<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision8, f64, Dir>;
+pub type HyperBall9<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision9, f64, Dir>;
+pub type HyperBall10<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision10, f64, Dir>;
+pub type HyperBall11<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision11, f64, Dir>;
+pub type HyperBall12<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision12, f64, Dir>;
+pub type HyperBall13<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision13, f64, Dir>;
+pub type HyperBall14<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision14, f64, Dir>;
+pub type HyperBall15<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision15, f64, Dir>;
+pub type HyperBall16<'a, N, E, Ix, Dir = Undirected> =
+    HyperBallInner<'a, N, E, Ix, Precision16, f64, Dir>;
 
 /// Enum for centralities' caching filenames' creation manager logic.
 #[allow(dead_code)]
@@ -473,9 +486,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                 if !self.distances.get(idx).is_normal() {
                     *mem.get_mut(idx) = W::zero();
                 } else {
-                    *mem.get_mut(idx) = (W::from_f64(self.counters.get(idx).estimate_cardinality())
-                        - W::one())
-                        / *self.distances.get(idx);
+                    *mem.get_mut(idx) =
+                        (W::from_f64(self.counters.get(idx).estimate_cardinality()) - W::one())
+                            / *self.distances.get(idx);
                 }
             }
         // normalized by node count (|V| - 1)
@@ -616,7 +629,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
         // remove any lin's centrality's cached values
         if this.lin.is_some() {
-            crate::shared_slice::remove_if_exists(this.centrality_cache_file_name(Centrality::Lin)?)?;
+            crate::shared_slice::remove_if_exists(
+                this.centrality_cache_file_name(Centrality::Lin)?,
+            )?;
         }
 
         Ok(())
@@ -706,10 +721,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     #[inline(always)]
     pub fn init_cache_mem(
         &self,
-    ) -> Result<
-        AbstractedProceduralMemoryMut<HyperLogLog<P>>,
-        Box<dyn std::error::Error>,
-    > {
+    ) -> Result<AbstractedProceduralMemoryMut<HyperLogLog<P>>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -717,10 +729,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<
-        AbstractedProceduralMemoryMut<HyperLogLog<P>>,
-        Box<dyn std::error::Error>,
-    > {
+    ) -> Result<AbstractedProceduralMemoryMut<HyperLogLog<P>>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -774,9 +783,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let d_fn = g.build_cache_filename(CacheFile::HyperBallDistances, None)?;
         let i_fn = g.build_cache_filename(CacheFile::HyperBallInvDistances, None)?;
 
-        let counters = SharedSliceMut::<HyperLogLog<P>>::abst_mem_mut(
-            &c_fn, node_count, true,
-        )?;
+        let counters = SharedSliceMut::<HyperLogLog<P>>::abst_mem_mut(&c_fn, node_count, true)?;
         let distances = SharedSliceMut::<W>::abst_mem_mut(&d_fn, node_count, true)?;
         let inverse_distances = SharedSliceMut::<W>::abst_mem_mut(&i_fn, node_count, true)?;
 
@@ -791,9 +798,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let threads = threads.max(1);
         let node_count = g.size();
         // make sure depth is within bounds
-        let max_t = max_depth.map_or(Self::DEAFULT_MAX_DEPTH, |p| {
-            p.clamp(1, Self::MAX_MAX_DEPTH)
-        });
+        let max_t = max_depth.map_or(Self::DEAFULT_MAX_DEPTH, |p| p.clamp(1, Self::MAX_MAX_DEPTH));
         // init cached vecs for distances and inverse distances accumulation
         let (counters, distances, inverse_distances) = Self::init_cache(g)?;
         // init counters: foreach v in 0..=n { add(c[v], v) } & distances and inverse_distances
@@ -837,16 +842,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
     fn init_cache_mem_impl(
         &self,
-    ) -> Result<
-        AbstractedProceduralMemoryMut<HyperLogLog<P>>,
-        Box<dyn std::error::Error>,
-    > {
+    ) -> Result<AbstractedProceduralMemoryMut<HyperLogLog<P>>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
         let s_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(0))?;
-        let swap = SharedSliceMut::<HyperLogLog<P>>::abst_mem_mut(
-            &s_fn, node_count, true,
-        )?;
+        let swap = SharedSliceMut::<HyperLogLog<P>>::abst_mem_mut(&s_fn, node_count, true)?;
 
         Ok(swap)
     }
@@ -946,8 +946,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                                     // unchanged registers imply an unchanged estimate
                                     if ball_changed {
                                         let estimate = a.estimate_cardinality();
-                                        let count_diff =
-                                            W::from_f64(estimate - *estimates.get(u));
+                                        let count_diff = W::from_f64(estimate - *estimates.get(u));
                                         *estimates.get_mut(u) = estimate;
                                         if count_diff > W::zero() {
                                             // update accumulators
@@ -1075,12 +1074,9 @@ mod test {
         path: &std::path::Path,
         id: &str,
     ) -> (Vec<f64>, usize) {
-        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, Ix>::from_file(
-            path,
-            Some(id.to_string()),
-            None,
-        )
-        .expect("graph parse should succeed");
+        let graph =
+            GraphMemoryMap::<VoidLabel, VoidLabel, Ix>::from_file(path, Some(id.to_string()), None)
+                .expect("graph parse should succeed");
         let hb = HyperBallInner::<VoidLabel, VoidLabel, Ix, Precision8, W>::new(&graph)
             .unwrap_or_else(|e| panic!("hyperball({id}) should succeed: {e}"));
         let distances: Vec<f64> = hb.geodesic_distances().iter().map(|d| d.to_f64()).collect();
@@ -1105,8 +1101,14 @@ mod test {
         let (u32_dist, _) = run_hyperball::<u32, f64>(&path, &format!("hb_u32_{run_tag}"));
         let (u16_dist, _) = run_hyperball::<u16, f64>(&path, &format!("hb_u16_{run_tag}"));
 
-        assert_eq!(usize_dist, u32_dist, "Ix=u32 distances should match Ix=usize exactly");
-        assert_eq!(usize_dist, u16_dist, "Ix=u16 distances should match Ix=usize exactly");
+        assert_eq!(
+            usize_dist, u32_dist,
+            "Ix=u32 distances should match Ix=usize exactly"
+        );
+        assert_eq!(
+            usize_dist, u16_dist,
+            "Ix=u16 distances should match Ix=usize exactly"
+        );
 
         // sanity: in a 4-clique every node reaches the 3 others in exactly one hop each, so each
         // node's total geodesic distance should be close to 3 (subject to HyperLogLog's own
@@ -1265,7 +1267,10 @@ mod test {
     }
 
     /// Mean relative error of `approx` w.r.t. `exact`.
-    fn mean_relative_error(approx: impl Iterator<Item = f64>, exact: impl Iterator<Item = f64>) -> f64 {
+    fn mean_relative_error(
+        approx: impl Iterator<Item = f64>,
+        exact: impl Iterator<Item = f64>,
+    ) -> f64 {
         let (mut total, mut count) = (0., 0.);
         for (a, e) in approx.zip(exact) {
             total += (a - e).abs() / e;
@@ -1299,7 +1304,10 @@ mod test {
             exact.iter().map(|e| e.1),
         );
         let closeness = mean_relative_error(
-            hb.compute_closeness_centrality(true).unwrap().to_vec().into_iter(),
+            hb.compute_closeness_centrality(true)
+                .unwrap()
+                .to_vec()
+                .into_iter(),
             exact.iter().map(|e| (e.2 - 1.) / e.0),
         );
         let lin = mean_relative_error(
@@ -1349,8 +1357,18 @@ mod test {
                 )*};
             }
             check!(
-                Precision4, Precision5, Precision6, Precision7, Precision8, Precision9,
-                Precision10, Precision11, Precision12, Precision13, Precision14, Precision15,
+                Precision4,
+                Precision5,
+                Precision6,
+                Precision7,
+                Precision8,
+                Precision9,
+                Precision10,
+                Precision11,
+                Precision12,
+                Precision13,
+                Precision14,
+                Precision15,
                 Precision16
             );
         }
@@ -1361,9 +1379,12 @@ mod test {
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{id}.mtx"));
         write_clique_mtx(&path);
-        let graph =
-            GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, Some(id.to_string()), None)
-                .expect("graph parse should succeed");
+        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+            &path,
+            Some(id.to_string()),
+            None,
+        )
+        .expect("graph parse should succeed");
         crate::graph::test_utils::TestGraph::new(graph, Some(dir))
     }
 
@@ -1378,17 +1399,46 @@ mod test {
             HyperBallInner::<VoidLabel, VoidLabel, usize, Precision16, f64>::new(&graph).unwrap();
         let close = |values: &[f64], expected: f64, what: &str| {
             for (v, &x) in values.iter().enumerate() {
-                assert!((x - expected).abs() < 1e-2, "{what} of node {v}: {x}, expected {expected}");
+                assert!(
+                    (x - expected).abs() < 1e-2,
+                    "{what} of node {v}: {x}, expected {expected}"
+                );
             }
         };
 
         // computing harmonic first used to make `get_or_compute_closeness_centrality` look up
         // the harmonic cache, and fail
-        close(&hb.compute_harmonic_centrality(true).unwrap().to_vec(), 1., "harmonic");
-        close(&hb.get_or_compute_closeness_centrality(true).unwrap().to_vec(), 1., "closeness");
-        close(&hb.get_or_compute_closeness_centrality(false).unwrap().to_vec(), 1., "closeness");
-        close(&hb.get_or_compute_harmonic_centrality(false).unwrap().to_vec(), 1., "harmonic");
-        close(&hb.compute_lins_centrality().unwrap().to_vec(), 16. / 3., "lin");
+        close(
+            &hb.compute_harmonic_centrality(true).unwrap().to_vec(),
+            1.,
+            "harmonic",
+        );
+        close(
+            &hb.get_or_compute_closeness_centrality(true)
+                .unwrap()
+                .to_vec(),
+            1.,
+            "closeness",
+        );
+        close(
+            &hb.get_or_compute_closeness_centrality(false)
+                .unwrap()
+                .to_vec(),
+            1.,
+            "closeness",
+        );
+        close(
+            &hb.get_or_compute_harmonic_centrality(false)
+                .unwrap()
+                .to_vec(),
+            1.,
+            "harmonic",
+        );
+        close(
+            &hb.compute_lins_centrality().unwrap().to_vec(),
+            16. / 3.,
+            "lin",
+        );
 
         // every centrality file must be removed, normalized closeness (`NCCloseness`) and
         // harmonic files included
@@ -1407,7 +1457,10 @@ mod test {
         }
         hb.drop_cache().expect("drop cache should succeed");
         for f in &files {
-            assert!(!Path::new(f).exists(), "{f} should have been removed by drop_cache");
+            assert!(
+                !Path::new(f).exists(),
+                "{f} should have been removed by drop_cache"
+            );
         }
     }
 
@@ -1426,7 +1479,11 @@ mod test {
         let mut clique = HyperLogLog::<Precision4>::default();
         (0..4).for_each(|v| clique.insert(v));
         for v in 0..graph.size() {
-            assert_eq!(*hb.counters.get(v), clique, "node {v}'s ball should be the whole clique");
+            assert_eq!(
+                *hb.counters.get(v),
+                clique,
+                "node {v}'s ball should be the whole clique"
+            );
         }
         hb.drop_cache().expect("drop cache should succeed");
     }
@@ -1458,13 +1515,44 @@ mod test {
             let closeness = |n| ExactClosenessCentrality::<_, _, _, f64>::new(&graph, n).unwrap();
             let harmonic = |n| ExactHarmonicCentrality::<_, _, _, f64>::new(&graph, n).unwrap();
             let pairs: [(&str, Vec<f64>, Vec<f64>); 7] = [
-                ("distance sums", hb.geodesic_distances().to_vec(), closeness(None).centralities().to_vec()),
-                ("inverse distance sums", hb.harmonic_geodesic_distances().to_vec(), harmonic(None).centralities().to_vec()),
-                ("closeness / (|V| - 1)", hb.compute_closeness_centrality(false).unwrap().to_vec(), closeness(Some(false)).centralities().to_vec()),
-                ("closeness / (r - 1)", hb.compute_closeness_centrality(true).unwrap().to_vec(), closeness(Some(true)).centralities().to_vec()),
-                ("harmonic / (|V| - 1)", hb.compute_harmonic_centrality(false).unwrap().to_vec(), harmonic(Some(false)).centralities().to_vec()),
-                ("harmonic / (r - 1)", hb.compute_harmonic_centrality(true).unwrap().to_vec(), harmonic(Some(true)).centralities().to_vec()),
-                ("lin", hb.compute_lins_centrality().unwrap().to_vec(), ExactLinCentrality::<_, _, _, f64>::new(&graph).unwrap().centralities().to_vec()),
+                (
+                    "distance sums",
+                    hb.geodesic_distances().to_vec(),
+                    closeness(None).centralities().to_vec(),
+                ),
+                (
+                    "inverse distance sums",
+                    hb.harmonic_geodesic_distances().to_vec(),
+                    harmonic(None).centralities().to_vec(),
+                ),
+                (
+                    "closeness / (|V| - 1)",
+                    hb.compute_closeness_centrality(false).unwrap().to_vec(),
+                    closeness(Some(false)).centralities().to_vec(),
+                ),
+                (
+                    "closeness / (r - 1)",
+                    hb.compute_closeness_centrality(true).unwrap().to_vec(),
+                    closeness(Some(true)).centralities().to_vec(),
+                ),
+                (
+                    "harmonic / (|V| - 1)",
+                    hb.compute_harmonic_centrality(false).unwrap().to_vec(),
+                    harmonic(Some(false)).centralities().to_vec(),
+                ),
+                (
+                    "harmonic / (r - 1)",
+                    hb.compute_harmonic_centrality(true).unwrap().to_vec(),
+                    harmonic(Some(true)).centralities().to_vec(),
+                ),
+                (
+                    "lin",
+                    hb.compute_lins_centrality().unwrap().to_vec(),
+                    ExactLinCentrality::<_, _, _, f64>::new(&graph)
+                        .unwrap()
+                        .centralities()
+                        .to_vec(),
+                ),
             ];
             for (what, approx, exact) in pairs {
                 let error = mean_relative_error(approx.into_iter(), exact.into_iter());
@@ -1548,7 +1636,9 @@ mod test {
             &cpu_graph, max_depth, 4,
         )
         .unwrap_or_else(|e| panic!("{what}: CPU hyperball should succeed: {e}"));
-        let device_graph = backend.upload_graph(&gpu_graph).expect("graph upload should succeed");
+        let device_graph = backend
+            .upload_graph(&gpu_graph)
+            .expect("graph upload should succeed");
         let mut gpu = HyperBallInner::<VoidLabel, VoidLabel, usize, P, f64, _>::new_gpu(
             &gpu_graph,
             backend,
@@ -1559,11 +1649,23 @@ mod test {
 
         assert_eq!(gpu.iters, cpu.iters, "{what}: iterations");
         for v in 0..cpu_graph.size() {
-            assert_eq!(gpu.counters.get(v), cpu.counters.get(v), "{what}: node {v}'s counter");
+            assert_eq!(
+                gpu.counters.get(v),
+                cpu.counters.get(v),
+                "{what}: node {v}'s counter"
+            );
         }
         for (name, gpu_values, cpu_values) in [
-            ("distances", gpu.geodesic_distances(), cpu.geodesic_distances()),
-            ("inverse distances", gpu.harmonic_geodesic_distances(), cpu.harmonic_geodesic_distances()),
+            (
+                "distances",
+                gpu.geodesic_distances(),
+                cpu.geodesic_distances(),
+            ),
+            (
+                "inverse distances",
+                gpu.harmonic_geodesic_distances(),
+                cpu.harmonic_geodesic_distances(),
+            ),
         ] {
             for (v, (&g, &c)) in gpu_values.iter().zip(cpu_values).enumerate() {
                 assert!(
@@ -1615,7 +1717,14 @@ mod test {
                     );
                 )*};
             }
-            check!(Precision4, Precision5, Precision6, Precision8, Precision10, Precision12);
+            check!(
+                Precision4,
+                Precision5,
+                Precision6,
+                Precision8,
+                Precision10,
+                Precision12
+            );
         }
         // capped below the grid's diameter (46), on both iteration parities
         for max_depth in [7, 8] {
@@ -1669,7 +1778,10 @@ mod test {
             .expect("too many segments should fail")
             .to_string()
         };
-        assert!(error.contains("GPU buffers are needed"), "unexpected error: {error}");
+        assert!(
+            error.contains("GPU buffers are needed"),
+            "unexpected error: {error}"
+        );
         assert_gpu_matches_cpu::<Precision6>(
             &segmented,
             &grid,

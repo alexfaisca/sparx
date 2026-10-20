@@ -100,9 +100,7 @@ fn compare_gpu<P: Precision>(
 }
 
 #[cfg(feature = "gpu")]
-fn compare_gpu_triangles(
-    graph: &Graph<(), (), u32>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn compare_gpu_triangles(graph: &Graph<(), (), u32>) -> Result<(), Box<dyn std::error::Error>> {
     use portable_atomic::Ordering;
     use sparx::gpu::{GpuBackend, WgpuBackend};
     use sparx::k_truss::triangles::Triangles;

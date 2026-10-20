@@ -23,8 +23,13 @@ type ProceduralMemoryBZ<Ix, Cx> = (
 /// [`CoreCount`]: ../count/trait.CoreCount.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AlgoBatageljZaversnik<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount = u8>
-{
+pub struct AlgoBatageljZaversnik<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Cx: CoreCount = u8,
+> {
     /// Graph for which node coreness is computed.
     g: &'a GraphMemoryMap<N, E, Ix>,
     /// Memmapped slice containing the coreness of each node.
@@ -153,9 +158,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(
-        &self,
-    ) -> Result<ProceduralMemoryBZ<Ix, Cx>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBZ<Ix, Cx>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -431,9 +434,20 @@ mod test {
         writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
         writeln!(f, "9 9 15").unwrap();
         for &(u, v) in &[
-            (1, 2), (1, 3), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5), (3, 4), (3, 5), (4, 5),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+            (3, 4),
+            (3, 5),
+            (4, 5),
             (5, 6),
-            (6, 7), (6, 8), (7, 8),
+            (6, 7),
+            (6, 8),
+            (7, 8),
             (8, 9),
         ] {
             writeln!(f, "{u} {v}").unwrap();
@@ -454,7 +468,11 @@ mod test {
         graph: &GraphMemoryMap<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, Ix>,
         coreness: &[u8],
     ) {
-        assert_eq!(coreness.len(), graph.size(), "k_cores should be node-indexed");
+        assert_eq!(
+            coreness.len(),
+            graph.size(),
+            "k_cores should be node-indexed"
+        );
         for v in 0..graph.size() {
             let k_v = coreness[v];
             let qualifying_neighbours = graph
@@ -470,11 +488,11 @@ mod test {
     }
 
     fn run_bz<Ix: crate::graph::IndexType>(path: &std::path::Path, id: &str) -> Vec<u8> {
-        let graph = GraphMemoryMap::<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, Ix>::from_file(
-            path,
-            Some(id.to_string()),
-            None,
-        )
+        let graph = GraphMemoryMap::<
+            crate::graph::label::VoidLabel,
+            crate::graph::label::VoidLabel,
+            Ix,
+        >::from_file(path, Some(id.to_string()), None)
         .expect("graph parse should succeed");
         let bz = AlgoBatageljZaversnik::new(&graph)
             .unwrap_or_else(|e| panic!("batagelj-zaversnik({id}) should succeed: {e}"));
@@ -501,8 +519,14 @@ mod test {
         let u32_cores = run_bz::<u32>(&path, &format!("bz_u32_{run_tag}"));
         let u16_cores = run_bz::<u16>(&path, &format!("bz_u16_{run_tag}"));
 
-        assert_eq!(usize_cores, u32_cores, "Ix=u32 coreness should match Ix=usize exactly");
-        assert_eq!(usize_cores, u16_cores, "Ix=u16 coreness should match Ix=usize exactly");
+        assert_eq!(
+            usize_cores, u32_cores,
+            "Ix=u32 coreness should match Ix=usize exactly"
+        );
+        assert_eq!(
+            usize_cores, u16_cores,
+            "Ix=u16 coreness should match Ix=usize exactly"
+        );
 
         // exact expected values (node ids 1-9 in the fixture map to indices 0-8 here): the
         // 5-clique (nodes 1-5) is a 4-core, the triangle (nodes 6-8) is a 2-core, and the pendant
@@ -528,4 +552,3 @@ mod test {
         assert!(verify_k_cores(&graph, bz.k_cores).is_err());
     }
 }
-

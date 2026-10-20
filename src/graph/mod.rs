@@ -20,11 +20,13 @@ mod export_rustworkx_core;
 pub mod test_utils;
 
 use crate::graph::cache::{AccumulatorAtomic, GraphCache};
-use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut};
+use crate::shared_slice::{
+    AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut,
+};
 use cache::CacheMetadata;
-pub use weight::{Weight, WeightAtomic};
 pub use direction::{AnyGraph, Directed, Directedness, Direction, Undirected, UndirectedMode};
 pub use graph_derive::{GenericEdge, GenericEdgeType};
+pub use weight::{Weight, WeightAtomic};
 
 use label::VoidLabel;
 use portable_atomic::{AtomicUsize, Ordering};
@@ -421,7 +423,11 @@ struct InstanceTag(String);
 impl InstanceTag {
     fn new() -> Self {
         static INSTANCES: AtomicUsize = AtomicUsize::new(0);
-        InstanceTag(format!("p{}i{}", std::process::id(), INSTANCES.fetch_add(1, Ordering::Relaxed)))
+        InstanceTag(format!(
+            "p{}i{}",
+            std::process::id(),
+            INSTANCES.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 }
 
@@ -467,10 +473,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
             // always mmapped, regardless of `N`/`E::is_labeled()`: the backing files are
             // guaranteed non-empty (at least 1 byte) even for zero-sized label types, see
             // `AbstractedProceduralMemoryMut::from_file`'s `.max(1)` sizing.
-            let node_labels =
-                Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.nodelabel_file)? });
-            let edge_labels =
-                Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.edgelabel_file)? });
+            let node_labels = Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.nodelabel_file)? });
+            let edge_labels = Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.edgelabel_file)? });
             let edge_size = std::mem::size_of::<Ix>();
             let thread_count = thread_count.unwrap_or(1).max(1);
             let exports = 0u8;
@@ -555,7 +559,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         id: Option<String>,
         thread_count: Option<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let graph_cache = GraphCache::<N, E, Ix>::from_file_with_accumulator::<P, D>(p, id, None, None)?;
+        let graph_cache =
+            GraphCache::<N, E, Ix>::from_file_with_accumulator::<P, D>(p, id, None, None)?;
         Self::init_from_new_cache(graph_cache, thread_count)
     }
 
@@ -742,7 +747,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         ))
     }
 
-
     /// Returns number of entries in the offset file[^1].
     ///
     /// [^1]: this is equivalent to `|V| + 1`, as there is an extra offset file entry to mark the end of edges' offsets.
@@ -808,7 +812,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         self.is_triangle_impl(u, v, w)
     }
 
-
     #[inline(always)]
     fn build_helper_filename(&self, seq: usize) -> Result<String, Box<dyn std::error::Error>> {
         self.graph_cache.build_helper_filename(seq)
@@ -845,7 +848,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         match seq {
             None => self.graph_cache.build_cache_filename(file_type, None),
             // scratch files are this instance's own
-            Some(seq) => self.graph_cache.build_instance_cache_filename(file_type, seq, &self.instance.0),
+            Some(seq) => {
+                self.graph_cache
+                    .build_instance_cache_filename(file_type, seq, &self.instance.0)
+            }
         }
     }
 
@@ -876,7 +882,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
     /// [`CacheFile`]: ./enum.CacheFile.html#
     #[inline(always)]
     pub fn cleanup_cache(&self, target: CacheFile) -> Result<(), Box<dyn std::error::Error>> {
-        self.graph_cache.cleanup_instance_cache(target, &self.instance.0)
+        self.graph_cache
+            .cleanup_instance_cache(target, &self.instance.0)
     }
 
     /// Export the [`GraphMemoryMap`] instance to petgraph's [`DiGraph`](https://docs.rs/petgraph/latest/petgraph/graph/type.DiGraph.html) format stripping any edge or node labelings whatsoever.
@@ -1227,9 +1234,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Graph<
     /// If node u has a neighbor list (sorted by id, ascendingly) `n_u = {a, b, c, d, e}`, and `id[c]
     /// =< id[u]`, but `id[d] > id[u]` then u's `edge_over` entry, `edge_over[u] = 3`.
     ///
-    pub fn edge_over(
-        &self,
-    ) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
+    pub fn edge_over(&self) -> Result<AbstractedProceduralMemory<Ix>, Box<dyn std::error::Error>> {
         self.get_edge_over_impl()
     }
 }
@@ -1281,7 +1286,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Neighb
         self.count = self.count.saturating_sub(1);
         let next: (usize, usize);
         unsafe {
-            next = (self.id, self.edge_ptr.add(self.count).read_unaligned().index());
+            next = (
+                self.id,
+                self.edge_ptr.add(self.count).read_unaligned().index(),
+            );
         };
         Some(next)
     }
@@ -1399,8 +1407,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
 
 /// Iterating over `&GraphMemoryMap` directly yields every node's id, in id order --- equivalent
 /// to `graph.iter_node_indices()`, provided for idiomatic `for node in &graph` usage.
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> IntoIterator
-    for &GraphMemoryMap<N, E, Ix, Dir>
+impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    IntoIterator for &GraphMemoryMap<N, E, Ix, Dir>
 {
     type Item = usize;
     type IntoIter = NodeIndices<N, E, Ix>;
@@ -2271,8 +2279,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             if curr >= self.stop_offset {
                 return None;
             }
-            if unsafe { self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index() }
-                >= self.target_deg
+            if unsafe {
+                self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index()
+            } >= self.target_deg
             {
                 continue;
             }
@@ -2373,7 +2382,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            let deg = unsafe { self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index() };
+            let deg = unsafe {
+                self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index()
+            };
             if deg < self.target_deg {
                 folder = folder.consume(i);
             }
@@ -2448,8 +2459,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             if curr >= self.stop_offset {
                 return None;
             }
-            if unsafe { self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index() }
-                < self.target_deg
+            if unsafe {
+                self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index()
+            } < self.target_deg
             {
                 continue;
             }
@@ -2550,7 +2562,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            let deg = unsafe { self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index() };
+            let deg = unsafe {
+                self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index()
+            };
             if deg >= self.target_deg {
                 folder = folder.consume(i);
             }
@@ -2625,8 +2639,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Iterat
             if curr >= self.stop_offset {
                 return None;
             }
-            if unsafe { self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index() }
-                != self.target_deg
+            if unsafe {
+                self.off_ptr.add(curr + 1).read().index() - self.off_ptr.add(curr).read().index()
+            } != self.target_deg
             {
                 continue;
             }
@@ -2726,7 +2741,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Uninde
         F: Folder<Self::Item>,
     {
         for i in self.offset..self.stop_offset {
-            let deg = unsafe { self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index() };
+            let deg = unsafe {
+                self.off_ptr.add(i + 1).read().index() - self.off_ptr.add(i).read().index()
+            };
             if deg == self.target_deg {
                 folder = folder.consume(i);
             }
@@ -3454,8 +3471,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> ExactS
 
 /// Iterator over a single node's neighbours, each paired with its corresponding edge's
 /// label/weight. See [`GraphMemoryMap::weighted_neighbours`].
-pub struct WeightedNeighbours<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType>
-{
+pub struct WeightedNeighbours<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> {
     neigh_ptr: *const Ix,
     label_ptr: *const E,
     begin: usize,
@@ -3628,7 +3644,13 @@ fn next_traversal_instance_id() -> usize {
 /// since both `Dfs`/`Bfs` only ever push a node once, immediately after marking it visited.
 /// Each growth re-mmaps into a freshly, uniquely named cache file (via `target`/`instance_id`/
 /// the new generation number) and removes the previous one; the final file is removed on drop.
-struct GrowableIdBuffer<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness = Undirected> {
+struct GrowableIdBuffer<
+    'a,
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
     target: CacheFile,
     instance_id: usize,
@@ -3721,8 +3743,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Drop
-    for GrowableIdBuffer<'a, N, E, Ix, Dir>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Drop for GrowableIdBuffer<'a, N, E, Ix, Dir>
 {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.file_name);
@@ -3743,24 +3765,36 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
 /// reachable nodes can't be known ahead of actually traversing the graph. It does implement
 /// `FusedIterator`: once the internal stack empties, it stays empty, so `next()` keeps returning
 /// `None`.
-pub struct Dfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness = Undirected> {
+pub struct Dfs<
+    'a,
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
     stack: GrowableIdBuffer<'a, N, E, Ix, Dir>,
     visited: AbstractedProceduralMemoryMut<bool>,
     visited_file: String,
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Dfs<'a, N, E, Ix, Dir> {
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Dfs<'a, N, E, Ix, Dir>
+{
     /// `source` must already be known to be `< graph.size()` (checked once by
     /// [`GraphMemoryMap::dfs`]); every `v` reachable through it from there on is itself a valid
     /// node id by the CSR neighbour-list invariant, so the `.expect()` in `next()` can't fail.
-    fn new(graph: &'a GraphMemoryMap<N, E, Ix, Dir>, source: usize) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        source: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = graph.size();
         let instance_id = next_traversal_instance_id();
         let visited_file =
             graph.build_cache_filename(CacheFile::DfsVisitor, Some(instance_id * 16))?;
         let mut visited = SharedSliceMut::<bool>::abst_mem_mut(&visited_file, node_count, true)?;
-        let mut stack = GrowableIdBuffer::new(graph, CacheFile::DfsVisitor, instance_id, node_count)?;
+        let mut stack =
+            GrowableIdBuffer::new(graph, CacheFile::DfsVisitor, instance_id, node_count)?;
         *visited.get_mut(source) = true;
         stack.push(source)?;
         Ok(Self {
@@ -3772,8 +3806,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Iterator
-    for Dfs<'a, N, E, Ix, Dir>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Iterator for Dfs<'a, N, E, Ix, Dir>
 {
     type Item = usize;
 
@@ -3795,8 +3829,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Drop
-    for Dfs<'a, N, E, Ix, Dir>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Drop for Dfs<'a, N, E, Ix, Dir>
 {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.visited_file);
@@ -3817,7 +3851,13 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
 /// dequeuing just advances `read_pos` rather than physically removing the front element, so the
 /// same growable buffer design as `Dfs`'s stack applies directly (capacity bounded by the graph's
 /// node count either way).
-pub struct Bfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness = Undirected> {
+pub struct Bfs<
+    'a,
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
     queue: GrowableIdBuffer<'a, N, E, Ix, Dir>,
     read_pos: usize,
@@ -3825,14 +3865,20 @@ pub struct Bfs<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::Ind
     visited_file: String,
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Bfs<'a, N, E, Ix, Dir> {
-    fn new(graph: &'a GraphMemoryMap<N, E, Ix, Dir>, source: usize) -> Result<Self, Box<dyn std::error::Error>> {
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Bfs<'a, N, E, Ix, Dir>
+{
+    fn new(
+        graph: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        source: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = graph.size();
         let instance_id = next_traversal_instance_id();
         let visited_file =
             graph.build_cache_filename(CacheFile::BfsVisitor, Some(instance_id * 16))?;
         let mut visited = SharedSliceMut::<bool>::abst_mem_mut(&visited_file, node_count, true)?;
-        let mut queue = GrowableIdBuffer::new(graph, CacheFile::BfsVisitor, instance_id, node_count)?;
+        let mut queue =
+            GrowableIdBuffer::new(graph, CacheFile::BfsVisitor, instance_id, node_count)?;
         *visited.get_mut(source) = true;
         queue.push(source)?;
         Ok(Self {
@@ -3845,8 +3891,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Iterator
-    for Bfs<'a, N, E, Ix, Dir>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Iterator for Bfs<'a, N, E, Ix, Dir>
 {
     type Item = usize;
 
@@ -3872,8 +3918,8 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
     }
 }
 
-impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness> Drop
-    for Bfs<'a, N, E, Ix, Dir>
+impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: Directedness>
+    Drop for Bfs<'a, N, E, Ix, Dir>
 {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.visited_file);
@@ -3909,7 +3955,9 @@ mod test {
     /// node 3 -> {0}        (degree 1)
     /// node 4 -> {}         (degree 0, isolated)
     /// node 5 -> {0, 1}     (degree 2)
-    fn build_degree_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
+    fn build_degree_test_graph()
+    -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed>
+    {
         let dir = unique_test_dir("iter_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("degrees.mtx");
@@ -3921,7 +3969,8 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph =
+            crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         crate::graph::test_utils::TestGraph::new(graph, None)
     }
@@ -3963,7 +4012,10 @@ mod test {
     /// Independent, textbook-style reference BFS (no shared code with [`Bfs`]/[`Dfs`]), used as
     /// ground truth: returns (reachable set in distance order, distance-from-source for each
     /// node).
-    fn reference_bfs(graph: &crate::graph::DiGraph<VoidLabel, VoidLabel, usize>, source: usize) -> Vec<usize> {
+    fn reference_bfs(
+        graph: &crate::graph::DiGraph<VoidLabel, VoidLabel, usize>,
+        source: usize,
+    ) -> Vec<usize> {
         let mut dist = vec![usize::MAX; graph.size()];
         let mut order = Vec::new();
         let mut queue = std::collections::VecDeque::new();
@@ -3990,7 +4042,10 @@ mod test {
             expected_reachable.sort_unstable();
 
             let via_dfs: Vec<usize> = graph.dfs(source).unwrap().collect();
-            assert_eq!(via_dfs[0], source, "Dfs must yield source first for source={source}");
+            assert_eq!(
+                via_dfs[0], source,
+                "Dfs must yield source first for source={source}"
+            );
 
             let mut sorted_dfs = via_dfs.clone();
             sorted_dfs.sort_unstable();
@@ -4002,7 +4057,11 @@ mod test {
             // no duplicates: a sorted, deduped copy must have the same length.
             let mut deduped = sorted_dfs.clone();
             deduped.dedup();
-            assert_eq!(deduped.len(), sorted_dfs.len(), "Dfs yielded a duplicate for source={source}");
+            assert_eq!(
+                deduped.len(),
+                sorted_dfs.len(),
+                "Dfs yielded a duplicate for source={source}"
+            );
         }
     }
 
@@ -4016,7 +4075,10 @@ mod test {
             expected_sorted.sort_unstable();
 
             let via_bfs: Vec<usize> = graph.bfs(source).unwrap().collect();
-            assert_eq!(via_bfs[0], source, "Bfs must yield source first for source={source}");
+            assert_eq!(
+                via_bfs[0], source,
+                "Bfs must yield source first for source={source}"
+            );
 
             let mut sorted_bfs = via_bfs.clone();
             sorted_bfs.sort_unstable();
@@ -4027,7 +4089,11 @@ mod test {
 
             let mut deduped = sorted_bfs.clone();
             deduped.dedup();
-            assert_eq!(deduped.len(), sorted_bfs.len(), "Bfs yielded a duplicate for source={source}");
+            assert_eq!(
+                deduped.len(),
+                sorted_bfs.len(),
+                "Bfs yielded a duplicate for source={source}"
+            );
 
             // stronger order check: recompute each node's true distance from `source`
             // independently, then assert the yielded sequence is itself non-decreasing in that
@@ -4048,7 +4114,10 @@ mod test {
                 assert!(
                     dist[w[0]] <= dist[w[1]],
                     "Bfs order not non-decreasing in distance for source={source}: {} (d={}) before {} (d={})",
-                    w[0], dist[w[0]], w[1], dist[w[1]]
+                    w[0],
+                    dist[w[0]],
+                    w[1],
+                    dist[w[1]]
                 );
             }
         }
@@ -4068,12 +4137,20 @@ mod test {
         let mut dfs = graph.dfs(2).unwrap(); // node 2 is isolated: reachable set = {2}
         assert_eq!(dfs.next(), Some(2));
         assert_eq!(dfs.next(), None);
-        assert_eq!(dfs.next(), None, "Dfs must keep returning None once exhausted");
+        assert_eq!(
+            dfs.next(),
+            None,
+            "Dfs must keep returning None once exhausted"
+        );
 
         let mut bfs = graph.bfs(2).unwrap();
         assert_eq!(bfs.next(), Some(2));
         assert_eq!(bfs.next(), None);
-        assert_eq!(bfs.next(), None, "Bfs must keep returning None once exhausted");
+        assert_eq!(
+            bfs.next(),
+            None,
+            "Bfs must keep returning None once exhausted"
+        );
     }
 
     /// Forces `GrowableIdBuffer` to actually grow multiple times (starting at 5% of a
@@ -4094,11 +4171,17 @@ mod test {
 
         let mut via_dfs: Vec<usize> = graph.dfs(0).unwrap().collect();
         via_dfs.sort_unstable();
-        assert_eq!(via_dfs, expected_sorted, "Dfs must remain correct across buffer growth");
+        assert_eq!(
+            via_dfs, expected_sorted,
+            "Dfs must remain correct across buffer growth"
+        );
 
         let mut via_bfs: Vec<usize> = graph.bfs(0).unwrap().collect();
         via_bfs.sort_unstable();
-        assert_eq!(via_bfs, expected_sorted, "Bfs must remain correct across buffer growth");
+        assert_eq!(
+            via_bfs, expected_sorted,
+            "Bfs must remain correct across buffer growth"
+        );
     }
 
     /// Two simultaneously-alive traversals over the same graph must not clobber each other's
@@ -4133,15 +4216,27 @@ mod test {
         a2.sort_unstable();
         let mut expected_from_0 = reference_bfs(&graph, 0);
         expected_from_0.sort_unstable();
-        assert_eq!(a1, expected_from_0, "interleaved Dfs from 0 corrupted by a concurrent instance");
-        assert_eq!(a2, expected_from_0, "interleaved Bfs from 0 corrupted by a concurrent instance");
+        assert_eq!(
+            a1, expected_from_0,
+            "interleaved Dfs from 0 corrupted by a concurrent instance"
+        );
+        assert_eq!(
+            a2, expected_from_0,
+            "interleaved Bfs from 0 corrupted by a concurrent instance"
+        );
 
         b1.sort_unstable();
         b2.sort_unstable();
         let mut expected_from_5 = reference_bfs(&graph, 5);
         expected_from_5.sort_unstable();
-        assert_eq!(b1, expected_from_5, "interleaved Dfs from 5 corrupted by a concurrent instance");
-        assert_eq!(b2, expected_from_5, "interleaved Bfs from 5 corrupted by a concurrent instance");
+        assert_eq!(
+            b1, expected_from_5,
+            "interleaved Dfs from 5 corrupted by a concurrent instance"
+        );
+        assert_eq!(
+            b2, expected_from_5,
+            "interleaved Bfs from 5 corrupted by a concurrent instance"
+        );
     }
 
     /// `Dfs`/`Bfs`'s memory-mapped scratch files must not leak once the iterator is dropped.
@@ -4232,7 +4327,10 @@ mod test {
     #[test]
     fn nodes_with_degree_family_matches_manual_scan_for_every_threshold() {
         let graph = build_degree_test_graph();
-        let max_deg = (0..graph.size()).map(|u| graph.node_degree(u)).max().unwrap();
+        let max_deg = (0..graph.size())
+            .map(|u| graph.node_degree(u))
+            .max()
+            .unwrap();
 
         for deg in 0..=(max_deg + 1) {
             let iter = graph.iter_nodes_with_degree(deg);
@@ -4424,7 +4522,10 @@ mod test {
                     .rev()
                     .collect();
                 via_iter_rev.sort_unstable();
-                assert_eq!(via_iter_rev, expected, "reverse orig={orig} target={target}");
+                assert_eq!(
+                    via_iter_rev, expected,
+                    "reverse orig={orig} target={target}"
+                );
             }
         }
     }
@@ -4436,7 +4537,10 @@ mod test {
     #[test]
     fn paralelizable_nodes_with_degree_lt_matches_manual_scan() {
         let graph = build_degree_test_graph();
-        let max_deg = (0..graph.size()).map(|u| graph.node_degree(u)).max().unwrap();
+        let max_deg = (0..graph.size())
+            .map(|u| graph.node_degree(u))
+            .max()
+            .unwrap();
 
         for deg in 0..=(max_deg + 1) {
             let mut via_iter: Vec<usize> =
@@ -4475,7 +4579,9 @@ mod test {
 
     /// Directed, integer-weighted graph:
     /// 0 -> 1 (w=10), 0 -> 2 (w=20), 1 -> 2 (w=30), 3 -> 0 (w=40)
-    fn build_weighted_edge_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, TestWeight, usize, crate::graph::Directed> {
+    fn build_weighted_edge_test_graph()
+    -> crate::graph::test_utils::TestGraph<VoidLabel, TestWeight, usize, crate::graph::Directed>
+    {
         let dir = unique_test_dir("label_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("weighted.mtx");
@@ -4487,7 +4593,8 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, TestWeight, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph =
+            crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         crate::graph::test_utils::TestGraph::new(graph, None)
     }
@@ -4519,7 +4626,8 @@ mod test {
 
         // `iter_edge_labels` must walk the exact same flat order as `edge_label(pos)`.
         let via_iter: Vec<TestWeight> = graph.iter_edge_labels().collect();
-        let via_accessor: Vec<TestWeight> = (0..graph.width()).map(|p| graph.edge_label(p)).collect();
+        let via_accessor: Vec<TestWeight> =
+            (0..graph.width()).map(|p| graph.edge_label(p)).collect();
         assert_eq!(via_iter, via_accessor);
         assert_eq!(graph.iter_edge_labels().count(), graph.width());
 
@@ -4569,9 +4677,8 @@ mod test {
         )
         .expect("error writing mtx fixture");
 
-        let cache =
-            GraphCache::<VoidLabel, TestWeight, usize>::from_file(&path, None, None, None)
-                .expect("parse should succeed");
+        let cache = GraphCache::<VoidLabel, TestWeight, usize>::from_file(&path, None, None, None)
+            .expect("parse should succeed");
         let graph =
             crate::graph::DiGraph::<VoidLabel, TestWeight, usize>::init_from_cache(cache, Some(1))
                 .expect("load should succeed");
@@ -4579,9 +4686,12 @@ mod test {
         let edges_filename = graph.cache_edges_filename();
         drop(graph);
 
-        let reopened =
-            crate::graph::DiGraph::<VoidLabel, TestWeight, usize>::open(&edges_filename, None, Some(1))
-                .expect("reopening the just-built cache should succeed");
+        let reopened = crate::graph::DiGraph::<VoidLabel, TestWeight, usize>::open(
+            &edges_filename,
+            None,
+            Some(1),
+        )
+        .expect("reopening the just-built cache should succeed");
         let after: Vec<TestWeight> = reopened.iter_edge_labels().collect();
 
         std::fs::remove_dir_all(&dir).ok();
@@ -4600,14 +4710,20 @@ mod test {
                 .collect();
             let via_iter: Vec<(usize, TestWeight)> =
                 graph.weighted_neighbours(u).unwrap().collect();
-            assert_eq!(via_iter, expected, "weighted_neighbours mismatch for node {u}");
+            assert_eq!(
+                via_iter, expected,
+                "weighted_neighbours mismatch for node {u}"
+            );
             assert_eq!(graph.weighted_neighbours(u).unwrap().len(), expected.len());
 
             let mut expected_rev = expected.clone();
             expected_rev.reverse();
             let via_iter_rev: Vec<(usize, TestWeight)> =
                 graph.weighted_neighbours(u).unwrap().rev().collect();
-            assert_eq!(via_iter_rev, expected_rev, "weighted_neighbours reverse mismatch for node {u}");
+            assert_eq!(
+                via_iter_rev, expected_rev,
+                "weighted_neighbours reverse mismatch for node {u}"
+            );
         }
 
         assert!(graph.weighted_neighbours(graph.size()).is_err());
@@ -4660,14 +4776,32 @@ mod test {
     fn exact_size_iterator_len_matches_count_for_every_implementor() {
         let graph = build_degree_test_graph();
 
-        assert_eq!(graph.iter_node_indices().len(), graph.iter_node_indices().count());
-        assert_eq!(graph.iter_edge_indices().len(), graph.iter_edge_indices().count());
+        assert_eq!(
+            graph.iter_node_indices().len(),
+            graph.iter_node_indices().count()
+        );
+        assert_eq!(
+            graph.iter_edge_indices().len(),
+            graph.iter_edge_indices().count()
+        );
         for u in 0..graph.size() {
-            assert_eq!(graph.iter_neighbors(u).len(), graph.iter_neighbors(u).count());
-            assert_eq!(graph.walk_neighbors(u).len(), graph.walk_neighbors(u).count());
+            assert_eq!(
+                graph.iter_neighbors(u).len(),
+                graph.iter_neighbors(u).count()
+            );
+            assert_eq!(
+                graph.walk_neighbors(u).len(),
+                graph.walk_neighbors(u).count()
+            );
         }
-        assert_eq!(graph.iter_node_labels().len(), graph.iter_node_labels().count());
-        assert_eq!(graph.iter_edge_labels().len(), graph.iter_edge_labels().count());
+        assert_eq!(
+            graph.iter_node_labels().len(),
+            graph.iter_node_labels().count()
+        );
+        assert_eq!(
+            graph.iter_edge_labels().len(),
+            graph.iter_edge_labels().count()
+        );
 
         #[cfg(feature = "iter_with_offset")]
         for u in 0..graph.size() {
@@ -4704,7 +4838,10 @@ mod test {
     #[test]
     fn par_iter_nodes_with_degree_family_matches_sequential_after_producer_change() {
         let graph = build_degree_test_graph();
-        let max_deg = (0..graph.size()).map(|u| graph.node_degree(u)).max().unwrap();
+        let max_deg = (0..graph.size())
+            .map(|u| graph.node_degree(u))
+            .max()
+            .unwrap();
 
         for deg in 0..=(max_deg + 1) {
             let mut seq: Vec<usize> = graph.iter_nodes_with_degree(deg).collect();
@@ -4736,7 +4873,9 @@ mod test {
     /// chain's final node (also degree 0) giving a real spread of isolated/degree-1/high-degree
     /// nodes for the degree-filter family too.
     #[cfg(feature = "rayon")]
-    fn build_large_test_graph() -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed> {
+    fn build_large_test_graph()
+    -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Directed>
+    {
         let dir = unique_test_dir("large_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join("large.mtx");
@@ -4762,7 +4901,8 @@ mod test {
 
         let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
             .expect("parse should succeed");
-        let graph = crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
+        let graph =
+            crate::graph::DiGraph::init_from_cache(cache, Some(1)).expect("load should succeed");
         std::fs::remove_dir_all(&dir).ok();
         crate::graph::test_utils::TestGraph::new(graph, None)
     }
@@ -4771,7 +4911,10 @@ mod test {
     #[test]
     fn par_iter_node_and_edge_indices_match_sequential_at_split_forcing_scale() {
         let graph = build_large_test_graph();
-        assert!(graph.size() > 4096 && graph.width() > 4096, "fixture too small to force a real split");
+        assert!(
+            graph.size() > 4096 && graph.width() > 4096,
+            "fixture too small to force a real split"
+        );
 
         let mut seq: Vec<usize> = graph.iter_node_indices().collect();
         seq.sort_unstable();
@@ -4795,7 +4938,10 @@ mod test {
         // node 0 is the hub with degree 6000, comfortably above the 4096 split threshold ---
         // this specifically forces `ParNeighbors::split`/`split_at` to actually run, unlike every
         // other (tiny) fixture in this module.
-        assert!(graph.node_degree(0) > 4096, "hub not large enough to force a real split");
+        assert!(
+            graph.node_degree(0) > 4096,
+            "hub not large enough to force a real split"
+        );
 
         let mut seq: Vec<usize> = graph.neighbours(0).unwrap().collect();
         seq.sort_unstable();
@@ -4817,7 +4963,10 @@ mod test {
     #[test]
     fn par_iter_nodes_with_degree_family_matches_sequential_at_split_forcing_scale() {
         let graph = build_large_test_graph();
-        assert!(graph.size() > 4096, "fixture too small to force a real split");
+        assert!(
+            graph.size() > 4096,
+            "fixture too small to force a real split"
+        );
 
         for deg in [0usize, 1, 2, 6000] {
             let mut seq: Vec<usize> = graph.iter_nodes_with_degree(deg).collect();
@@ -4830,13 +4979,19 @@ mod test {
             seq_lt.sort_unstable();
             let mut par_lt: Vec<usize> = graph.par_iter_nodes_with_degree_lt(deg).collect();
             par_lt.sort_unstable();
-            assert_eq!(par_lt, seq_lt, "par_iter_nodes_with_degree_lt({deg}) at scale");
+            assert_eq!(
+                par_lt, seq_lt,
+                "par_iter_nodes_with_degree_lt({deg}) at scale"
+            );
 
             let mut seq_ge: Vec<usize> = graph.iter_nodes_with_degree_ge(deg).collect();
             seq_ge.sort_unstable();
             let mut par_ge: Vec<usize> = graph.par_iter_nodes_with_degree_ge(deg).collect();
             par_ge.sort_unstable();
-            assert_eq!(par_ge, seq_ge, "par_iter_nodes_with_degree_ge({deg}) at scale");
+            assert_eq!(
+                par_ge, seq_ge,
+                "par_iter_nodes_with_degree_ge({deg}) at scale"
+            );
         }
 
         // isolated-node convenience method shares the same (now-fixed) code path.
@@ -4865,7 +5020,8 @@ mod test {
         )
         .unwrap();
         let tag = crate::graph::test_utils::unique_run_tag();
-        let open = |name: &str| G::from_file(&path, Some(format!("{name}_{tag}")), Some(1)).unwrap();
+        let open =
+            |name: &str| G::from_file(&path, Some(format!("{name}_{tag}")), Some(1)).unwrap();
         let files_of = |g: &G| -> Vec<std::path::PathBuf> {
             let id = g.graph_id().unwrap();
             let pattern = format!("{}*{id}.*", crate::graph::cache::utils::CACHE_DIR);
@@ -4876,7 +5032,11 @@ mod test {
         // results that aren't dropped, and a scratch file
         AlgoBatageljZaversnik::new(&g).unwrap();
         Triangles::new(&g).unwrap();
-        std::fs::write(g.build_cache_filename(CacheFile::General, Some(3)).unwrap(), b"").unwrap();
+        std::fs::write(
+            g.build_cache_filename(CacheFile::General, Some(3)).unwrap(),
+            b"",
+        )
+        .unwrap();
         AlgoBatageljZaversnik::new(&other).unwrap();
 
         let (files, other_files) = (files_of(&g), files_of(&other));

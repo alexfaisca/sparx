@@ -24,10 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn run(
-    graph: &DiGraph<(), (), u32>,
-    source: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run(graph: &DiGraph<(), (), u32>, source: usize) -> Result<(), Box<dyn std::error::Error>> {
     let mut bfs = BFSDists::new(graph, source)?;
     let eccentricity = bfs
         .get_distances()

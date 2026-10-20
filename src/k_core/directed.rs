@@ -44,8 +44,7 @@ pub enum CoreDegree {
 /// [`AlgoBatageljZaversnik`]: ../batagelj_zaversnik/struct.AlgoBatageljZaversnik.html
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct DirectedKCores<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount = u8>
-{
+pub struct DirectedKCores<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount = u8> {
     /// Graph for which node coreness is computed.
     g: &'a DiGraph<N, E, Ix>,
     /// The degree cores are by.
@@ -141,7 +140,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         let index_ptr = SharedSlice::<Ix>::new(p.offsets_ptr(), p.offsets_size());
         let neighbours_ptr = SharedSlice::<Ix>::new(p.neighbours_ptr(), p.width());
         let degree = self.degree;
-        let helper = |seq| self.g.build_cache_filename(CacheFile::KCoreDirected(degree), Some(seq));
+        let helper = |seq| {
+            self.g
+                .build_cache_filename(CacheFile::KCoreDirected(degree), Some(seq))
+        };
         let helpers = [helper(0)?, helper(1)?, helper(2)?];
         let mut degree_mem = SharedSliceMut::<Ix>::abst_mem_mut(&helpers[0], node_count, true)?;
         let mut node_mem = SharedSliceMut::<Ix>::abst_mem_mut(&helpers[1], node_count, true)?;
@@ -166,7 +168,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         }
 
         if max_degree > Cx::MAX {
-            let v = (0..node_count).find(|&v| degree[v].index() == max_degree).unwrap_or_default();
+            let v = (0..node_count)
+                .find(|&v| degree[v].index() == max_degree)
+                .unwrap_or_default();
             let e = crate::k_core::count::check_degree::<Cx>(v, max_degree).unwrap_err();
             drop((degree_mem, node_mem, pos_mem));
             for f in &helpers {
@@ -276,7 +280,11 @@ mod test {
     fn directed_k_cores_match_brute_force() {
         for (name, n, arcs) in [
             ("path", 3, vec![(0, 1), (1, 2)]),
-            ("cycle_and_star", 6, vec![(0, 1), (1, 2), (2, 0), (3, 0), (4, 0), (5, 0), (0, 0)]),
+            (
+                "cycle_and_star",
+                6,
+                vec![(0, 1), (1, 2), (2, 0), (3, 0), (4, 0), (5, 0), (0, 0)],
+            ),
             ("random_sparse", 40, random_arcs(40, 80, 1)),
             ("random_dense", 40, random_arcs(40, 500, 2)),
         ] {
@@ -292,14 +300,26 @@ mod test {
     #[test]
     fn directed_k_cores_of_undirected_graphs_are_the_usual_ones() {
         use crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
-        let mut edges: Vec<_> = random_arcs(40, 200, 6).into_iter().filter(|(u, v)| u < v).collect();
+        let mut edges: Vec<_> = random_arcs(40, 200, 6)
+            .into_iter()
+            .filter(|(u, v)| u < v)
+            .collect();
         edges.sort();
         edges.dedup();
         let g = graph("undirected", "symmetric", 40, &edges);
-        let usual: Vec<usize> = AlgoBatageljZaversnik::new(g.to_undirected().unwrap()).unwrap().k_cores().iter().map(|&c| c as usize).collect();
+        let usual: Vec<usize> = AlgoBatageljZaversnik::new(g.to_undirected().unwrap())
+            .unwrap()
+            .k_cores()
+            .iter()
+            .map(|&c| c as usize)
+            .collect();
         // in- and out-cores are the usual cores; total degree cores count each edge once per arc
         // (twice), as networkx's `core_number` of the symmetric digraph does
-        for (degree, factor) in [(CoreDegree::In, 1), (CoreDegree::Out, 1), (CoreDegree::Total, 2)] {
+        for (degree, factor) in [
+            (CoreDegree::In, 1),
+            (CoreDegree::Out, 1),
+            (CoreDegree::Total, 2),
+        ] {
             let cores = DirectedKCores::new(&g, degree).unwrap();
             let got: Vec<usize> = cores.k_cores().iter().map(|c| c.to_usize()).collect();
             let want: Vec<usize> = usual.iter().map(|c| factor * c).collect();

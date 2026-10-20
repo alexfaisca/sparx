@@ -69,7 +69,9 @@ pub struct AlgoGVELouvain<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W:
     _marker: std::marker::PhantomData<W>,
 }
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouvain<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
+    AlgoGVELouvain<'a, N, E, Ix, W>
+{
     /// Constants set according to the optimizeds parameters described in ["GVE-Louvain: Fast Louvain Algorithm for Community Detection in Shared Memory Setting"](https://doi.org/10.48550/arXiv.2312.04876).
     /// Described in 4.1.2 Limiting the number of iterations per pass.
     const MAX_ITERATIONS: usize = 20;
@@ -215,7 +217,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouvain<'a, N, E, Ix, W> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
+    AlgoGVELouvain<'a, N, E, Ix, W>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -236,7 +240,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryGVELouvain<Ix, W>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryGVELouvain<Ix, W>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -449,15 +455,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
     /// fixes that while leaving `k`/`sigma`/edge weights narrow (`W`) everywhere else, preserving
     /// the memory-bandwidth benefit that narrower storage was for.
     #[inline(always)]
-    fn delta_q(
-        k_u_c: f64,
-        k_u_d: f64,
-        k_u: f64,
-        sig_c: f64,
-        sig_d: f64,
-        m: f64,
-    ) -> f64 {
-        assert!(k_u_c >= 0.0 && k_u_d >= 0.0 && k_u >= 0.0 && sig_c >= 0.0 && sig_d >= 0.0 && m >= 0.0);
+    fn delta_q(k_u_c: f64, k_u_d: f64, k_u: f64, sig_c: f64, sig_d: f64, m: f64) -> f64 {
+        assert!(
+            k_u_c >= 0.0 && k_u_d >= 0.0 && k_u >= 0.0 && sig_c >= 0.0 && sig_d >= 0.0 && m >= 0.0
+        );
         assert!(
             k_u_c.is_finite()
                 && k_u_d.is_finite()
@@ -1107,7 +1108,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
                 m2_f64,
             )?
         } else if let (Some(mut int_deg), Some(mut tot_deg)) =
-            (unsafe { helper.cast::<f64>() }, unsafe { coms.cast::<f64>() })
+            (unsafe { helper.cast::<f64>() }, unsafe {
+                coms.cast::<f64>()
+            })
         {
             // rare case (|V| > |E|): `Ix` happens to be 8 bytes wide, matching `f64` --- reuse
             // `helper`/`coms` in place, no extra allocation.
@@ -1120,7 +1123,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> AlgoGVELouva
                 m2_f64,
             )?
         } else if let (Some(mut int_deg), Some(mut tot_deg)) =
-            (unsafe { helper.cast::<f32>() }, unsafe { coms.cast::<f32>() })
+            (unsafe { helper.cast::<f32>() }, unsafe {
+                coms.cast::<f32>()
+            })
         {
             // rare case (|V| > |E|): `Ix` happens to be 4 bytes wide, matching `f32` --- reuse
             // `helper`/`coms` in place, no extra allocation.
@@ -1180,8 +1185,18 @@ mod test {
         writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
         writeln!(f, "8 8 13").unwrap();
         for &(u, v) in &[
-            (1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4),
-            (5, 6), (5, 7), (5, 8), (6, 7), (6, 8), (7, 8),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (5, 6),
+            (5, 7),
+            (5, 8),
+            (6, 7),
+            (6, 8),
+            (7, 8),
             (4, 5),
         ] {
             writeln!(f, "{u} {v}").unwrap();
@@ -1218,12 +1233,9 @@ mod test {
     }
 
     fn run_louvain<Ix: IndexType, W: Weight>(path: &std::path::Path, id: &str) -> (usize, f64) {
-        let graph = GraphMemoryMap::<VoidLabel, VoidLabel, Ix>::from_file(
-            path,
-            Some(id.to_string()),
-            None,
-        )
-        .expect("graph parse should succeed");
+        let graph =
+            GraphMemoryMap::<VoidLabel, VoidLabel, Ix>::from_file(path, Some(id.to_string()), None)
+                .expect("graph parse should succeed");
         let louvain = AlgoGVELouvain::<_, _, _, W>::new(&graph)
             .unwrap_or_else(|e| panic!("louvain({id}) should succeed: {e}"));
         (louvain.community_count(), louvain.partition_modularity())
@@ -1299,7 +1311,10 @@ mod test {
             ($ix:ty, $w:ty, $tag:expr) => {{
                 let (comm_count, modularity) =
                     run_louvain::<$ix, $w>(&path, &format!("gve_sparse_{}_{}", $tag, run_tag));
-                assert!(modularity.is_finite(), "modularity should be finite, got {modularity}");
+                assert!(
+                    modularity.is_finite(),
+                    "modularity should be finite, got {modularity}"
+                );
                 comm_count
             }};
         }
@@ -1335,8 +1350,10 @@ mod test {
         let path = dir.join("path.mtx");
         write_path_mtx(&path, 20);
 
-        let (comm_a, mod_a) = run_louvain::<usize, f64>(&path, &format!("gve_path_usize_f64_{run_tag}"));
-        let (comm_b, mod_b) = run_louvain::<u32, f32>(&path, &format!("gve_path_u32_f32_{run_tag}"));
+        let (comm_a, mod_a) =
+            run_louvain::<usize, f64>(&path, &format!("gve_path_usize_f64_{run_tag}"));
+        let (comm_b, mod_b) =
+            run_louvain::<u32, f32>(&path, &format!("gve_path_u32_f32_{run_tag}"));
 
         assert!(comm_a >= 1 && mod_a.is_finite());
         assert!(comm_b >= 1 && mod_b.is_finite());

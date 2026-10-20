@@ -816,7 +816,11 @@ impl<T> ScratchMem<T> {
     }
 
     /// An array of `len` elements, all `value`.
-    pub(crate) fn filled(file_name: String, len: usize, value: T) -> Result<Self, Box<dyn std::error::Error>>
+    pub(crate) fn filled(
+        file_name: String,
+        len: usize,
+        value: T,
+    ) -> Result<Self, Box<dyn std::error::Error>>
     where
         T: Copy,
     {
@@ -868,7 +872,10 @@ pub(crate) struct ScratchStack<T> {
 #[allow(dead_code)]
 impl<T> ScratchStack<T> {
     /// An empty stack of room for `capacity` elements, in a new file at `file_name`.
-    pub(crate) fn new(file_name: String, capacity: usize) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn new(
+        file_name: String,
+        capacity: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             mem: ScratchMem::new(file_name, capacity)?,
             len: 0,
@@ -897,7 +904,11 @@ impl<T> ScratchStack<T> {
     /// If the stack is full.
     #[inline(always)]
     pub(crate) fn push(&mut self, value: T) {
-        assert!(self.len < self.capacity(), "error scratch stack of {} elements is full", self.capacity());
+        assert!(
+            self.len < self.capacity(),
+            "error scratch stack of {} elements is full",
+            self.capacity()
+        );
         self.mem[self.len].write(value);
         self.len += 1;
     }
@@ -971,7 +982,9 @@ mod tests {
             mem[999] = 7;
             assert_eq!(mem[999], 7);
             assert!(Path::new(&path).exists());
-            let filled = ScratchMem::<u32>::filled(dir.join("f.tmp").to_string_lossy().into_owned(), 3, 9).unwrap();
+            let filled =
+                ScratchMem::<u32>::filled(dir.join("f.tmp").to_string_lossy().into_owned(), 3, 9)
+                    .unwrap();
             assert_eq!(&filled[..], &[9, 9, 9]);
         }
         assert!(!Path::new(&path).exists());
@@ -1778,10 +1791,17 @@ pub(crate) fn remove_if_exists<P: AsRef<std::path::Path>>(path: P) -> std::io::R
 /// Creates a new, empty file at `path`, in place of any there: readers of the one there keep it.
 /// Never opens another's: if another file appears at `path` between removing the old one and
 /// creating this one (another writer's), that's removed in turn, until this one is created.
-pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<std::fs::File> {
+pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(
+    path: P,
+) -> std::io::Result<std::fs::File> {
     loop {
         remove_if_exists(path.as_ref())?;
-        match OpenOptions::new().create_new(true).read(true).write(true).open(path.as_ref()) {
+        match OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path.as_ref())
+        {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             file => return file,
         }

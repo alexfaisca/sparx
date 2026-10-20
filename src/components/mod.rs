@@ -40,8 +40,8 @@ pub(super) fn component_sizes<Ix: graph::IndexType>(
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::graph::{DiGraph, Directed};
     use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
+    use crate::graph::{DiGraph, Directed};
     use std::io::Write;
 
     /// A graph loaded as a [`DiGraph`] (which any graph can be: see `to_undirected` for the
@@ -73,7 +73,8 @@ pub(crate) mod test_utils {
         }
         drop(f);
         let id = format!("components_{name}_{}", unique_run_tag());
-        let graph = DiGraph::from_file(&path, Some(id), Some(threads)).expect("parse should succeed");
+        let graph =
+            DiGraph::from_file(&path, Some(id), Some(threads)).expect("parse should succeed");
         TestGraph::new(graph, Some(dir))
     }
 
@@ -119,7 +120,9 @@ pub(crate) mod test_utils {
     pub(crate) fn random_arcs(n: usize, m: usize, seed: u64) -> Vec<(usize, usize)> {
         let mut state = seed;
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as usize
         };
         (0..m).map(|_| (next() % n, next() % n)).collect()

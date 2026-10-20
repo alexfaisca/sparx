@@ -177,7 +177,9 @@ impl<'a, G: Graph> BFSVisit<'a, G> {
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryBFSParents<G::Ix>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryBFSParents<G::Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 

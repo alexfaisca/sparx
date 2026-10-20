@@ -90,7 +90,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     /// Removes all cached files pertaining to this algorithm's execution's results.
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
-        let out_fn = this.g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
+        let out_fn = this
+            .g
+            .build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
         crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
@@ -214,7 +216,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                     (possible_triangles_t, clustering_sum_t, total_triangles_t)
                 }));
             }
-            handles.into_iter().map(|h| h.join()).collect::<Result<Vec<_>, _>>()
+            handles
+                .into_iter()
+                .map(|h| h.join())
+                .collect::<Result<Vec<_>, _>>()
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
@@ -274,7 +279,9 @@ pub struct DirectedClusteringCoefficient<'a, N: graph::N, E: graph::E, Ix: graph
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoefficient<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
+    DirectedClusteringCoefficient<'a, N, E, Ix>
+{
     /// Computes the directed clustering coefficients of a [`GraphMemoryMap`] instance,
     /// counting triangles as `u32`s (see [`new_tx`](Self::new_tx) for other widths).
     ///
@@ -338,7 +345,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoeff
                 }
             }
             let possible = degree * (degree - 1.) - 2. * reciprocated as f64;
-            *t_i = if possible > 0. { *t_i / 2. / possible } else { 0. };
+            *t_i = if possible > 0. {
+                *t_i / 2. / possible
+            } else {
+                0.
+            };
             sum += *t_i;
         }
         triangles.drop_cache()?;
@@ -347,7 +358,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoeff
         Ok(Self {
             g,
             local,
-            local_average: if node_count > 0 { sum / node_count as f64 } else { 0. },
+            local_average: if node_count > 0 {
+                sum / node_count as f64
+            } else {
+                0.
+            },
         })
     }
 
@@ -371,7 +386,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedClusteringCoeff
     /// Removes all cached files pertaining to this algorithm's execution's results.
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
-        let out_fn = this.g.build_cache_filename(CacheFile::DirectedClusteringCoefficient, None)?;
+        let out_fn = this
+            .g
+            .build_cache_filename(CacheFile::DirectedClusteringCoefficient, None)?;
         crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
@@ -413,24 +430,46 @@ mod directed_test {
         for (name, n, arcs) in [
             // networkx: clustering(nx.DiGraph([(0,1),(0,2),(1,2)])) == {0: 1, 1: 1, 2: 1}
             ("feed_forward", 3, vec![(0, 1), (0, 2), (1, 2)]),
-            ("cycle_with_reciprocal", 4, vec![(0, 1), (1, 2), (2, 0), (1, 0), (2, 3)]),
-            ("multi_and_loops", 5, vec![(0, 1), (0, 1), (1, 2), (2, 0), (3, 3), (2, 4), (4, 0)]),
+            (
+                "cycle_with_reciprocal",
+                4,
+                vec![(0, 1), (1, 2), (2, 0), (1, 0), (2, 3)],
+            ),
+            (
+                "multi_and_loops",
+                5,
+                vec![(0, 1), (0, 1), (1, 2), (2, 0), (3, 3), (2, 4), (4, 0)],
+            ),
             ("random", 30, random_arcs(30, 160, 9)),
         ] {
             let g = graph(name, "general", n, &arcs);
             let cc = DirectedClusteringCoefficient::new(&g).unwrap();
             let want = brute_force(n, &arcs);
-            for (i, (got, want)) in cc.local_clustering_coefficients().iter().zip(&want).enumerate() {
-                assert!((got - want).abs() < 1e-12, "{name}: node {i}: {got} != {want}");
+            for (i, (got, want)) in cc
+                .local_clustering_coefficients()
+                .iter()
+                .zip(&want)
+                .enumerate()
+            {
+                assert!(
+                    (got - want).abs() < 1e-12,
+                    "{name}: node {i}: {got} != {want}"
+                );
             }
             let average = want.iter().sum::<f64>() / n as f64;
-            assert!((cc.get_average_clustering_coefficient() - average).abs() < 1e-12, "{name}");
+            assert!(
+                (cc.get_average_clustering_coefficient() - average).abs() < 1e-12,
+                "{name}"
+            );
         }
     }
 
     #[test]
     fn directed_clustering_coefficients_of_undirected_graphs_are_the_usual_ones() {
-        let edges = random_arcs(30, 120, 4).into_iter().filter(|(u, v)| u < v).collect::<Vec<_>>();
+        let edges = random_arcs(30, 120, 4)
+            .into_iter()
+            .filter(|(u, v)| u < v)
+            .collect::<Vec<_>>();
         let mut simple = edges.clone();
         simple.sort();
         simple.dedup();
@@ -438,7 +477,10 @@ mod directed_test {
         let directed = DirectedClusteringCoefficient::new(&g).unwrap();
         let undirected = ClusteringCoefficient::new(g.to_undirected().unwrap()).unwrap();
         for i in 0..30 {
-            let (d, u) = (directed.get_node_clustering_coefficient(i), undirected.get_node_clusteringcoefficient(i));
+            let (d, u) = (
+                directed.get_node_clustering_coefficient(i),
+                undirected.get_node_clusteringcoefficient(i),
+            );
             assert!((d - u).abs() < 1e-12, "node {i}: {d} != {u}");
         }
     }

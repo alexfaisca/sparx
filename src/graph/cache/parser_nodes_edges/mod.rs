@@ -266,8 +266,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         };
 
         let d_fn = cache_file_name(&self.offsets_filename, &FileType::Helper(H::H), Some(1))?;
-        let degrees =
-            SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
+        let degrees = SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
         // get node degrees. `D::increment` is unchecked (no per-edge branch, see its
         // documentation) --- overflow is instead caught below, once, by comparing
@@ -326,8 +325,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let (_degrees_owner, offsets_s, sum) =
             self.finalize_ix_offsets(degrees, offsets_size, Some(edges_emitted))?;
 
-        let neighbors =
-            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
+        let neighbors = AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
 
         let counters_fn =
             cache_file_name(&self.offsets_filename, &FileType::Helper(H::H), Some(0))?;
@@ -381,7 +379,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
                             *neighbors.get_mut(
                                 D::widen(*offsets.get(orig_id))
-                                    + counters.get(orig_id).fetch_add_one_widened(Ordering::Relaxed),
+                                    + counters
+                                        .get(orig_id)
+                                        .fetch_add_one_widened(Ordering::Relaxed),
                             ) = Ix::new(dest_id);
                         }
                         Ok(())
@@ -427,8 +427,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 #[cfg(test)]
 mod test {
     use super::GraphCache;
-    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::graph::label::VoidLabel;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use std::io::Write;
 
     fn write_tiny_nodes_edges(dir: &std::path::Path) -> std::path::PathBuf {
@@ -469,9 +469,11 @@ mod test {
             None,
         )
         .expect("usize nodes/edges parse should succeed");
-        let graph_usize =
-            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
-                .expect("usize graph init should succeed");
+        let graph_usize = crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(
+            cache_usize,
+            Some(1),
+        )
+        .expect("usize graph init should succeed");
 
         let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
             &nodes_path,

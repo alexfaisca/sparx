@@ -657,7 +657,9 @@ pub(crate) mod test {
     use super::*;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::k_truss::triangles::Triangles;
-    use crate::k_truss::triangles::test::{DiGraph as TestDiGraph, DiTestGraph, fixtures, random_edges};
+    use crate::k_truss::triangles::test::{
+        DiGraph as TestDiGraph, DiTestGraph, fixtures, random_edges,
+    };
     use std::collections::BTreeMap;
     use std::io::Write;
 
@@ -773,13 +775,12 @@ pub(crate) mod test {
                 .map(|c| c.count())
                 .collect();
             // the same graph, as a directed one
-            let directed =
-                crate::graph::DiGraph::<graph::label::VoidLabel, graph::label::VoidLabel, usize>::open(
-                    g.cache_filename(),
-                    None,
-                    Some(4),
-                )
-                    .unwrap();
+            let directed = crate::graph::DiGraph::<
+                graph::label::VoidLabel,
+                graph::label::VoidLabel,
+                usize,
+            >::open(g.cache_filename(), None, Some(4))
+            .unwrap();
             let mut t = DirectedTriangles::<_, _, _, u32>::new_tx(
                 &directed,
                 DirectedTriangleType::CycleFeedForward,

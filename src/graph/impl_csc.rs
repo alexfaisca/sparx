@@ -25,8 +25,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 self.build_reciprocal_edge_index()?;
                 match OpenOptions::new().read(true).open(er_fn.as_str()) {
                     Ok(i) => {
-                        let len =
-                            i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+                        let len = i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
                         SharedSlice::<Ix>::abstract_mem(&er_fn, dud, len, true)
                     }
                     Err(e) => Err(format!("error can't abst mem for edge_reciprocal {e}").into()),
@@ -49,8 +48,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 self.build_reciprocal_edge_index()?;
                 match OpenOptions::new().read(true).open(eo_fn.as_str()) {
                     Ok(i) => {
-                        let len =
-                            i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
+                        let len = i.metadata().unwrap().len() as usize / std::mem::size_of::<Ix>();
                         SharedSlice::<Ix>::abstract_mem(&eo_fn, dud, len, true)
                     }
                     Err(e) => Err(format!("error can't abst mem for edge_over {e}").into()),
@@ -87,7 +85,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// the graph's lock, or other processes) never write files another one reads. Builds are
     /// deterministic, so whichever renames last leaves the same index.
     fn build_reciprocal_edge_index(&self) -> Result<(), Box<dyn std::error::Error>> {
-
         let er_fn = self.build_cache_filename(CacheFile::EdgeReciprocal, None)?;
         let eo_fn = self.build_cache_filename(CacheFile::EdgeOver, None)?;
         let _building = self
@@ -348,10 +345,28 @@ mod tests {
         for (name, header, n, edges, symmetric) in [
             ("sym_path", "symmetric", 3, vec![(1, 0), (2, 1)], true),
             ("dir_path", "general", 3, vec![(0, 1), (1, 2)], false),
-            ("both_ways", "general", 3, vec![(0, 1), (1, 0), (1, 2), (2, 1)], true),
+            (
+                "both_ways",
+                "general",
+                3,
+                vec![(0, 1), (1, 0), (1, 2), (2, 1)],
+                true,
+            ),
             ("self_loop", "general", 2, vec![(0, 0), (1, 1)], true),
-            ("multi_unbalanced", "general", 2, vec![(0, 1), (0, 1), (1, 0)], false),
-            ("multi_balanced", "general", 2, vec![(0, 1), (0, 1), (1, 0), (1, 0)], true),
+            (
+                "multi_unbalanced",
+                "general",
+                2,
+                vec![(0, 1), (0, 1), (1, 0)],
+                false,
+            ),
+            (
+                "multi_balanced",
+                "general",
+                2,
+                vec![(0, 1), (0, 1), (1, 0), (1, 0)],
+                true,
+            ),
         ] {
             let g = digraph_from_mtx(name, header, n, &edges);
             assert_eq!(g.is_symmetric().unwrap(), symmetric, "{name}");
@@ -373,24 +388,30 @@ mod tests {
             for e in offsets(u) {
                 let v = g[..][e];
                 let r = er[e];
-                assert!(offsets(v).contains(&r), "edge {e} {u}->{v} paired outside {v}'s edges");
+                assert!(
+                    offsets(v).contains(&r),
+                    "edge {e} {u}->{v} paired outside {v}'s edges"
+                );
                 assert_eq!(g[..][r], u, "edge {e} {u}->{v} paired with a wrong edge");
                 assert_eq!(er[r], e, "edge {e} {u}->{v} not paired back");
             }
         }
     }
 
-
     /// Parallel edges next to another node's neighbours: the reciprocals of the 2nd and later
     /// copies used to be looked for past the end of the node's own neighbours.
     #[test]
     fn edge_reciprocal_pairs_parallel_edges_of_random_multigraphs() {
-        use crate::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
+        use crate::k_truss::{
+            burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles,
+        };
         let mut cases = vec![("reviewed", 3, vec![(2, 0), (2, 0), (2, 1)])];
         for seed in 0..12u64 {
             let mut state = seed + 1;
             let mut next = move || {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (state >> 33) as usize
             };
             let n = 3 + next() % 20;
@@ -406,20 +427,35 @@ mod tests {
         }
         for (case, (name, n, edges)) in cases.into_iter().enumerate() {
             let g = graph_from_mtx(&format!("{name}_{case}"), "symmetric", n, &edges);
-            let er = g.edge_reciprocal().unwrap_or_else(|e| panic!("{name} {case}: {e}"));
+            let er = g
+                .edge_reciprocal()
+                .unwrap_or_else(|e| panic!("{name} {case}: {e}"));
             let er = er.as_slice();
             let index = SharedSlice::<usize>::new(g.offsets_ptr(), g.offsets_size());
             for u in 0..g.size() {
                 for e in *index.get(u)..*index.get(u + 1) {
                     let (v, r) = (g[..][e], er[e]);
-                    assert!((*index.get(v)..*index.get(v + 1)).contains(&r), "{name} {case}: edge {e}");
-                    assert_eq!((g[..][r], er[r]), (u, e), "{name} {case}: edge {e} {u}->{v}");
+                    assert!(
+                        (*index.get(v)..*index.get(v + 1)).contains(&r),
+                        "{name} {case}: edge {e}"
+                    );
+                    assert_eq!(
+                        (g[..][r], er[r]),
+                        (u, e),
+                        "{name} {case}: edge {e} {u}->{v}"
+                    );
                 }
             }
             // the triangle based algorithms run, and agree
             Triangles::<_, _, _, u32>::new_tx(&g).unwrap_or_else(|e| panic!("{name} {case}: {e}"));
-            let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 3).unwrap().k_trusses().to_vec();
-            let bea = AlgoBurkhardtEtAl::<_, _, _, u32>::new_tx(&g).unwrap().k_trusses().to_vec();
+            let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 3)
+                .unwrap()
+                .k_trusses()
+                .to_vec();
+            let bea = AlgoBurkhardtEtAl::<_, _, _, u32>::new_tx(&g)
+                .unwrap()
+                .k_trusses()
+                .to_vec();
             assert_eq!(pkt, bea, "{name} {case}");
         }
     }

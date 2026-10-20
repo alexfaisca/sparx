@@ -34,7 +34,9 @@ fn fastest(runs: usize, mut f: impl FnMut()) -> Duration {
 fn rng(seed: u64) -> impl FnMut() -> u64 {
     let mut state = seed;
     move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         state >> 17
     }
 }
@@ -47,14 +49,21 @@ fn random_graph(name: &str, n: usize, m: usize, threads: u8) -> (Graph<(), (), u
     let path = dir.join(format!("{name}.mtx"));
     let mut next = rng(n as u64 ^ m as u64);
     let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
-    writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric\n{n} {n} {m}").unwrap();
+    writeln!(
+        f,
+        "%%MatrixMarket matrix coordinate pattern symmetric\n{n} {n} {m}"
+    )
+    .unwrap();
     for _ in 0..m {
         let (u, v) = (next() as usize % n, next() as usize % n);
         writeln!(f, "{} {}", u.max(v) + 1, u.min(v) + 1).unwrap();
     }
     drop(f);
     let id = format!("perf_{name}_{}", std::process::id());
-    (Graph::from_file(&path, Some(id), Some(threads)).unwrap(), dir)
+    (
+        Graph::from_file(&path, Some(id), Some(threads)).unwrap(),
+        dir,
+    )
 }
 
 /// How many times faster [`HyperLogLog::union`] merges neighbours' counters, in *HyperBall*'s
@@ -72,7 +81,9 @@ fn union_speedup<P: Precision>() -> f64 {
             c
         })
         .collect();
-    let neighbours: Vec<usize> = (0..COUNTERS * DEGREE).map(|_| next() as usize % COUNTERS).collect();
+    let neighbours: Vec<usize> = (0..COUNTERS * DEGREE)
+        .map(|_| next() as usize % COUNTERS)
+        .collect();
 
     // as in HyperBall: a node's counter, merged with its neighbours'
     let union = fastest(9, || {
@@ -106,7 +117,10 @@ fn union_speedup<P: Precision>() -> f64 {
         black_box(changed);
     });
     let speedup = scalar.as_secs_f64() / union.as_secs_f64();
-    println!("precision {}: union {union:?}, a register at a time {scalar:?} ({speedup:.1}x)", P::EXPONENT);
+    println!(
+        "precision {}: union {union:?}, a register at a time {scalar:?} ({speedup:.1}x)",
+        P::EXPONENT
+    );
     speedup
 }
 
@@ -167,13 +181,19 @@ fn exact_centralities_share_their_bfss() {
     });
     // the same distances (closeness without normalization is their sum)
     for (u, (&got, &want)) in sums.iter().zip(&reference_sums).enumerate() {
-        assert!(got == want as f64 || (got == 0. && want == 0), "node {u}: {got} vs {want}");
+        assert!(
+            got == want as f64 || (got == 0. && want == 0),
+            "node {u}: {got} vs {want}"
+        );
     }
     let speedup = separate.as_secs_f64() / shared.as_secs_f64();
     println!("exact closeness: {shared:?}, a BFS from each node: {separate:?} ({speedup:.1}x)");
     g.drop_cache().unwrap();
     let _ = std::fs::remove_dir_all(dir);
-    assert!(speedup >= 1.5, "exact closeness is only {speedup:.1}x as fast as separate BFSs from each node: do they still share their work?");
+    assert!(
+        speedup >= 1.5,
+        "exact closeness is only {speedup:.1}x as fast as separate BFSs from each node: do they still share their work?"
+    );
 }
 
 /// The clustering coefficients cost not much more than counting the triangles they're computed
@@ -183,7 +203,9 @@ fn exact_centralities_share_their_bfss() {
 #[test]
 #[ignore]
 fn clustering_costs_little_more_than_triangles() {
-    let threads = std::thread::available_parallelism().map_or(4, |t| t.get()).min(64) as u8;
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |t| t.get())
+        .min(64) as u8;
     let (mut g, dir) = random_graph("clustering", 1 << 22, 1 << 20, threads);
     // the triangles' pre-processing, shared by both
     g.edge_reciprocal().unwrap();
@@ -196,8 +218,13 @@ fn clustering_costs_little_more_than_triangles() {
         c.drop_cache().unwrap();
     });
     let ratio = clustering.as_secs_f64() / triangles.as_secs_f64();
-    println!("clustering: {clustering:?}, triangles: {triangles:?} ({ratio:.1}x, {threads} threads)");
+    println!(
+        "clustering: {clustering:?}, triangles: {triangles:?} ({ratio:.1}x, {threads} threads)"
+    );
     g.drop_cache().unwrap();
     let _ = std::fs::remove_dir_all(dir);
-    assert!(ratio <= 12., "the clustering coefficients take {ratio:.1}x as long as counting triangles");
+    assert!(
+        ratio <= 12.,
+        "the clustering coefficients take {ratio:.1}x as long as counting triangles"
+    );
 }

@@ -31,8 +31,7 @@ mod _verify {
         let mut degree: Vec<usize> = (0..node_count)
             .map(|v| graph.neighbours(v).map(|n| n.count()))
             .collect::<Result<_, _>>()?;
-        let mut queue: BTreeSet<(usize, usize)> =
-            (0..node_count).map(|v| (degree[v], v)).collect();
+        let mut queue: BTreeSet<(usize, usize)> = (0..node_count).map(|v| (degree[v], v)).collect();
         let mut coreness = vec![0; node_count];
         while let Some((deg_v, v)) = queue.pop_first() {
             coreness[v] = deg_v;

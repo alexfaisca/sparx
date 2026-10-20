@@ -43,23 +43,34 @@ fn reach_of_every_node<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
                 .collect::<Result<_, _>>()?;
             handles.push(scope.spawn(
                 move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                    let nodes = |k: usize| SharedSliceMut::<Ix>::abst_mem_mut(&files[k], node_count, true);
-                    let built = (|| Ok::<_, Box<dyn std::error::Error>>(BatchScratch {
-                        marks: SharedSliceMut::<Marks>::abst_mem_mut(&files[0], node_count, true)?,
-                        visit: SharedSliceMut::<Word>::abst_mem_mut(&files[1], node_count, true)?,
-                        frontier: nodes(2)?,
-                        next_frontier: nodes(3)?,
-                        touched: nodes(4)?,
-                    }))()
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() });
+                    let nodes =
+                        |k: usize| SharedSliceMut::<Ix>::abst_mem_mut(&files[k], node_count, true);
+                    let built = (|| {
+                        Ok::<_, Box<dyn std::error::Error>>(BatchScratch {
+                            marks: SharedSliceMut::<Marks>::abst_mem_mut(
+                                &files[0], node_count, true,
+                            )?,
+                            visit: SharedSliceMut::<Word>::abst_mem_mut(
+                                &files[1], node_count, true,
+                            )?,
+                            frontier: nodes(2)?,
+                            next_frontier: nodes(3)?,
+                            touched: nodes(4)?,
+                        })
+                    })()
+                    .map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+                    );
                     let result = built.and_then(|mut scratch| {
                         let mut reach = [Reach::default(); BATCH];
                         loop {
-                            let first = BATCH * next_batch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let first = BATCH
+                                * next_batch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if first >= node_count {
                                 break Ok(());
                             }
-                            let sources = &order_slice[first..std::cmp::min(first + BATCH, node_count)];
+                            let sources =
+                                &order_slice[first..std::cmp::min(first + BATCH, node_count)];
                             batch_reach(g, sources, &mut scratch, &mut reach)?;
                             for (source, &r) in sources.iter().zip(&reach) {
                                 store(source.index(), r);
@@ -83,7 +94,9 @@ fn reach_of_every_node<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
         }
         Ok(())
     })
-    .map_err(|e| -> Box<dyn std::error::Error> { format!("error exact centralities {:?}", e).into() });
+    .map_err(|e| -> Box<dyn std::error::Error> {
+        format!("error exact centralities {:?}", e).into()
+    });
     drop(order);
     let _ = std::fs::remove_file(&order_fn);
     result?
@@ -178,7 +191,10 @@ fn batch_reach<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness
         visit.get_mut(source)[i / 64] = 1 << (i % 64);
         *frontier.get_mut(i) = Ix::new(source);
         *touched.get_mut(i) = Ix::new(source);
-        reach[i] = Reach { reached: 1, ..Reach::default() };
+        reach[i] = Reach {
+            reached: 1,
+            ..Reach::default()
+        };
     }
     let (mut frontier_len, mut touched_len) = (batch, batch);
     let mut found = [0u64; BATCH];
@@ -252,7 +268,10 @@ fn single_source_reach<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
     queue: &mut SharedSliceMut<Ix>,
 ) -> Result<Reach, Box<dyn std::error::Error + Send + Sync>> {
     let mark = source as u32 + 1;
-    let mut reach = Reach { reached: 1, ..Reach::default() };
+    let mut reach = Reach {
+        reached: 1,
+        ..Reach::default()
+    };
     *stamp.get_mut(source) = mark;
     *queue.get_mut(0) = Ix::new(source);
     let (mut level_start, mut tail) = (0, 1);
@@ -261,7 +280,10 @@ fn single_source_reach<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
         let level_end = tail;
         level += 1;
         for i in level_start..level_end {
-            for v in g.neighbours(queue.get(i).index()).map_err(|e| e.to_string())? {
+            for v in g
+                .neighbours(queue.get(i).index())
+                .map_err(|e| e.to_string())?
+            {
                 if *stamp.get(v) != mark {
                     *stamp.get_mut(v) = mark;
                     *queue.get_mut(tail) = Ix::new(v);
@@ -299,7 +321,14 @@ fn single_source_reach<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
 /// [`DiGraph`]: ../../graph/type.DiGraph.html
-pub struct ExactClosenessCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64, Dir: Directedness = Undirected> {
+pub struct ExactClosenessCentrality<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    W: Weight = f64,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's centrality.
@@ -309,7 +338,9 @@ pub struct ExactClosenessCentrality<'a, N: graph::N, E: graph::E, Ix: graph::Ind
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosenessCentrality<'a, N, E, Ix, W, Directed> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
+    ExactClosenessCentrality<'a, N, E, Ix, W, Directed>
+{
     /// Computes every node's exact closeness centrality, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
@@ -325,8 +356,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactClosene
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactClosenessCentrality<'a, N, E, Ix, W, Dir> {
-
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness>
+    ExactClosenessCentrality<'a, N, E, Ix, W, Dir>
+{
     pub fn new(
         g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
@@ -358,7 +390,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactClosenessCentrality<'a, N, E, Ix, W, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness>
+    ExactClosenessCentrality<'a, N, E, Ix, W, Dir>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -492,7 +526,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
 /// [`DiGraph`]: ../../graph/type.DiGraph.html
-pub struct ExactHarmonicCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64, Dir: Directedness = Undirected> {
+pub struct ExactHarmonicCentrality<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    W: Weight = f64,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's centrality.
@@ -501,7 +542,9 @@ pub struct ExactHarmonicCentrality<'a, N: graph::N, E: graph::E, Ix: graph::Inde
     normalized: Option<bool>,
 }
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmonicCentrality<'a, N, E, Ix, W, Directed> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
+    ExactHarmonicCentrality<'a, N, E, Ix, W, Directed>
+{
     /// Computes every node's exact harmonic centrality, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
@@ -517,8 +560,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactHarmoni
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactHarmonicCentrality<'a, N, E, Ix, W, Dir> {
-
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness>
+    ExactHarmonicCentrality<'a, N, E, Ix, W, Dir>
+{
     pub fn new(
         g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         normalized: Option<bool>,
@@ -550,7 +594,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactHarmonicCentrality<'a, N, E, Ix, W, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness>
+    ExactHarmonicCentrality<'a, N, E, Ix, W, Dir>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -678,14 +724,23 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 /// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
 /// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
 /// [`DiGraph`]: ../../graph/type.DiGraph.html
-pub struct ExactLinCentrality<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight = f64, Dir: Directedness = Undirected> {
+pub struct ExactLinCentrality<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    W: Weight = f64,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing each node's centrality.
     centralities: AbstractedProceduralMemoryMut<W>,
 }
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCentrality<'a, N, E, Ix, W, Directed> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
+    ExactLinCentrality<'a, N, E, Ix, W, Directed>
+{
     /// Computes every node's exact Lin's centrality, following arcs in a given [`Direction`] (see the type's documentation):
     /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
     /// results are then of (its node ids are the graph's).
@@ -700,8 +755,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight> ExactLinCent
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactLinCentrality<'a, N, E, Ix, W, Dir> {
-
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness>
+    ExactLinCentrality<'a, N, E, Ix, W, Dir>
+{
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut lin = Self::new_no_compute(g)?;
 
@@ -730,7 +786,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 
 #[allow(dead_code)]
 /// HyperBall engine functions.
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness> ExactLinCentrality<'a, N, E, Ix, W, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directedness>
+    ExactLinCentrality<'a, N, E, Ix, W, Dir>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -843,7 +901,10 @@ mod test {
     /// Every node's [`Reach`], by [`reach_of_every_node`] (multi-source BFSs).
     fn batched<Dir: Directedness>(g: &GraphMemoryMap<(), (), usize, Dir>) -> Vec<Reach> {
         let reach = std::sync::Mutex::new(vec![Reach::default(); g.size()]);
-        reach_of_every_node(g, CacheFile::ExactCloseness, &|u, r| reach.lock().unwrap()[u] = r).unwrap();
+        reach_of_every_node(g, CacheFile::ExactCloseness, &|u, r| {
+            reach.lock().unwrap()[u] = r
+        })
+        .unwrap();
         g.cleanup_cache(CacheFile::ExactCloseness).unwrap();
         reach.into_inner().unwrap()
     }
@@ -855,7 +916,9 @@ mod test {
         let mut queue = vec![0usize; n];
         let mut stamp = SharedSliceMut::<u32>::new(stamp.as_mut_ptr(), n);
         let mut queue = SharedSliceMut::<usize>::new(queue.as_mut_ptr(), n);
-        (0..n).map(|u| single_source_reach(g, u, &mut stamp, &mut queue).unwrap()).collect()
+        (0..n)
+            .map(|u| single_source_reach(g, u, &mut stamp, &mut queue).unwrap())
+            .collect()
     }
 
     /// The multi-source BFSs find what BFSs from each node do: the same reached nodes and
@@ -871,18 +934,52 @@ mod test {
         use crate::trails::bfs::BFSDists;
         let path: Vec<_> = (0..99).map(|u| (u, u + 1)).collect();
         let mut two_parts = random_arcs(70, 200, 3);
-        two_parts.extend(random_arcs(70, 200, 4).into_iter().map(|(u, v)| (u + 70, v + 70)));
+        two_parts.extend(
+            random_arcs(70, 200, 4)
+                .into_iter()
+                .map(|(u, v)| (u + 70, v + 70)),
+        );
         for (name, header, n, arcs, threads) in [
             ("single", "general", 1, vec![], 4),
             ("isolated", "general", 5, vec![(0, 0)], 8),
             ("path", "general", 100, path.clone(), 3),
             ("path_symmetric", "symmetric", 100, path, 2),
-            ("random_batch_less_1", "general", BATCH - 1, random_arcs(BATCH - 1, 5 * BATCH, 1), 1),
-            ("random_batch", "general", BATCH, random_arcs(BATCH, 5 * BATCH, 2), 1),
-            ("random_batch_plus_1", "symmetric", BATCH + 1, random_arcs(BATCH + 1, 2 * BATCH, 5), 2),
-            ("random_batches", "general", 3 * BATCH + 7, random_arcs(3 * BATCH + 7, 14 * BATCH, 6), 3),
+            (
+                "random_batch_less_1",
+                "general",
+                BATCH - 1,
+                random_arcs(BATCH - 1, 5 * BATCH, 1),
+                1,
+            ),
+            (
+                "random_batch",
+                "general",
+                BATCH,
+                random_arcs(BATCH, 5 * BATCH, 2),
+                1,
+            ),
+            (
+                "random_batch_plus_1",
+                "symmetric",
+                BATCH + 1,
+                random_arcs(BATCH + 1, 2 * BATCH, 5),
+                2,
+            ),
+            (
+                "random_batches",
+                "general",
+                3 * BATCH + 7,
+                random_arcs(3 * BATCH + 7, 14 * BATCH, 6),
+                3,
+            ),
             ("two_parts", "general", 140, two_parts, 5),
-            ("sparse", "general", 2 * BATCH + 50, random_arcs(2 * BATCH + 50, 2 * BATCH, 7), 32),
+            (
+                "sparse",
+                "general",
+                2 * BATCH + 50,
+                random_arcs(2 * BATCH + 50, 2 * BATCH, 7),
+                32,
+            ),
         ] {
             let g = graph_with_threads(name, header, n, &arcs, threads);
             let (got, want) = (batched(&g), one_by_one(&g));
@@ -890,10 +987,22 @@ mod test {
             for u in 0..n {
                 let bfs = BFSDists::new(&g, u).unwrap();
                 assert_eq!(got[u].reached, bfs.recheable(), "{name}: node {u} reaches");
-                assert_eq!(got[u].distances as f64, bfs.total_distances(), "{name}: node {u}'s distances");
+                assert_eq!(
+                    got[u].distances as f64,
+                    bfs.total_distances(),
+                    "{name}: node {u}'s distances"
+                );
                 // its distances' inverses, in another order
-                let inverse: f64 = bfs.get_distances().iter().filter(|&&d| d > 0).map(|&d| 1. / d as f64).sum();
-                assert!((got[u].inverse_distances - inverse).abs() <= 1e-12 * inverse.max(1.), "{name}: node {u}");
+                let inverse: f64 = bfs
+                    .get_distances()
+                    .iter()
+                    .filter(|&&d| d > 0)
+                    .map(|&d| 1. / d as f64)
+                    .sum();
+                assert!(
+                    (got[u].inverse_distances - inverse).abs() <= 1e-12 * inverse.max(1.),
+                    "{name}: node {u}"
+                );
             }
         }
     }
@@ -955,17 +1064,32 @@ mod test {
         let (c_u32, h_u32, l_u32) = run_all!(u32, "u32");
         let (c_u16, h_u16, l_u16) = run_all!(u16, "u16");
 
-        assert_eq!(c_usize, c_u32, "closeness: Ix=u32 should match Ix=usize exactly");
-        assert_eq!(c_usize, c_u16, "closeness: Ix=u16 should match Ix=usize exactly");
-        assert_eq!(h_usize, h_u32, "harmonic: Ix=u32 should match Ix=usize exactly");
-        assert_eq!(h_usize, h_u16, "harmonic: Ix=u16 should match Ix=usize exactly");
+        assert_eq!(
+            c_usize, c_u32,
+            "closeness: Ix=u32 should match Ix=usize exactly"
+        );
+        assert_eq!(
+            c_usize, c_u16,
+            "closeness: Ix=u16 should match Ix=usize exactly"
+        );
+        assert_eq!(
+            h_usize, h_u32,
+            "harmonic: Ix=u32 should match Ix=usize exactly"
+        );
+        assert_eq!(
+            h_usize, h_u16,
+            "harmonic: Ix=u16 should match Ix=usize exactly"
+        );
         assert_eq!(l_usize, l_u32, "lin: Ix=u32 should match Ix=usize exactly");
         assert_eq!(l_usize, l_u16, "lin: Ix=u16 should match Ix=usize exactly");
 
         // sanity: every value should be positive (exact values are checked in
         // `exact_centralities_match_known_values`).
         for (v, &c) in c_usize.iter().enumerate() {
-            assert!(c.is_finite() && c > 0.0, "node {v}: closeness should be positive, got {c}");
+            assert!(
+                c.is_finite() && c > 0.0,
+                "node {v}: closeness should be positive, got {c}"
+            );
         }
     }
 
@@ -1025,25 +1149,52 @@ mod test {
 
         let check = |what: &str, got: &[f64], expected: [f64; 4]| {
             for (v, (&g, e)) in got.iter().zip(expected).enumerate() {
-                assert!((g - e).abs() < 1e-12, "{what} of node {v}: {g}, expected {e}");
+                assert!(
+                    (g - e).abs() < 1e-12,
+                    "{what} of node {v}: {g}, expected {e}"
+                );
             }
         };
         let closeness = |n| {
-            ExactClosenessCentrality::<_, _, _, f64>::new(&graph, n).unwrap().centralities().to_vec()
+            ExactClosenessCentrality::<_, _, _, f64>::new(&graph, n)
+                .unwrap()
+                .centralities()
+                .to_vec()
         };
         let harmonic = |n| {
-            ExactHarmonicCentrality::<_, _, _, f64>::new(&graph, n).unwrap().centralities().to_vec()
+            ExactHarmonicCentrality::<_, _, _, f64>::new(&graph, n)
+                .unwrap()
+                .centralities()
+                .to_vec()
         };
 
         check("distance sum", &closeness(None), [3., 2., 3., 0.]);
-        check("closeness / (|V| - 1)", &closeness(Some(false)), [1., 1.5, 1., 0.]);
-        check("closeness / (r - 1)", &closeness(Some(true)), [2. / 3., 1., 2. / 3., 0.]);
+        check(
+            "closeness / (|V| - 1)",
+            &closeness(Some(false)),
+            [1., 1.5, 1., 0.],
+        );
+        check(
+            "closeness / (r - 1)",
+            &closeness(Some(true)),
+            [2. / 3., 1., 2. / 3., 0.],
+        );
         check("inverse distance sum", &harmonic(None), [1.5, 2., 1.5, 0.]);
-        check("harmonic / (|V| - 1)", &harmonic(Some(false)), [0.5, 2. / 3., 0.5, 0.]);
-        check("harmonic / (r - 1)", &harmonic(Some(true)), [0.75, 1., 0.75, 0.]);
+        check(
+            "harmonic / (|V| - 1)",
+            &harmonic(Some(false)),
+            [0.5, 2. / 3., 0.5, 0.],
+        );
+        check(
+            "harmonic / (r - 1)",
+            &harmonic(Some(true)),
+            [0.75, 1., 0.75, 0.],
+        );
         check(
             "lin",
-            ExactLinCentrality::<_, _, _, f64>::new(&graph).unwrap().centralities(),
+            ExactLinCentrality::<_, _, _, f64>::new(&graph)
+                .unwrap()
+                .centralities(),
             [3., 4.5, 3., 1.],
         );
     }

@@ -81,7 +81,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::get_or_compute_tx(g)
     }
-
 }
 
 #[allow(dead_code)]
@@ -132,12 +131,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         burkhardt_et_al.compute_with_triangles(proc_mem, triangles)?;
         Ok(burkhardt_et_al)
     }
-
-
-
-
-
-
 }
 
 #[allow(dead_code)]
@@ -199,8 +192,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         self.g.width()
     }
 
-
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(
+        &self,
+    ) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
         let mem = self.scratch_mem()?;
         // pre-initialize the memmapped files if they don't exist
         let _edge_reciprocal = self.g.edge_reciprocal()?;
@@ -214,7 +208,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_triangles(proc_mem, Triangles::new_tx(self.g)?)
     }
-
 
     /// Decomposes the (undirected) graph from its `triangles`, whose counts are used (and
     /// consumed) as working memory.
@@ -234,8 +227,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         triangles.drop_cache()?;
         Ok(())
     }
-
-
 }
 
 /// Shared by the decompositions of undirected graphs' triangles and directed graphs'.
@@ -244,9 +235,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
     AlgoBurkhardtEtAl<'a, N, E, Ix, Tx, Dir>
 {
     /// The working memory of a decomposition.
-    fn scratch_mem(
-        &self,
-    ) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
+    fn scratch_mem(&self) -> Result<ProceduralMemoryBurkhardtEtAl<Ix>, Box<dyn std::error::Error>> {
         let edge_count = self.g.width();
         let edge_count2 = self.g.width() * 2;
         let file = |seq| {
@@ -257,7 +246,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
         let edge_list = SharedSliceMut::<Ix>::abst_mem_mut(&file(0)?, edge_count, true)?;
         let edge_index = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, edge_count, true)?;
         let stack = SharedSliceMut::<(Ix, Ix)>::abst_mem_mut(&file(2)?, edge_count2, true)?;
-
 
         Ok((edge_list, edge_index, stack))
     }
@@ -489,7 +477,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
 
 /// Decompositions of a directed graph's triangles of a given type.
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoBurkhardtEtAl<'a, N, E, Ix, u8, Directed> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
+    AlgoBurkhardtEtAl<'a, N, E, Ix, u8, Directed>
+{
     /// Performs k-truss decomposition of a directed graph, over its triangles of type
     /// `triangle_type` (an edge is in the k-truss if it's in at least `k - 2` triangles, in a
     /// selected role, of the k-truss). Trussness is stored as `u8`s, see

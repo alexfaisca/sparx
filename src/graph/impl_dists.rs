@@ -1,8 +1,12 @@
 use super::GraphMemoryMap;
 
 #[allow(dead_code)]
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: crate::graph::Directedness>
-    GraphMemoryMap<N, E, Ix, Dir>
+impl<
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: crate::graph::Directedness,
+> GraphMemoryMap<N, E, Ix, Dir>
 {
     pub(crate) fn degree_dist_impl(&self) -> Result<Box<[usize]>, Box<dyn std::error::Error>> {
         unimplemented!();

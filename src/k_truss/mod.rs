@@ -174,9 +174,10 @@ impl<N: graph::N, E: graph::E, Ix: IndexType> TriangleIndex<'_, '_, N, E, Ix> {
                             let w = uw.node.index();
                             if w != u && w != v {
                                 // `f` between `u` and `w`, `g` between `v` and `w`, either way
-                                for (f_run, f_u_to_w) in
-                                    [(adjacency.out_run(u, uw), true), (adjacency.in_run(u, uw), false)]
-                                {
+                                for (f_run, f_u_to_w) in [
+                                    (adjacency.out_run(u, uw), true),
+                                    (adjacency.in_run(u, uw), false),
+                                ] {
                                     for (g_run, g_v_to_w) in [
                                         (adjacency.out_run(v, vw), true),
                                         (adjacency.in_run(v, vw), false),

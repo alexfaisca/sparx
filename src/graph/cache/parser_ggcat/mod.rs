@@ -232,7 +232,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let degrees = degrees.shared_slice();
                 let overflowed = &overflowed;
                 move |id, edge_count| {
-                    if degrees.get(id).checked_store(edge_count, Ordering::Relaxed).is_err() {
+                    if degrees
+                        .get(id)
+                        .checked_store(edge_count, Ordering::Relaxed)
+                        .is_err()
+                    {
                         overflowed.store(true, Ordering::Relaxed);
                     }
                 }
@@ -244,10 +248,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         }
 
         // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
-        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size, None)?;
+        let (_degrees_owner, offsets, sum) =
+            self.finalize_ix_offsets(degrees, offsets_size, None)?;
 
-        let neighbors =
-            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
+        let neighbors = AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&self.edgelabel_file, sum)?;
         let nodelabels =
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
@@ -414,7 +418,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let degrees = degrees.shared_slice();
                 let overflowed = &overflowed;
                 move |id, edge_count| {
-                    if degrees.get(id).checked_store(edge_count, Ordering::Relaxed).is_err() {
+                    if degrees
+                        .get(id)
+                        .checked_store(edge_count, Ordering::Relaxed)
+                        .is_err()
+                    {
                         overflowed.store(true, Ordering::Relaxed);
                     }
                 }
@@ -426,10 +434,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         }
 
         // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
-        let (_degrees_owner, offsets, sum) = self.finalize_ix_offsets(degrees, offsets_size, None)?;
+        let (_degrees_owner, offsets, sum) =
+            self.finalize_ix_offsets(degrees, offsets_size, None)?;
 
-        let neighbors =
-            AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
+        let neighbors = AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&self.edgelabel_file, sum)?;
         let nodelabels =
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
@@ -728,8 +736,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 #[cfg(test)]
 mod test {
     use super::GraphCache;
-    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use crate::graph::label::VoidLabel;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use std::io::Write;
 
     fn write_tiny_ggcat(path: &std::path::Path) {
@@ -761,9 +769,11 @@ mod test {
             None,
         )
         .expect("usize ggcat parse should succeed");
-        let graph_usize =
-            crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(cache_usize, Some(1))
-                .expect("usize graph init should succeed");
+        let graph_usize = crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(
+            cache_usize,
+            Some(1),
+        )
+        .expect("usize graph init should succeed");
 
         let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
             &path,
@@ -824,4 +834,3 @@ mod test {
         assert!(graphs.iter().all(|g| *g == graphs[0]));
     }
 }
-

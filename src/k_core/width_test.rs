@@ -44,7 +44,9 @@ fn assert_all_widths<F: Fn(&[(String, Vec<usize>)], &str)>(g: &Graph<(), ()>, ch
 
 /// Edges of the complete graph on `n` nodes.
 fn clique(n: usize) -> Vec<(usize, usize)> {
-    (0..n).flat_map(|u| (u + 1..n).map(move |v| (u, v))).collect()
+    (0..n)
+        .flat_map(|u| (u + 1..n).map(move |v| (u, v)))
+        .collect()
 }
 
 /// Edges of a star: node 0 and `leaves` others.
@@ -54,7 +56,11 @@ fn star(leaves: usize) -> Vec<(usize, usize)> {
 
 #[test]
 fn every_width_computes_the_reference_decomposition() {
-    for (name, n, m, seed) in [("sparse", 80, 120, 1), ("dense", 60, 1500, 2), ("tiny", 3, 4, 3)] {
+    for (name, n, m, seed) in [
+        ("sparse", 80, 120, 1),
+        ("dense", 60, 1500, 2),
+        ("tiny", 3, 4, 3),
+    ] {
         let arcs = random_arcs(n, m, seed);
         let g = graph(name, "symmetric", n, &arcs);
         // simple (one edge per pair) and multigraph (parallel edges, self-loops) views
@@ -101,7 +107,10 @@ fn degrees_of_a_widths_maximum_fit_it() {
 fn assert_too_wide<T>(result: Result<T, Box<dyn std::error::Error>>, what: &str) {
     match result {
         Ok(_) => panic!("{what} should fail: a degree doesn't fit the coreness type"),
-        Err(e) => assert!(e.to_string().contains("more than the coreness type"), "{what}: {e}"),
+        Err(e) => assert!(
+            e.to_string().contains("more than the coreness type"),
+            "{what}: {e}"
+        ),
     }
 }
 
@@ -118,7 +127,10 @@ fn degrees_past_a_widths_maximum_are_an_error() {
         let path = u.build_cache_filename(file, None).unwrap();
         assert!(!Path::new(&path).exists(), "{path} left behind");
     }
-    assert_too_wide(AlgoBatageljZaversnik::get_or_compute(u), "cached batagelj-zaversnik (u8)");
+    assert_too_wide(
+        AlgoBatageljZaversnik::get_or_compute(u),
+        "cached batagelj-zaversnik (u8)",
+    );
     assert_too_wide(AlgoLiuEtAl::get_or_compute(u), "cached liu et al. (u8)");
     // a wider type holds them
     let bz = AlgoBatageljZaversnik::<_, _, _, u16>::new_cx(u).unwrap();
@@ -139,8 +151,14 @@ fn degrees_past_a_widths_maximum_are_an_error() {
     // past u16's maximum
     let g = graph("star65536", "symmetric", 65537, &star(65536));
     let u = g.to_undirected().unwrap();
-    assert_too_wide(AlgoBatageljZaversnik::<_, _, _, u16>::new_cx(u), "batagelj-zaversnik (u16)");
-    assert_too_wide(AlgoLiuEtAl::<_, _, _, u16>::new_cx(u, 4), "liu et al. (u16)");
+    assert_too_wide(
+        AlgoBatageljZaversnik::<_, _, _, u16>::new_cx(u),
+        "batagelj-zaversnik (u16)",
+    );
+    assert_too_wide(
+        AlgoLiuEtAl::<_, _, _, u16>::new_cx(u, 4),
+        "liu et al. (u16)",
+    );
     let bz = AlgoBatageljZaversnik::<_, _, _, u32>::new_cx(u).unwrap();
     assert!(bz.k_cores().iter().all(|&c| c == 1));
     let liu = AlgoLiuEtAl::<_, _, _, u64>::new_cx(u, 4).unwrap();
@@ -204,14 +222,18 @@ fn directed_k_cores_of_every_width_agree() {
 #[test]
 fn directed_degrees_past_a_widths_maximum_are_an_error() {
     // the complete digraph on 256 nodes: in- and out-degrees 255, total degrees 510
-    let arcs: Vec<_> = (0..256).flat_map(|u| (0..256).filter(move |&v| v != u).map(move |v| (u, v))).collect();
+    let arcs: Vec<_> = (0..256)
+        .flat_map(|u| (0..256).filter(move |&v| v != u).map(move |v| (u, v)))
+        .collect();
     let g = graph("complete256", "general", 256, &arcs);
     for degree in [CoreDegree::In, CoreDegree::Out] {
         let c = DirectedKCores::new(&g, degree).unwrap();
         assert!(c.k_cores().iter().all(|&c| c == 255), "{degree:?}");
     }
     assert_too_wide(DirectedKCores::new(&g, CoreDegree::Total), "total (u8)");
-    let path = g.build_cache_filename(CacheFile::KCoreDirected(CoreDegree::Total), None).unwrap();
+    let path = g
+        .build_cache_filename(CacheFile::KCoreDirected(CoreDegree::Total), None)
+        .unwrap();
     assert!(!Path::new(&path).exists(), "{path} left behind");
     let c = DirectedKCores::<_, _, _, u16>::new_cx(&g, CoreDegree::Total).unwrap();
     assert!(c.k_cores().iter().all(|&c| c == 510));
@@ -223,7 +245,13 @@ fn directed_degrees_past_a_widths_maximum_are_an_error() {
     assert_too_wide(DirectedKCores::new(&g, CoreDegree::Total), "total (u8)");
     // the hub has no arcs out, so neither do the leaves once it's peeled
     let out = DirectedKCores::new(&g, CoreDegree::Out).unwrap();
-    assert!(out.k_cores().iter().all(|&c| c == 0), "out-cores of a star into its hub");
+    assert!(
+        out.k_cores().iter().all(|&c| c == 0),
+        "out-cores of a star into its hub"
+    );
     let in_cores = DirectedKCores::<_, _, _, u16>::new_cx(&g, CoreDegree::In).unwrap();
-    assert!(in_cores.k_cores().iter().all(|&c| c == 0), "in-cores of a star into its hub");
+    assert!(
+        in_cores.k_cores().iter().all(|&c| c == 0),
+        "in-cores of a star into its hub"
+    );
 }

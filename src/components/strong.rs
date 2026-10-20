@@ -17,7 +17,13 @@ use std::path::Path;
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct StronglyConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
+pub struct StronglyConnectedComponents<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     /// Graph whose components are computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the component of each node.
@@ -29,7 +35,9 @@ pub struct StronglyConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> StronglyConnectedComponents<'a, N, E, Ix, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    StronglyConnectedComponents<'a, N, E, Ix, Dir>
+{
     /// Computes the strongly connected components of the graph.
     ///
     /// The resulting component of each node is stored in memory (in a memmapped file).
@@ -43,7 +51,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
         let out_fn = g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
         let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
         let count = Self::compute(g, &components)?;
-        let sizes = super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, false)?;
+        let sizes = super::component_sizes(
+            components.as_slice(),
+            count,
+            &Self::sizes_filename(g)?,
+            false,
+        )?;
         Ok(Self {
             g,
             components,
@@ -62,9 +75,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
             && let Ok(components) = AbstractedProceduralMemoryMut::<Ix>::from_file_name(&c_fn)
             && components.as_slice().len() == g.size()
         {
-            let count = components.as_slice().iter().map(|c| c.index() + 1).max().unwrap_or(0);
-            let sizes =
-                super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, true)?;
+            let count = components
+                .as_slice()
+                .iter()
+                .map(|c| c.index() + 1)
+                .max()
+                .unwrap_or(0);
+            let sizes = super::component_sizes(
+                components.as_slice(),
+                count,
+                &Self::sizes_filename(g)?,
+                true,
+            )?;
             return Ok(Self {
                 g,
                 components,
@@ -103,15 +125,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
     }
 
     /// The (persistent) memmapped file holding the number of nodes of each component.
-    fn sizes_filename(g: &GraphMemoryMap<N, E, Ix, Dir>) -> Result<String, Box<dyn std::error::Error>> {
+    fn sizes_filename(
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         g.build_pers_cache_filename(CacheFile::StronglyConnectedComponents, Some(0))
     }
 
     /// Removes all cached files pertaining to this algorithm's execution's results.
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
-        this.g.cleanup_cache(CacheFile::StronglyConnectedComponents)?;
-        let out_fn = this.g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
+        this.g
+            .cleanup_cache(CacheFile::StronglyConnectedComponents)?;
+        let out_fn = this
+            .g
+            .build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
         crate::shared_slice::remove_if_exists(out_fn)?;
         crate::shared_slice::remove_if_exists(Self::sizes_filename(this.g)?)?;
         Ok(())
@@ -124,7 +151,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
     ) -> Result<usize, Box<dyn std::error::Error>> {
         // symmetric graphs' strong components are their weak ones: found in parallel
         if g.is_symmetric()? {
-            return super::weak::label_components(g, components_mem, CacheFile::StronglyConnectedComponents);
+            return super::weak::label_components(
+                g,
+                components_mem,
+                CacheFile::StronglyConnectedComponents,
+            );
         }
         let node_count = g.size();
         if node_count == 0 {
@@ -134,7 +165,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Stro
         let index_ptr = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
         let neighbours_ptr = SharedSlice::<Ix>::new(g.neighbours_ptr(), edge_count);
 
-        let helper = |seq| g.build_cache_filename(CacheFile::StronglyConnectedComponents, Some(seq));
+        let helper =
+            |seq| g.build_cache_filename(CacheFile::StronglyConnectedComponents, Some(seq));
         let helpers = [helper(0)?, helper(1)?, helper(2)?, helper(3)?, helper(4)?];
         // discovery order (1-based: 0 is undiscovered) and lowest discovery order reachable
         let mut order = SharedSliceMut::<usize>::abst_mem_mut(&helpers[0], node_count, true)?;
@@ -242,7 +274,11 @@ mod test {
         for (name, n, arcs) in [
             ("isolated", 4, vec![(1, 1)]),
             ("path", 4, vec![(0, 1), (1, 2), (2, 3)]),
-            ("cycle_and_tail", 6, vec![(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 3), (5, 4)]),
+            (
+                "cycle_and_tail",
+                6,
+                vec![(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 3), (5, 4)],
+            ),
             ("two_way", 3, vec![(0, 1), (1, 0), (2, 1)]),
             ("random_sparse", 60, random_arcs(60, 70, 3)),
             ("random_dense", 60, random_arcs(60, 200, 5)),
@@ -258,7 +294,11 @@ mod test {
                 label(n, |u, v| reach[u][v] && reach[v][u])
             };
             assert_eq!(got, want, "{name}");
-            assert_eq!(scc.count(), want.iter().max().map_or(0, |m| m + 1), "{name}");
+            assert_eq!(
+                scc.count(),
+                want.iter().max().map_or(0, |m| m + 1),
+                "{name}"
+            );
         }
     }
 

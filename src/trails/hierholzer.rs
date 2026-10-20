@@ -24,7 +24,13 @@ type AllEulerTrailsConcatenatedWithBounds<'a, Ix> = (&'a [Ix], Box<[(usize, usiz
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
-pub struct AlgoHierholzer<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
+pub struct AlgoHierholzer<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which the euler trail(s) is(are) computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the euler trails.
@@ -34,7 +40,9 @@ pub struct AlgoHierholzer<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Di
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> AlgoHierholzer<'a, N, E, Ix, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    AlgoHierholzer<'a, N, E, Ix, Dir>
+{
     /// Performs graph traversal using *Hierholzer's Algorithm*, computing the euler trails of a [`GraphMemoryMap`] instance.
     ///
     /// The resulting Euler trail(s) is(are) stored in memory (in a memmapped file) nodewise[^1].
@@ -177,7 +185,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> AlgoHierholzer<'a, N, E, Ix, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    AlgoHierholzer<'a, N, E, Ix, Dir>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
@@ -299,7 +309,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
                 scope.spawn(move |_| {
                     for k in begin..end {
                         *edges.get_mut(k) = *index_ptr.get(k);
-                        *count.get_mut(k) = Ix::new(index_ptr.get(k + 1).index() - index_ptr.get(k).index());
+                        *count.get_mut(k) =
+                            Ix::new(index_ptr.get(k + 1).index() - index_ptr.get(k).index());
                     }
                 });
             }
@@ -328,13 +339,21 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Algo
         let mut cycles = self.euler_trails.shared_slice();
         let mut write_idx = 0usize;
         // each trail starts at a node left without unused arcs once it's found: one per node
-        let mut indices =
-            ScratchStack::<usize>::new(self.build_cache_filename(CacheFile::EulerIndex, Some(1))?, node_count)?;
+        let mut indices = ScratchStack::<usize>::new(
+            self.build_cache_filename(CacheFile::EulerIndex, Some(1))?,
+            node_count,
+        )?;
         // each push onto the stack (and each cycle node but the first) follows an unused arc:
         // neither outgrows the graph's arcs, and the starting node's
         let arc_count = self.g.width();
-        let mut stack = ScratchStack::<usize>::new(self.build_cache_filename(CacheFile::EulerTrail, Some(2))?, arc_count + 1)?;
-        let mut cycle = ScratchStack::<Ix>::new(self.build_cache_filename(CacheFile::EulerTrail, Some(3))?, arc_count + 1)?;
+        let mut stack = ScratchStack::<usize>::new(
+            self.build_cache_filename(CacheFile::EulerTrail, Some(2))?,
+            arc_count + 1,
+        )?;
+        let mut cycle = ScratchStack::<Ix>::new(
+            self.build_cache_filename(CacheFile::EulerTrail, Some(3))?,
+            arc_count + 1,
+        )?;
         // find cycles until no unused edges remain
         loop {
             let start_v = loop {

@@ -116,8 +116,10 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 &transpose.offsets_file,
                 node_count + 1,
             )?;
-            let mut t_neighbors_mem =
-                AbstractedProceduralMemoryMut::<Ix>::from_file(&transpose.neighbors_file, edge_count)?;
+            let mut t_neighbors_mem = AbstractedProceduralMemoryMut::<Ix>::from_file(
+                &transpose.neighbors_file,
+                edge_count,
+            )?;
             let t_offsets = t_offsets_mem.as_mut_slice();
             let t_neighbors = t_neighbors_mem.as_mut_slice();
 
@@ -220,8 +222,13 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                     let both_ways = first_out.is_some() && (first_in.is_some() || v.index() == w);
                     match mode {
                         UndirectedMode::Each => {}
-                        UndirectedMode::Collapse => emit(v, first_out.map_or_else(|| Source::In(first_in.unwrap()), Source::Out)),
-                        UndirectedMode::Mutual if both_ways => emit(v, Source::Out(first_out.unwrap())),
+                        UndirectedMode::Collapse => emit(
+                            v,
+                            first_out.map_or_else(|| Source::In(first_in.unwrap()), Source::Out),
+                        ),
+                        UndirectedMode::Mutual if both_ways => {
+                            emit(v, Source::Out(first_out.unwrap()))
+                        }
                         UndirectedMode::Mutual => {}
                     }
                 }
@@ -237,8 +244,10 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 &undirected.offsets_file,
                 node_count + 1,
             )?;
-            let mut u_neighbors_mem =
-                AbstractedProceduralMemoryMut::<Ix>::from_file(&undirected.neighbors_file, edge_count)?;
+            let mut u_neighbors_mem = AbstractedProceduralMemoryMut::<Ix>::from_file(
+                &undirected.neighbors_file,
+                edge_count,
+            )?;
             let u_offsets = u_offsets_mem.as_mut_slice();
             let u_neighbors = u_neighbors_mem.as_mut_slice();
             let mut out_labels = self.edge_label_copier(undirected, edge_count)?;
@@ -282,12 +291,16 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         let built = (|| -> Result<(), Box<dyn std::error::Error>> {
             let node_count = self.index_bytes.saturating_sub(1);
             let offsets = AbstractedProceduralMemory::<Ix>::from_file_name(&self.offsets_filename)?;
-            let neighbors = AbstractedProceduralMemory::<Ix>::from_file_name(&self.neighbors_filename)?;
+            let neighbors =
+                AbstractedProceduralMemory::<Ix>::from_file_name(&self.neighbors_filename)?;
             let (offsets, neighbors) = (offsets.as_slice(), neighbors.as_slice());
 
             // each kept node's new id (`usize::MAX` for the others)
-            let new_id_fn = cache_file_name(&induced.offsets_filename, &FileType::Helper(H::H), Some(0))?;
-            let mut new_id_mem = crate::shared_slice::SharedSliceMut::<usize>::abst_mem_mut(&new_id_fn, node_count, true)?;
+            let new_id_fn =
+                cache_file_name(&induced.offsets_filename, &FileType::Helper(H::H), Some(0))?;
+            let mut new_id_mem = crate::shared_slice::SharedSliceMut::<usize>::abst_mem_mut(
+                &new_id_fn, node_count, true,
+            )?;
             let new_id = new_id_mem.as_mut_slice();
             let mut kept = 0usize;
             for (u, id) in new_id.iter_mut().enumerate() {
@@ -299,7 +312,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 };
             }
             let arcs_kept = |u: usize| {
-                (offsets[u].index()..offsets[u + 1].index()).filter(|&e| new_id[neighbors[e].index()] != usize::MAX)
+                (offsets[u].index()..offsets[u + 1].index())
+                    .filter(|&e| new_id[neighbors[e].index()] != usize::MAX)
             };
             let mut edge_count = 0usize;
             for u in (0..node_count).filter(|&u| new_id[u] != usize::MAX) {
@@ -307,9 +321,14 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             }
             ensure_fits_in_index_type::<Ix>(kept, edge_count)?;
 
-            let mut i_offsets_mem = AbstractedProceduralMemoryMut::<Ix>::from_file(&induced.offsets_file, kept + 1)?;
-            let mut i_neighbors_mem = AbstractedProceduralMemoryMut::<Ix>::from_file(&induced.neighbors_file, edge_count)?;
-            let (i_offsets, i_neighbors) = (i_offsets_mem.as_mut_slice(), i_neighbors_mem.as_mut_slice());
+            let mut i_offsets_mem =
+                AbstractedProceduralMemoryMut::<Ix>::from_file(&induced.offsets_file, kept + 1)?;
+            let mut i_neighbors_mem = AbstractedProceduralMemoryMut::<Ix>::from_file(
+                &induced.neighbors_file,
+                edge_count,
+            )?;
+            let (i_offsets, i_neighbors) =
+                (i_offsets_mem.as_mut_slice(), i_neighbors_mem.as_mut_slice());
             let mut labels = self.edge_label_copier(&induced, edge_count)?;
             let mut position = 0usize;
             for u in (0..node_count).filter(|&u| new_id[u] != usize::MAX) {
@@ -330,25 +349,40 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
             // node labels, of the kept nodes
             if N::is_labeled() {
-                let src = AbstractedProceduralMemory::<N>::from_file_name(&self.nodelabel_filename)?;
-                let mut dest = AbstractedProceduralMemoryMut::<N>::from_file(&induced.nodelabel_file, kept)?;
+                let src =
+                    AbstractedProceduralMemory::<N>::from_file_name(&self.nodelabel_filename)?;
+                let mut dest =
+                    AbstractedProceduralMemoryMut::<N>::from_file(&induced.nodelabel_file, kept)?;
                 for u in (0..node_count).filter(|&u| new_id[u] != usize::MAX) {
                     dest.as_mut_slice()[new_id[u]] = src.as_slice()[u];
                 }
                 dest.flush()?;
             } else {
-                let mut src = OpenOptions::new().read(true).open(&self.nodelabel_filename)?;
-                let mut dest = OpenOptions::new().write(true).truncate(true).open(&induced.nodelabel_filename)?;
+                let mut src = OpenOptions::new()
+                    .read(true)
+                    .open(&self.nodelabel_filename)?;
+                let mut dest = OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&induced.nodelabel_filename)?;
                 std::io::copy(&mut src, &mut dest)?;
                 dest.flush()?;
             }
 
             // metalabels, of the kept nodes, renumbered (the fst streams them in key order)
-            let final_metalabel_fn = cache_file_name(&induced.metalabel_filename, &FileType::MetaLabel(H::H), None)?;
+            let final_metalabel_fn = cache_file_name(
+                &induced.metalabel_filename,
+                &FileType::MetaLabel(H::H),
+                None,
+            )?;
             {
                 use fst::Streamer;
-                let source = fst::Map::new(unsafe { memmap2::Mmap::map(&std::fs::File::open(&self.metalabel_filename)?)? })?;
-                let mut builder = fst::MapBuilder::new(std::io::BufWriter::new(crate::shared_slice::create_new_file(&final_metalabel_fn)?))?;
+                let source = fst::Map::new(unsafe {
+                    memmap2::Mmap::map(&std::fs::File::open(&self.metalabel_filename)?)?
+                })?;
+                let mut builder = fst::MapBuilder::new(std::io::BufWriter::new(
+                    crate::shared_slice::create_new_file(&final_metalabel_fn)?,
+                ))?;
                 let mut stream = source.stream();
                 while let Some((metalabel, node)) = stream.next() {
                     let new = new_id[node as usize];
@@ -359,7 +393,11 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 builder.finish()?;
             }
             induced.metalabel_filename = final_metalabel_fn;
-            induced.metalabel_file = Arc::new(OpenOptions::new().read(true).open(&induced.metalabel_filename)?);
+            induced.metalabel_file = Arc::new(
+                OpenOptions::new()
+                    .read(true)
+                    .open(&induced.metalabel_filename)?,
+            );
 
             drop(new_id_mem);
             let _ = std::fs::remove_file(&new_id_fn);
@@ -420,9 +458,13 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             Ok(())
         })()
         .and_then(|()| {
-            let mut files: Vec<PathBuf> =
-                glob::glob(&format!("{CACHE_DIR}*{build_hashed_id}.*"))?.flatten().collect();
-            metadata_last(&mut files, &metadata_fn.replace(&hashed_id, &build_hashed_id));
+            let mut files: Vec<PathBuf> = glob::glob(&format!("{CACHE_DIR}*{build_hashed_id}.*"))?
+                .flatten()
+                .collect();
+            metadata_last(
+                &mut files,
+                &metadata_fn.replace(&hashed_id, &build_hashed_id),
+            );
             // recorded first: if the entry is dropped meanwhile, its derived graphs still go
             register_derived(&self.cache_id()?, &hashed_id)?;
             for f in files {
@@ -444,7 +486,9 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
     /// Copies node labels and the metalabel fst, which only depend on node ids.
     fn copy_node_labels_into(&self, derived: &mut Self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut src = OpenOptions::new().read(true).open(&self.nodelabel_filename)?;
+        let mut src = OpenOptions::new()
+            .read(true)
+            .open(&self.nodelabel_filename)?;
         let mut dest = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -454,8 +498,11 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
         // the fst is built under a temporary filename and promoted to its final one once
         // finalized (see `merge_fsts`): write the final one directly
-        let final_metalabel_fn =
-            cache_file_name(&derived.metalabel_filename, &FileType::MetaLabel(H::H), None)?;
+        let final_metalabel_fn = cache_file_name(
+            &derived.metalabel_filename,
+            &FileType::MetaLabel(H::H),
+            None,
+        )?;
         std::fs::copy(&self.metalabel_filename, &final_metalabel_fn)?;
         derived.metalabel_filename = final_metalabel_fn;
         derived.metalabel_file = Arc::new(
@@ -474,7 +521,9 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         edge_count: usize,
     ) -> Result<EdgeLabelCopier<E>, Box<dyn std::error::Error>> {
         if !E::is_labeled() {
-            let mut src = OpenOptions::new().read(true).open(&self.edgelabel_filename)?;
+            let mut src = OpenOptions::new()
+                .read(true)
+                .open(&self.edgelabel_filename)?;
             let mut dest = OpenOptions::new()
                 .write(true)
                 .truncate(true)
@@ -484,12 +533,18 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             return Ok(EdgeLabelCopier(None));
         }
         let src = AbstractedProceduralMemory::<E>::from_file_name(&self.edgelabel_filename)?;
-        let dest = AbstractedProceduralMemoryMut::<E>::from_file(&derived.edgelabel_file, edge_count)?;
+        let dest =
+            AbstractedProceduralMemoryMut::<E>::from_file(&derived.edgelabel_file, edge_count)?;
         Ok(EdgeLabelCopier(Some((src, dest))))
     }
 }
 
-struct EdgeLabelCopier<E>(Option<(AbstractedProceduralMemory<E>, AbstractedProceduralMemoryMut<E>)>);
+struct EdgeLabelCopier<E>(
+    Option<(
+        AbstractedProceduralMemory<E>,
+        AbstractedProceduralMemoryMut<E>,
+    )>,
+);
 
 impl<E: Copy> EdgeLabelCopier<E> {
     #[inline(always)]
@@ -513,12 +568,20 @@ mod test {
 
     #[test]
     fn metadata_is_renamed_last_whatever_the_path_prefix() {
-        let mut files: Vec<PathBuf> = ["edges_h.mmap", "metadata_h.toml", "nodelabels_h.mmap", "index_h.mmap"]
-            .iter()
-            .map(|f| Path::new(".test_cache").join(f))
-            .collect();
+        let mut files: Vec<PathBuf> = [
+            "edges_h.mmap",
+            "metadata_h.toml",
+            "nodelabels_h.mmap",
+            "index_h.mmap",
+        ]
+        .iter()
+        .map(|f| Path::new(".test_cache").join(f))
+        .collect();
         metadata_last(&mut files, "./.test_cache/metadata_h.toml");
-        assert_eq!(files.last().unwrap(), Path::new(".test_cache/metadata_h.toml"));
+        assert_eq!(
+            files.last().unwrap(),
+            Path::new(".test_cache/metadata_h.toml")
+        );
         assert_eq!(files.len(), 4);
     }
 }

@@ -183,7 +183,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -232,7 +234,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         })
     }
 
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
+    fn init_cache_mem_impl(
+        &self,
+    ) -> Result<ProceduralMemoryLiuEtAL<Ix, Cx>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
@@ -274,44 +278,48 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         // Initialize
         let total_dead_nodes = thread::scope(
             |s| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-            let mut dead_nodes = vec![];
-            for tid in 0..threads {
-                let mut degree = degree.shared_slice();
-                let mut alive = alive.shared_slice();
+                let mut dead_nodes = vec![];
+                for tid in 0..threads {
+                    let mut degree = degree.shared_slice();
+                    let mut alive = alive.shared_slice();
 
-                let start = std::cmp::min(tid * thread_load, node_count);
-                let end = std::cmp::min(start + thread_load, node_count);
+                    let start = std::cmp::min(tid * thread_load, node_count);
+                    let end = std::cmp::min(start + thread_load, node_count);
 
-                dead_nodes.push(s.spawn(
-                    move |_| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-                    let mut dead_nodes = 0;
+                    dead_nodes.push(s.spawn(
+                        move |_| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+                            let mut dead_nodes = 0;
 
-                    for u in start..end {
-                        let deg_u = index_ptr.get(u + 1).index() - index_ptr.get(u).index();
-                        check_degree::<Cx>(u, deg_u)?;
-                        degree.get_mut(u).set_count(deg_u);
+                            for u in start..end {
+                                let deg_u = index_ptr.get(u + 1).index() - index_ptr.get(u).index();
+                                check_degree::<Cx>(u, deg_u)?;
+                                degree.get_mut(u).set_count(deg_u);
 
-                        if deg_u == 0 {
-                            dead_nodes += 1;
-                            *alive.get_mut(u) = AtomicBool::new(false);
-                        } else {
-                            *alive.get_mut(u) = AtomicBool::new(true);
-                        }
-                    }
+                                if deg_u == 0 {
+                                    dead_nodes += 1;
+                                    *alive.get_mut(u) = AtomicBool::new(false);
+                                } else {
+                                    *alive.get_mut(u) = AtomicBool::new(true);
+                                }
+                            }
 
-                    Ok(dead_nodes)
-                }));
-            }
-            let mut total_dead_nodes = 0;
-            for handle in dead_nodes {
-                total_dead_nodes += handle.join().map_err(
-                    |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{:?}", e).into() },
-                )??;
-            }
-            let _ = degree.flush_async();
-            let _ = alive.flush_async();
-            Ok(total_dead_nodes)
-        })
+                            Ok(dead_nodes)
+                        },
+                    ));
+                }
+                let mut total_dead_nodes = 0;
+                for handle in dead_nodes {
+                    total_dead_nodes += handle.join().map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("{:?}", e).into()
+                        },
+                    )??;
+                }
+                let _ = degree.flush_async();
+                let _ = alive.flush_async();
+                Ok(total_dead_nodes)
+            },
+        )
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
 
@@ -396,7 +404,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
                                         *coreness.get_mut(u) = Cx::from_usize(k);
 
                                         // for each neighbor v of u:
-                                        for idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                                        for idx in
+                                            index_ptr.get(u).index()..index_ptr.get(u + 1).index()
+                                        {
                                             let v = neighbour_ptr.get(idx).index();
                                             if let Some(old) = degree.get(v).decrement_above(k) {
                                                 if old == k + 1 {
@@ -421,9 +431,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
                                             let u = u.index();
                                             *coreness.get_mut(u) = Cx::from_usize(k);
 
-                                            for idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+                                            for idx in index_ptr.get(u).index()
+                                                ..index_ptr.get(u + 1).index()
+                                            {
                                                 let v = neighbour_ptr.get(idx).index();
-                                                if let Some(old) = degree.get(v).decrement_above(k) {
+                                                if let Some(old) = degree.get(v).decrement_above(k)
+                                                {
                                                     if old == k + 1 {
                                                         let life = alive
                                                             .get(v)
@@ -451,10 +464,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
                                 synchronize.wait();
                             }
                             if k == Cx::MAX && remaining_global.load(Ordering::Relaxed) > 0 {
-                                return Err(format!(
-                                    "error overflow when adding to k ({k} + 1)"
-                                )
-                                .into());
+                                return Err(
+                                    format!("error overflow when adding to k ({k} + 1)").into()
+                                );
                             }
                             k += 1;
                         }
@@ -469,7 +481,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         let env_verbose_val = std::env::var("BRUIJNX_VERBOSE").unwrap_or_else(|_| "0".to_string());
         let verbose: bool = env_verbose_val == "1";
         if verbose {
-            let max = (0..node_count).map(|i| coreness.get(i).to_usize()).max().unwrap_or(0);
+            let max = (0..node_count)
+                .map(|i| coreness.get(i).to_usize())
+                .max()
+                .unwrap_or(0);
             let mut r = vec![0usize; max + 1];
             for i in 0..node_count {
                 r[coreness.get(i).to_usize()] += 1;
@@ -553,9 +568,20 @@ mod test {
         writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
         writeln!(f, "9 9 15").unwrap();
         for &(u, v) in &[
-            (1, 2), (1, 3), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5), (3, 4), (3, 5), (4, 5),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+            (3, 4),
+            (3, 5),
+            (4, 5),
             (5, 6),
-            (6, 7), (6, 8), (7, 8),
+            (6, 7),
+            (6, 8),
+            (7, 8),
             (8, 9),
         ] {
             writeln!(f, "{u} {v}").unwrap();
@@ -569,7 +595,11 @@ mod test {
         graph: &GraphMemoryMap<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, Ix>,
         coreness: &[u8],
     ) {
-        assert_eq!(coreness.len(), graph.size(), "k_cores should be node-indexed");
+        assert_eq!(
+            coreness.len(),
+            graph.size(),
+            "k_cores should be node-indexed"
+        );
         for v in 0..graph.size() {
             let k_v = coreness[v];
             let qualifying_neighbours = graph
@@ -585,11 +615,11 @@ mod test {
     }
 
     fn run_liu<Ix: crate::graph::IndexType>(path: &std::path::Path, id: &str) -> Vec<u8> {
-        let graph = GraphMemoryMap::<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, Ix>::from_file(
-            path,
-            Some(id.to_string()),
-            None,
-        )
+        let graph = GraphMemoryMap::<
+            crate::graph::label::VoidLabel,
+            crate::graph::label::VoidLabel,
+            Ix,
+        >::from_file(path, Some(id.to_string()), None)
         .expect("graph parse should succeed");
         let liu = AlgoLiuEtAl::new(&graph)
             .unwrap_or_else(|e| panic!("liu-et-al({id}) should succeed: {e}"));
@@ -617,8 +647,14 @@ mod test {
         let u32_cores = run_liu::<u32>(&path, &format!("liu_u32_{run_tag}"));
         let u16_cores = run_liu::<u16>(&path, &format!("liu_u16_{run_tag}"));
 
-        assert_eq!(usize_cores, u32_cores, "Ix=u32 coreness should match Ix=usize exactly");
-        assert_eq!(usize_cores, u16_cores, "Ix=u16 coreness should match Ix=usize exactly");
+        assert_eq!(
+            usize_cores, u32_cores,
+            "Ix=u32 coreness should match Ix=usize exactly"
+        );
+        assert_eq!(
+            usize_cores, u16_cores,
+            "Ix=u16 coreness should match Ix=usize exactly"
+        );
 
         // exact expected values, independently verified via standard k-core peeling (see
         // batagelj_zaversnik's identically-structured test for the full derivation).
@@ -629,11 +665,11 @@ mod test {
         );
 
         // cross-algorithm agreement with batagelj_zaversnik on the exact same graph/cache entry
-        let graph = GraphMemoryMap::<crate::graph::label::VoidLabel, crate::graph::label::VoidLabel, usize>::from_file(
-            &path,
-            Some(format!("liu_vs_bz_{run_tag}")),
-            None,
-        )
+        let graph = GraphMemoryMap::<
+            crate::graph::label::VoidLabel,
+            crate::graph::label::VoidLabel,
+            usize,
+        >::from_file(&path, Some(format!("liu_vs_bz_{run_tag}")), None)
         .expect("graph parse should succeed");
         let bz_cores = crate::k_core::batagelj_zaversnik::AlgoBatageljZaversnik::new(&graph)
             .expect("batagelj-zaversnik should succeed")

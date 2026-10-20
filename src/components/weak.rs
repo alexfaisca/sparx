@@ -18,7 +18,13 @@ use std::path::Path;
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct ConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
+pub struct ConnectedComponents<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     /// Graph whose components are computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the component of each node.
@@ -30,7 +36,9 @@ pub struct ConnectedComponents<'a, N: graph::N, E: graph::E, Ix: graph::IndexTyp
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> ConnectedComponents<'a, N, E, Ix, Dir> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    ConnectedComponents<'a, N, E, Ix, Dir>
+{
     /// Computes the weakly connected components of the graph (its connected components, if
     /// it's undirected).
     ///
@@ -45,7 +53,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
         let out_fn = g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
         let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
         let count = Self::compute(g, &components)?;
-        let sizes = super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, false)?;
+        let sizes = super::component_sizes(
+            components.as_slice(),
+            count,
+            &Self::sizes_filename(g)?,
+            false,
+        )?;
         Ok(Self {
             g,
             components,
@@ -65,9 +78,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
             && components.as_slice().len() == g.size()
         {
             // components are numbered in order: the last one is the largest number
-            let count = components.as_slice().iter().map(|c| c.index() + 1).max().unwrap_or(0);
-            let sizes =
-                super::component_sizes(components.as_slice(), count, &Self::sizes_filename(g)?, true)?;
+            let count = components
+                .as_slice()
+                .iter()
+                .map(|c| c.index() + 1)
+                .max()
+                .unwrap_or(0);
+            let sizes = super::component_sizes(
+                components.as_slice(),
+                count,
+                &Self::sizes_filename(g)?,
+                true,
+            )?;
             return Ok(Self {
                 g,
                 components,
@@ -106,7 +128,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
     }
 
     /// The (persistent) memmapped file holding the number of nodes of each component.
-    fn sizes_filename(g: &GraphMemoryMap<N, E, Ix, Dir>) -> Result<String, Box<dyn std::error::Error>> {
+    fn sizes_filename(
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         g.build_pers_cache_filename(CacheFile::ConnectedComponents, Some(0))
     }
 
@@ -114,7 +138,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
         this.g.cleanup_cache(CacheFile::ConnectedComponents)?;
-        let out_fn = this.g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
+        let out_fn = this
+            .g
+            .build_cache_filename(CacheFile::ConnectedComponents, None)?;
         crate::shared_slice::remove_if_exists(out_fn)?;
         crate::shared_slice::remove_if_exists(Self::sizes_filename(this.g)?)?;
         Ok(())
@@ -131,7 +157,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> Conn
 
 /// Labels every node with its weakly connected component (numbered by smallest node), using a
 /// scratch file of `scratch`'s, and returns the number of components.
-pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+pub(super) fn label_components<
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness,
+>(
     g: &GraphMemoryMap<N, E, Ix, Dir>,
     components_mem: &AbstractedProceduralMemoryMut<Ix>,
     scratch: CacheFile,
@@ -151,16 +182,17 @@ pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType, D
 
     let threads = g.thread_num();
     let node_load = node_count.div_ceil(threads);
-    let in_parallel = |f: &(dyn Fn(usize, usize) + Sync)| -> Result<(), Box<dyn std::error::Error>> {
-        thread::scope(|scope| {
-            for tid in 0..threads {
-                let begin = std::cmp::min(tid * node_load, node_count);
-                let end = std::cmp::min(begin + node_load, node_count);
-                scope.spawn(move |_| f(begin, end));
-            }
-        })
-        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })
-    };
+    let in_parallel =
+        |f: &(dyn Fn(usize, usize) + Sync)| -> Result<(), Box<dyn std::error::Error>> {
+            thread::scope(|scope| {
+                for tid in 0..threads {
+                    let begin = std::cmp::min(tid * node_load, node_count);
+                    let end = std::cmp::min(begin + node_load, node_count);
+                    scope.spawn(move |_| f(begin, end));
+                }
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })
+        };
 
     // every node its own root
     let parents = parent.shared_slice();
@@ -182,7 +214,9 @@ pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType, D
             }
             let grandparent = parents.get(p).load_widened(Ordering::Acquire);
             if grandparent != p {
-                parents.get(x).compare_exchange_widened(p, grandparent, Ordering::AcqRel);
+                parents
+                    .get(x)
+                    .compare_exchange_widened(p, grandparent, Ordering::AcqRel);
             }
             x = p;
         }
@@ -200,7 +234,10 @@ pub(super) fn label_components<N: graph::N, E: graph::E, Ix: graph::IndexType, D
                         break;
                     }
                     let (high, low) = if ru > rv { (ru, rv) } else { (rv, ru) };
-                    if parents.get(high).compare_exchange_widened(high, low, Ordering::AcqRel) {
+                    if parents
+                        .get(high)
+                        .compare_exchange_widened(high, low, Ordering::AcqRel)
+                    {
                         break;
                     }
                 }
@@ -245,7 +282,11 @@ mod test {
         for (name, n, arcs) in [
             ("isolated", 4, vec![(1, 1)]),
             ("path", 5, vec![(0, 1), (2, 1), (3, 4)]),
-            ("cycle_and_tail", 6, vec![(0, 1), (1, 2), (2, 0), (2, 3), (5, 4)]),
+            (
+                "cycle_and_tail",
+                6,
+                vec![(0, 1), (1, 2), (2, 0), (2, 3), (5, 4)],
+            ),
             ("random_sparse", 60, random_arcs(60, 45, 3)),
             ("random_dense", 60, random_arcs(60, 400, 5)),
         ] {

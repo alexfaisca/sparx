@@ -30,9 +30,14 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
 
         let mut banner = String::new();
         rdr.read_line(&mut banner)?;
-        let toks: Vec<String> = banner.split_whitespace().map(str::to_ascii_lowercase).collect();
+        let toks: Vec<String> = banner
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
         if toks.first().map(String::as_str) != Some("%%matrixmarket") {
-            return Err("error invalid MatrixMarket file: it must start with `%%MatrixMarket`".into());
+            return Err(
+                "error invalid MatrixMarket file: it must start with `%%MatrixMarket`".into(),
+            );
         }
         if toks.len() < 5 || toks[1] != "matrix" {
             return Err(format!("error malformed MatrixMarket banner {:?}", banner.trim()).into());
@@ -82,8 +87,11 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
             }
             let mut it = t.split_whitespace();
             let mut size = |what: &str| -> Result<usize, Box<dyn std::error::Error>> {
-                let tok = it.next().ok_or_else(|| format!("error MatrixMarket size line {t:?} lacks {what}"))?;
-                tok.parse().map_err(|_| format!("error MatrixMarket {what} {tok:?} isn't a number").into())
+                let tok = it
+                    .next()
+                    .ok_or_else(|| format!("error MatrixMarket size line {t:?} lacks {what}"))?;
+                tok.parse()
+                    .map_err(|_| format!("error MatrixMarket {what} {tok:?} isn't a number").into())
             };
             break (size("rows")?, size("columns")?, size("entries")?);
         };
