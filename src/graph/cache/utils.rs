@@ -302,6 +302,7 @@ pub enum FileType {
     KCoreDirected(H, crate::k_core::directed::CoreDegree),
     DirectedClusteringCoefficient(H),
     DirectedLouvain(H),
+    PageRank(H),
     #[cfg(any(test, feature = "bench"))]
     Test(H),
 }
@@ -440,6 +441,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::Total) => "kcoretotal",
         FileType::DirectedClusteringCoefficient(_) => "directedclustering",
         FileType::DirectedLouvain(_) => "directedlouvain",
+        FileType::PageRank(_) => "pagerank",
         #[cfg(any(test, feature = "bench"))]
         FileType::Test(_) => SUFFIX_FOR_TEST,
     }
@@ -541,6 +543,7 @@ impl std::fmt::Display for FileType {
             FileType::KCoreDirected(_, _) => "KCoreDirected",
             FileType::DirectedClusteringCoefficient(_) => "DirectedClusteringCoefficient",
             FileType::DirectedLouvain(_) => "DirectedLouvain",
+            FileType::PageRank(_) => "PageRank",
             #[cfg(any(test, feature = "bench"))]
             FileType::Test(_) => "Test",
         };

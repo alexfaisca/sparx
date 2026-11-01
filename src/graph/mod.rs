@@ -374,6 +374,7 @@ pub enum CacheFile {
     DirectedClusteringCoefficient,
     /// Louvain partition of a directed graph (by Leicht and Newman's directed modularity).
     DirectedLouvain,
+    PageRank,
 }
 
 enum GraphFile {

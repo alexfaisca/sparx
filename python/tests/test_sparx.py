@@ -774,3 +774,43 @@ def test_failed_calls_leave_kept_caches_as_they_were(cache_dir):
         h.close()
     for f in sorted(cache_dir.rglob("*"), reverse=True):
         f.rmdir() if f.is_dir() else f.unlink()
+
+
+@pytest.mark.parametrize("alpha", [0.85, 0.5])
+def test_pagerank(nx_graph, index, alpha):
+    with sparx.Graph(undirected(nx_graph), index=index) as g:
+        # unweighted (karate's edges have weights), and networkx's tolerance is per node
+        want = nx.pagerank(nx_graph, alpha=alpha, tol=1e-10 / len(g), weight=None)
+        got = g.pagerank(alpha=alpha, tol=1e-10)
+        assert got.dtype == np.float64
+        np.testing.assert_allclose(got, [want[u] for u in range(len(g))], rtol=1e-6)
+        # the defaults
+        want = nx.pagerank(nx_graph, tol=1e-6 / len(g), weight=None)
+        np.testing.assert_allclose(g.pagerank(), [want[u] for u in range(len(g))], rtol=1e-6)
+
+
+@pytest.mark.parametrize("G", list(random_digraphs()))
+def test_directed_pagerank(G):
+    with sparx.DiGraph(directed(G)) as g:
+        want = nx.pagerank(G, tol=1e-10 / len(g), weight=None)
+        np.testing.assert_allclose(g.pagerank(tol=1e-10), [want[u] for u in range(len(g))], rtol=1e-6)
+
+
+def test_pagerank_of_multigraphs_counts_parallel_arcs():
+    # parallel arcs, self-loops, and dangling nodes
+    M = nx.MultiDiGraph()
+    M.add_nodes_from(range(6))
+    M.add_edges_from([(0, 1), (0, 1), (0, 2), (1, 2), (2, 0), (2, 2), (3, 0), (3, 3)])
+    with sparx.DiGraph(directed(M)) as g:
+        want = nx.pagerank(M, tol=1e-12 / len(g), weight=None)
+        np.testing.assert_allclose(g.pagerank(tol=1e-12), [want[u] for u in range(len(g))], rtol=1e-8)
+
+
+def test_pagerank_arguments():
+    with sparx.Graph(undirected(nx.karate_club_graph())) as g:
+        for kwargs in [{"alpha": 1.5}, {"alpha": -0.1}, {"tol": 0}, {"max_iter": 0}]:
+            with pytest.raises(ValueError):
+                g.pagerank(**kwargs)
+        with pytest.raises(RuntimeError, match="didn't converge"):
+            g.pagerank(tol=1e-15, max_iter=2)
+        assert abs(g.pagerank().sum() - 1) < 1e-9

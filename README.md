@@ -6,6 +6,7 @@ High-performance **Rust** library for large-scale **static sparse graphs analyti
 - **k-truss decomposition** (Burkhardt et al. sequential; PKT parallel)
 - **Louvain** (GVE-Louvain variant)
 - **HyperBall** (HyperLogLog distance/centrality estimation)
+- **PageRank** (partition-centric, for graphs whose ranks don't fit in cache)
 - **Heat Kernel PageRank** (HK-relax --- SSPR/MSPR)
 - Classic traversals/utilities (BFS/DFS, Hierholzer’s Euler trails, clustering coefficient, transitivity, triangle counting, etc.)
 

@@ -26,6 +26,7 @@ use sparx::centralities::exact::{
 };
 use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::Precision;
+use sparx::centralities::pagerank::PageRank;
 use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
 use sparx::components::{strong::StronglyConnectedComponents, weak::ConnectedComponents};
@@ -558,6 +559,38 @@ fn closeness<I: Ix, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<O
         c.drop_cache()?;
         Ok(array(v))
     })
+}
+
+fn pagerank<I: Ix, Dir: Directedness>(
+    g: &G<I, Dir>,
+    alpha: f64,
+    tol: f64,
+    max_iter: usize,
+) -> Res<Out> {
+    cleaning(g, || {
+        let mut p = PageRank::<_, _, _, f64, _>::new_with_conf(g, alpha, tol, max_iter)?;
+        let v = p.ranks().to_vec();
+        p.drop_cache()?;
+        Ok(array(v))
+    })
+}
+
+/// Checks `pagerank`'s parameters (as the computation would, but raising `ValueError`).
+fn pagerank_params(alpha: f64, tol: f64, max_iter: usize) -> PyResult<()> {
+    if !(0. ..=1.).contains(&alpha) {
+        return Err(PyValueError::new_err(format!(
+            "alpha must be in [0, 1], not {alpha}"
+        )));
+    }
+    if !(tol > 0.) {
+        return Err(PyValueError::new_err(format!(
+            "tol must be positive, not {tol}"
+        )));
+    }
+    if max_iter == 0 {
+        return Err(PyValueError::new_err("max_iter must be at least 1"));
+    }
+    Ok(())
 }
 
 fn harmonic<I: Ix, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<Out> {
@@ -1178,6 +1211,26 @@ graph_class!(UGraph, "Graph", {
         self.inner.run(py, |g| with_graph!(g, g => lin(g)))
     }
 
+    /// PageRank of each node, as networkx's `pagerank`: damping factor `alpha`, dangling nodes'
+    /// rank spread evenly, iterations until the ranks change by less than `tol` in total (a
+    /// `RuntimeError` if that takes more than `max_iter`). networkx multiplies its `tol` by the
+    /// number of nodes, which large graphs meet at once: its results are those of
+    /// `tol=nx_tol * len(g)`.
+    #[pyo3(signature = (*, alpha = 0.85, tol = 1e-6, max_iter = 100))]
+    fn pagerank<'py>(
+        &self,
+        py: Python<'py>,
+        alpha: f64,
+        tol: f64,
+        max_iter: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pagerank_params(alpha, tol, max_iter)?;
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter)),
+        )
+    }
+
     /// BFS distance of each node from `source` (`-1` for nodes it doesn't reach).
     #[pyo3(signature = (source))]
     fn bfs<'py>(&self, py: Python<'py>, source: usize) -> PyResult<Bound<'py, PyAny>> {
@@ -1348,6 +1401,26 @@ graph_class!(DGraph, "DiGraph", {
         let d = follow(direction)?;
         self.inner
             .run(py, |g| with_graph!(g, g => with_view!(g, d, v => lin(v))))
+    }
+
+    /// PageRank of each node, following arcs (rank flows from a node to those it has arcs to),
+    /// as networkx's `pagerank`: damping factor `alpha`, dangling nodes' rank spread evenly,
+    /// iterations until the ranks change by less than `tol` in total (a `RuntimeError` if that
+    /// takes more than `max_iter`). networkx multiplies its `tol` by the number of nodes, which
+    /// large graphs meet at once: its results are those of `tol=nx_tol * len(g)`.
+    #[pyo3(signature = (*, alpha = 0.85, tol = 1e-6, max_iter = 100))]
+    fn pagerank<'py>(
+        &self,
+        py: Python<'py>,
+        alpha: f64,
+        tol: f64,
+        max_iter: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pagerank_params(alpha, tol, max_iter)?;
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter)),
+        )
     }
 
     /// BFS distance of each node (`-1` for nodes not reached), following arcs in `direction`:

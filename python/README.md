@@ -27,6 +27,7 @@ with sparx.Graph("graph.mtx", index="u32") as g:  # undirected
     louvain = g.louvain()                      # {"communities", "count", "modularity"}
     hb = g.hyperball(precision=8)              # {"closeness", "harmonic", "lin", ...} estimates
     closeness = g.closeness()                  # exact
+    ranks = g.pagerank()                       # alpha=0.85, tol=1e-6 (in total, see below)
     dist = g.bfs(0)                            # -1 where unreachable
 
 with sparx.DiGraph("web.mtx") as d:            # directed
@@ -60,6 +61,9 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   is the width of triangle counts, trussness and coreness values; a value that doesn't fit, such
   as a node of degree 256 in a `"u8"` `k_core`, fails with an error rather than overflowing.
 * Undirected edges are stored once in each direction; per-edge results follow `csr()`.
+* `pagerank`'s `tol` bounds the ranks' total change, while networkx's is multiplied by the
+  number of nodes (which, ranks summing to 1, graphs of millions of nodes meet at once):
+  networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`).
 * The cache lives in `./.cache/` (relative to the working directory) and is dropped when the
   graph is closed or garbage collected. With `keep_cache=True` it stays, and
   `sparx.Graph.open(g.cache_file)` reopens the graph without parsing it again.

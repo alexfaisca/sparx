@@ -1661,6 +1661,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 FileType::DirectedClusteringCoefficient(H::H)
             }
             CacheFile::DirectedLouvain => FileType::DirectedLouvain(H::H),
+            CacheFile::PageRank => FileType::PageRank(H::H),
         }
     }
 
