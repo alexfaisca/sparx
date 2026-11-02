@@ -203,13 +203,14 @@ fn time_ktruss(
     bea.drop_cache()?;
 
     let time = Instant::now();
-    let cc = ClusteringCoefficient::new(graph)?;
+    let mut cc = ClusteringCoefficient::new(graph)?;
     println!(
         "clustering coefficient: {:?} (average {}, transitivity {})",
         time.elapsed(),
         cc.get_average_clustering_coefficient(),
         cc.get_graph_transitivity()
     );
+    cc.drop_cache()?;
     Ok(())
 }
 
@@ -329,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let precision: u8 = args.get(3).map_or(Ok(6), |p| p.parse())?;
 
     let time = Instant::now();
-    let graph = GraphMemoryMap::<(), (), u32>::from_file(path, None, Some(threads))?;
+    let mut graph = GraphMemoryMap::<(), (), u32>::from_file(path, None, Some(threads))?;
     println!(
         "graph |V| = {}, |E| = {} loaded in {:?}",
         graph.size(),
@@ -337,24 +338,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time.elapsed()
     );
 
+    let result = time_mode(&graph, &args, threads, precision);
+    // also when a run fails
+    graph.drop_cache()?;
+    result
+}
+
+fn time_mode(
+    graph: &GraphMemoryMap<(), (), u32>,
+    args: &[String],
+    threads: u8,
+    precision: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
     if args.get(4).is_some_and(|a| a == "ktruss-directed") {
-        return time_ktruss_directed(&graph, threads as usize);
+        return time_ktruss_directed(graph, threads as usize);
     }
     if args.get(4).is_some_and(|a| a == "ktruss") {
-        return time_ktruss(&graph, threads as usize);
+        return time_ktruss(graph, threads as usize);
     }
     if args.get(4).is_some_and(|a| a == "gpu-triangles") {
         #[cfg(feature = "gpu")]
-        return compare_gpu_triangles(&graph);
+        return compare_gpu_triangles(graph);
         #[cfg(not(feature = "gpu"))]
         return Err("the gpu comparison needs the `gpu` feature".into());
     }
     if args.get(4).is_some_and(|a| a == "gpu") {
         #[cfg(feature = "gpu")]
         return match precision {
-            4 => compare_gpu::<Precision4>(&graph, threads as usize),
-            6 => compare_gpu::<Precision6>(&graph, threads as usize),
-            8 => compare_gpu::<Precision8>(&graph, threads as usize),
+            4 => compare_gpu::<Precision4>(graph, threads as usize),
+            6 => compare_gpu::<Precision6>(graph, threads as usize),
+            8 => compare_gpu::<Precision8>(graph, threads as usize),
             p => Err(format!("unsupported precision {p} (use 4, 6 or 8)").into()),
         };
         #[cfg(not(feature = "gpu"))]
@@ -362,9 +375,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match precision {
-        4 => run::<Precision4>(&graph, threads as usize),
-        6 => run::<Precision6>(&graph, threads as usize),
-        8 => run::<Precision8>(&graph, threads as usize),
+        4 => run::<Precision4>(graph, threads as usize),
+        6 => run::<Precision6>(graph, threads as usize),
+        8 => run::<Precision8>(graph, threads as usize),
         p => Err(format!("unsupported precision {p} (use 4, 6 or 8)").into()),
     }
 }

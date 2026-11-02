@@ -100,13 +100,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                         // safe, unchecked: a per-node position counter can never exceed that
                         // node's own degree, which `checked_increment` above already validated
                         // fits `D`'s width.
-                        *neighbors.get_mut(
-                            D::widen(*offsets_s.get(u)) + counters.get(u).load_widened(Ordering::Relaxed),
-                        ) = Ix::new(v);
-                        *edgelabels.get_mut(
-                            D::widen(*offsets_s.get(u))
-                                + counters.get(u).fetch_add_one_widened(Ordering::Relaxed),
-                        ) = E::new(w);
+                        // one claim for both: other threads may be placing edges of `u` too
+                        let pos = D::widen(*offsets_s.get(u))
+                            + counters.get(u).fetch_add_one_widened(Ordering::Relaxed);
+                        *neighbors.get_mut(pos) = Ix::new(v);
+                        *edgelabels.get_mut(pos) = E::new(w);
                     }
                 },
                 threads,
@@ -165,6 +163,99 @@ mod test {
         writeln!(f, "1 3").unwrap();
         writeln!(f, "2 4").unwrap();
         f.flush().unwrap();
+    }
+
+    /// Weighted edges of one node, parsed by every thread at once, each keep their own target and
+    /// weight (the slot of an edge's target and of its weight were once claimed separately, so
+    /// that concurrent edges of a node could overwrite each other's targets).
+    #[test]
+    fn concurrently_parsed_weighted_edges_keep_their_targets() {
+        use crate::graph::E as _;
+
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        #[repr(transparent)]
+        struct Weight(usize);
+        unsafe impl bytemuck::Zeroable for Weight {}
+        unsafe impl bytemuck::Pod for Weight {}
+        impl crate::graph::E for Weight {
+            fn new(v: usize) -> Self {
+                Weight(v)
+            }
+            fn is_labeled() -> bool {
+                true
+            }
+        }
+        assert!(Weight::is_labeled());
+
+        let dir = unique_test_dir("mtx_weighted_race");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        // node 1's edges, to every other node, are spread over the whole file (and so over
+        // every parsing thread's chunk), between edges of other nodes
+        let n = 4000;
+        let mut mtx = format!("%%MatrixMarket matrix coordinate integer general\n{n} {n} {}\n", 2 * (n - 1));
+        for v in 2..=n {
+            mtx += &format!("1 {v} {}\n{v} 1 {}\n", 10 * v, 10 * v + 1);
+        }
+        let path = dir.join("hub.mtx");
+        std::fs::write(&path, mtx).unwrap();
+
+        for run in 0..5 {
+            let cache = GraphCache::<VoidLabel, Weight, usize>::from_file(
+                &path,
+                Some(format!("mtx_weighted_race_{run}_{}", unique_run_tag())),
+                None,
+                None,
+            )
+            .unwrap();
+            let graph = GraphMemoryMap::init_from_cache(cache, Some(1)).unwrap();
+            for u in 0..graph.size() {
+                for (pos, v) in graph.index_node(u).zip(graph.neighbours(u).unwrap()) {
+                    // targets are 0-based, weights were written for 1-based ids
+                    let expected = match (u, v) {
+                        (0, v) if v > 0 => 10 * (v + 1),
+                        (u, 0) if u > 0 => 10 * (u + 1) + 1,
+                        _ => panic!("run {run}: no edge {u} -> {v} in the input"),
+                    };
+                    assert_eq!(graph.edge_label(pos), Weight(expected), "run {run}: edge {u} -> {v}");
+                }
+            }
+            let mut targets: Vec<usize> = graph.neighbours(0).unwrap().collect();
+            targets.sort_unstable();
+            assert_eq!(targets, (1..n).collect::<Vec<_>>(), "run {run}");
+        }
+    }
+
+    /// A failed parse leaves no partial cache entry behind (and a missing input is named).
+    #[test]
+    fn failed_parses_leave_no_cache_files() {
+        let dir = unique_test_dir("mtx_failed_parse");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry_files = |id: &str| -> Vec<std::path::PathBuf> {
+            let hash = crate::graph::cache::utils::id_from_filename(id).unwrap();
+            glob::glob(&format!("{}*{hash}.*", crate::graph::cache::utils::CACHE_DIR))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+
+        let missing = dir.join("missing.mtx");
+        let id = format!("mtx_missing_{}", unique_run_tag());
+        let err = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&missing, Some(id.clone()), None, None)
+            .expect_err("a missing input should fail");
+        assert!(err.to_string().contains("missing.mtx"), "{err}");
+        assert_eq!(entry_files(&id), Vec::<std::path::PathBuf>::new());
+
+        // an edge to a node past the header's node count
+        let malformed = dir.join("malformed.mtx");
+        let mut f = std::fs::File::create(&malformed).unwrap();
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern general\n3 3 2\n1 2\n9 1").unwrap();
+        drop(f);
+        let id = format!("mtx_malformed_{}", unique_run_tag());
+        GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&malformed, Some(id.clone()), None, None)
+            .expect_err("a malformed input should fail");
+        assert_eq!(entry_files(&id), Vec::<std::path::PathBuf>::new());
     }
 
     /// Regression test for the `Ix`-generic cache pipeline: parsing the same `.mtx` input with

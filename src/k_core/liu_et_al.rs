@@ -486,7 +486,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoLiuEtAl<'a, N, E, I
 
 #[cfg(test)]
 mod test {
-    use crate::{k_core::verify_k_cores, test_common::get_or_init_dataset_cache_entry};
+    use crate::k_core::verify_k_cores;
 
     use super::*;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
@@ -508,10 +508,8 @@ mod test {
     }
 
     fn generic_test<P: AsRef<Path>>(path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let graph = GraphMemoryMap::init_from_cache(
-            get_or_init_dataset_cache_entry(path.as_ref())?,
-            Some(16),
-        )?;
+        // a private copy: tests on the same fixture may run concurrently
+        let (graph, _cache) = crate::graph::test_utils::open_fixture(path.as_ref(), Some(16))?;
         let liu_et_al_k_cores = AlgoLiuEtAl::new(&graph)?;
 
         verify_k_cores(&graph, liu_et_al_k_cores.k_cores)
@@ -519,24 +517,24 @@ mod test {
 
     // generate test cases from dataset
     graph_tests! {
-        ggcat_1_5 => "../ggcat/graphs/random_graph_1_5.lz4",
-        ggcat_2_5 => "../ggcat/graphs/random_graph_2_5.lz4",
-        ggcat_3_5 => "../ggcat/graphs/random_graph_3_5.lz4",
-        ggcat_4_5 => "../ggcat/graphs/random_graph_4_5.lz4",
-        ggcat_5_5 => "../ggcat/graphs/random_graph_5_5.lz4",
-        ggcat_6_5 => "../ggcat/graphs/random_graph_6_5.lz4",
-        ggcat_7_5 => "../ggcat/graphs/random_graph_7_5.lz4",
-        ggcat_8_5 => "../ggcat/graphs/random_graph_8_5.lz4",
-        ggcat_9_5 => "../ggcat/graphs/random_graph_9_5.lz4",
-        ggcat_1_10 => "../ggcat/graphs/random_graph_1_10.lz4",
-        ggcat_2_10 => "../ggcat/graphs/random_graph_2_10.lz4",
-        ggcat_3_10 => "../ggcat/graphs/random_graph_3_10.lz4",
-        ggcat_4_10 => "../ggcat/graphs/random_graph_4_10.lz4",
-        ggcat_5_10 => "../ggcat/graphs/random_graph_5_10.lz4",
-        ggcat_6_10 => "../ggcat/graphs/random_graph_6_10.lz4",
-        ggcat_7_10 => "../ggcat/graphs/random_graph_7_10.lz4",
-        ggcat_8_10 => "../ggcat/graphs/random_graph_8_10.lz4",
-        ggcat_9_10 => "../ggcat/graphs/random_graph_9_10.lz4",
+        ggcat_1_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_1_5.lz4"),
+        ggcat_2_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_2_5.lz4"),
+        ggcat_3_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_3_5.lz4"),
+        ggcat_4_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_4_5.lz4"),
+        ggcat_5_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_5_5.lz4"),
+        ggcat_6_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_6_5.lz4"),
+        ggcat_7_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_7_5.lz4"),
+        ggcat_8_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_8_5.lz4"),
+        ggcat_9_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_9_5.lz4"),
+        ggcat_1_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_1_10.lz4"),
+        ggcat_2_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_2_10.lz4"),
+        ggcat_3_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_3_10.lz4"),
+        ggcat_4_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_4_10.lz4"),
+        ggcat_5_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_5_10.lz4"),
+        ggcat_6_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_6_10.lz4"),
+        ggcat_7_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_7_10.lz4"),
+        ggcat_8_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_8_10.lz4"),
+        ggcat_9_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_9_10.lz4"),
         // ggcat_8_15 => "../ggcat/graphs/random_graph_8_15.lz4",
         // ggcat_9_15 => "../ggcat/graphs/random_graph_9_15.lz4",
         // … add the rest

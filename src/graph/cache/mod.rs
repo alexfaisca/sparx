@@ -11,8 +11,10 @@ mod parser_ggcat;
 use super::{CacheFile, GraphFile, E, N, IndexType};
 use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut};
 use utils::{
-    ensure_file_writable, cache_file_name, cache_file_name_from_id, cache_metadata_file_name_from_id, cleanup_cache, edges_to_nodes, graph_id_from_cache_file_name, id_for_subgraph_export, id_from_filename, nodes_to_edges, pers_cache_file_name, toml_cache_file_name, FileType, CACHE_DIR, H
+    ensure_file_writable, cache_file_name, cache_file_name_from_id, cache_metadata_file_name_from_id, cleanup_cache, graph_id_from_cache_file_name, id_for_subgraph_export, id_from_filename, pers_cache_file_name, toml_cache_file_name, FileType, CACHE_DIR, H
 };
+#[cfg(feature = "nodes_edges")]
+use utils::{edges_to_nodes, nodes_to_edges};
 
 #[cfg(any(test, feature = "bench"))]
 use utils::EXACT_VALUE_CACHE_DIR;
@@ -340,19 +342,23 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         }
     }
 
-    fn read_input_file<P: AsRef<Path>>(path: P) -> Result<(Mmap, Option<String>), Box<dyn std::error::Error>> {
+    /// First helper file slot of decompressed inputs (below are the parsers' own helpers).
+    const DECOMPRESSED_INPUT_SLOT: usize = 16;
+
+    /// Maps an input file, decompressing it first (into a helper file of the cache `cache_id` is
+    /// building, in slot `slot`) if compressed --- named after the cache rather than the input,
+    /// so that concurrent parses of the same input never share it.
+    // without ggcat, inputs are never compressed
+    #[cfg_attr(not(feature = "ggcat"), allow(unused_variables, unused_mut, unreachable_code))]
+    fn read_input_file<P: AsRef<Path>>(
+        path: P,
+        cache_id: &str,
+        slot: usize,
+    ) -> Result<(Mmap, Option<String>), Box<dyn std::error::Error>> {
         let file = File::open(path.as_ref())?;
         let mut file_length = file.metadata()?.len().max(1024) * 3;
         let reader = BufReader::new(&file);
         let ext = path.as_ref().extension();
-
-        let id = path.as_ref().file_name()
-            .ok_or_else(|| -> Box<dyn std::error::Error> {
-                format!("error couldn't get file name from path {:?}", path.as_ref()).into()
-            })?.to_str()
-            .ok_or_else(|| -> Box<dyn std::error::Error> {
-                format!("error couldn't get file name str from path {:?}", path.as_ref()).into()
-            })?;
 
         // parse extension to decide on decoding
         if let Some(ext) = ext {
@@ -360,7 +366,11 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 #[cfg(feature = "ggcat")]
                 Some(Self::EXT_COMPRESSED_LZ4) => {
                     // prepare mmaped file to temporarily hold decoded contents
-                    let h_fn = Self::init_cache_file_from_id_or_random(id, FileType::Helper(H::H), Some(0))?;
+                    let h_fn = Self::init_cache_file_from_id_or_random(
+                        cache_id,
+                        FileType::Helper(H::H),
+                        Some(Self::DECOMPRESSED_INPUT_SLOT + slot),
+                    )?;
                     let helper_file = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&h_fn)?;
                     helper_file.set_len(file_length)?;
                     let mut mmap = unsafe { MmapOptions::new().map_mut(&helper_file)? };
@@ -777,7 +787,44 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
 
-        let mut cache = match Self::evaluate_input_file_type(p.as_ref())? {
+        // before any cache file is created
+        if !p.as_ref().exists() {
+            return Err(format!("error input file {:?} not found", p.as_ref()).into());
+        }
+        let input_type = Self::evaluate_input_file_type(p.as_ref())?;
+        // the parsers' cache key: the id, or else the (nodes) input file's path
+        let key = match (&id, &input_type) {
+            (Some(id), _) => Some(id.clone()),
+            #[cfg(feature = "nodes_edges")]
+            (None, InputFileType::NODE_EDGE(Self::EXT_PLAINTEXT_EDGES)) => {
+                edges_to_nodes(p.as_ref()).map(|n| n.to_string_lossy().into_owned())
+            }
+            (None, _) => p.as_ref().to_str().map(str::to_owned),
+        };
+
+        let result = Self::from_file_type::<P, D>(p, input_type, id, batch, in_fst);
+        // a failed parse leaves no partial cache entry behind
+        if result.is_err()
+            && let Some(key) = key
+        {
+            let pattern = format!("{CACHE_DIR}*{}.*", id_from_filename(&key)?);
+            for f in glob::glob(&pattern)?.flatten() {
+                let _ = std::fs::remove_file(f);
+            }
+        }
+        result
+    }
+
+    // `batch` and `in_fst` are only used by some input formats
+    #[allow(unused_variables)]
+    fn from_file_type<P: AsRef<Path>, D: AccumulatorAtomic>(
+        p: P,
+        input_type: InputFileType,
+        id: Option<String>,
+        batch: Option<usize>,
+        in_fst: Option<fn(usize) -> bool>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut cache = match input_type {
             #[cfg(feature = "mtx")]
             InputFileType::MTX(_) => Self::from_mtx_file_with_accumulator::<_, D>(p.as_ref(), id, batch),
             #[cfg(feature = "nodes_edges")]
@@ -1834,4 +1881,5 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Debug
     }
 }
 
+#[cfg(any(feature = "ggcat", feature = "nodes_edges"))]
 type MultithreadedParserIndexBounds = Box<[(usize, usize)]>;

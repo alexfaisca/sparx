@@ -67,8 +67,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let batching = Some(batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b));
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { false });
 
-        let (input_nodes, nodes_tmp_path) = Self::read_input_file(nodes_path_str)?;
-        let (input_edges, edges_tmp_path) = Self::read_input_file(edges_path_str)?;
+        let (input_nodes, nodes_tmp_path) = Self::read_input_file(nodes_path_str, &id, 0)?;
+        let (input_edges, edges_tmp_path) = Self::read_input_file(edges_path_str, &id, 1)?;
 
         // init cache
         let mut cache = Self::init_with_id(&id, batching)?;
