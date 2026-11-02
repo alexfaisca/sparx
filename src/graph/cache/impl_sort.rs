@@ -68,9 +68,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                         for node in begin..end {
                             let begin = D::widen(*offsets.get(node));
                             let end = D::widen(*offsets.get(node + 1));
-                            (0..end - begin).for_each(|v| {
-                                idx.push(v);
-                            });
+                            // this node's permutation only
+                            idx.clear();
+                            idx.extend(0..end - begin);
                             let node_edges = neighbors.mut_slice(begin, end).ok_or_else(
                                 || -> Box<dyn std::error::Error + Send + Sync> {
                                     format!("error getting node {node}'s edges as a mut slice for ordering")

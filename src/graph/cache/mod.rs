@@ -1881,5 +1881,5 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Debug
     }
 }
 
-#[cfg(feature = "nodes_edges")]
+#[cfg(any(feature = "ggcat", feature = "nodes_edges"))]
 type MultithreadedParserIndexBounds = Box<[(usize, usize)]>;

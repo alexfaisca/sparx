@@ -69,12 +69,15 @@ jobs:
 
   python:
     name: Python bindings (${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # the extension targets the stable ABI from 3.9 on: test the oldest and a recent Python
-        python: ["3.9", "3.13"]
+        # (3.9 has no builds for Ubuntu 26.04, `ubuntu-latest`)
+        include:
+          - { python: "3.9", os: ubuntu-24.04 }
+          - { python: "3.13", os: ubuntu-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
