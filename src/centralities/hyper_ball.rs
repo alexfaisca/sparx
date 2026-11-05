@@ -47,6 +47,20 @@ pub type HyperBall15<'a, N, E, Ix, Dir = Undirected> =
 pub type HyperBall16<'a, N, E, Ix, Dir = Undirected> =
     HyperBallInner<'a, N, E, Ix, Precision16, f64, Dir>;
 
+/// Tests compare HyperBall skipping nodes whose neighbours' counters didn't change with HyperBall
+/// computing them all.
+#[cfg(test)]
+static NO_SKIPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[inline(always)]
+fn skipping() -> bool {
+    #[cfg(test)]
+    if NO_SKIPPING.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    true
+}
+
 /// Enum for centralities' caching filenames' creation manager logic.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
@@ -857,7 +871,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let threads = self.threads;
-        let node_load = node_count.div_ceil(threads);
+        // whole words of the changed marks (below) per thread: each thread writes its own
+        let node_load = node_count.div_ceil(threads).next_multiple_of(64);
 
         let max_t = self.max_t;
 
@@ -875,6 +890,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         // again (each node's is only read and written by its thread)
         let e_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(2))?;
         let estimates = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, node_count, true)?;
+        // whether each node's counter changed in the last iteration, and in this one (a bit
+        // each): a node none of whose neighbours' counters changed keeps its own, as the union
+        // with theirs would give the same one again, and is skipped
+        let words = node_count.div_ceil(64);
+        let c_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(3))?;
+        let n_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(4))?;
+        let changed_marks = SharedSliceMut::<u64>::abst_mem_mut(&c_fn, words, true)?;
+        let changing_marks = SharedSliceMut::<u64>::abst_mem_mut(&n_fn, words, true)?;
 
         let mut t: W = W::one(); // first iteration is initialization
         let mut inv_t: W = W::one(); // first iteration is initialization
@@ -894,6 +917,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                     let mut counters = counters;
                     let mut swap = swap;
                     let mut estimates = estimates.shared_slice();
+                    let mut last_marks = changed_marks.shared_slice();
+                    let mut marks = changing_marks.shared_slice();
                     let mut distance_accumulator = self.distances.shared_slice();
                     let mut inverse_distance_accumulator = self.inverse_distances.shared_slice();
 
@@ -924,7 +949,38 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                                 if tid == 0 {
                                     iters.add(1, Ordering::Relaxed);
                                 }
+                                let marked = |marks: &SharedSliceMut<u64>, v: usize| {
+                                    marks.get(v / 64) & (1 << (v % 64)) != 0
+                                };
+                                let mut word = 0u64;
                                 for u in begin..end {
+                                    // the marks of the thread's nodes, a word at a time
+                                    if u % 64 == 0 && u > begin {
+                                        *marks.get_mut(u / 64 - 1) = word;
+                                        word = 0;
+                                    }
+                                    // skipped: no neighbour's counter changed (all are computed
+                                    // in the first iteration). The next counters already hold
+                                    // the node's, unless it changed in the last iteration
+                                    if iter > 0 && skipping() {
+                                        let u_n = match graph.neighbours(u) {
+                                            Ok(u_n) => u_n,
+                                            Err(e) => {
+                                                error = Some(format!(
+                                                    "couldn't find neighbours of {u}: {e}"
+                                                ));
+                                                failed.store(true, Ordering::Relaxed);
+                                                break;
+                                            }
+                                        };
+                                        let mut u_n = u_n;
+                                        if !u_n.any(|v| marked(&last_marks, v)) {
+                                            if marked(&last_marks, u) {
+                                                *swap.get_mut(u) = *counters.get(u);
+                                            }
+                                            continue;
+                                        }
+                                    }
                                     let mut a: HyperLogLog<P> = *counters.get(u);
 
                                     let u_n = match graph.neighbours(u) {
@@ -956,9 +1012,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                                         }
                                         // update local changed count
                                         changed += 1;
+                                        word |= 1 << (u % 64);
                                     }
 
                                     *swap.get_mut(u) = a;
+                                }
+                                if begin < end {
+                                    *marks.get_mut((end - 1) / 64) = word;
                                 }
 
                                 global_changed[iter % 2].fetch_add(changed, Ordering::Relaxed);
@@ -991,6 +1051,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                                 }
 
                                 swap = std::mem::replace(&mut counters, swap);
+                                std::mem::swap(&mut last_marks, &mut marks);
                                 swapped = !swapped;
                                 changed = 0;
                                 t += W::one();
@@ -1044,6 +1105,66 @@ mod test {
     use crate::graph::label::VoidLabel;
     use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
     use std::io::Write;
+
+    /// Counters, distance and inverse distance accumulators, bit for bit.
+    fn run_bits<P: Precision, Dir: Directedness>(
+        g: &GraphMemoryMap<(), (), usize, Dir>,
+        threads: usize,
+    ) -> (Vec<Vec<u8>>, Vec<u64>, Vec<u64>) {
+        let mut hb =
+            HyperBallInner::<(), (), usize, P, f64, Dir>::new_with_conf(g, None, threads).unwrap();
+        let bits = (
+            hb.counters()
+                .iter()
+                .map(|c| c.registers().to_vec())
+                .collect(),
+            hb.geodesic_distances()
+                .iter()
+                .map(|d| d.to_bits())
+                .collect(),
+            hb.harmonic_geodesic_distances()
+                .iter()
+                .map(|d| d.to_bits())
+                .collect(),
+        );
+        hb.drop_cache().unwrap();
+        bits
+    }
+
+    /// Skipping nodes none of whose neighbours' counters changed gives what computing them all
+    /// does, bit for bit: on graphs whose counters stop changing at different iterations (a long
+    /// path, components of different sizes, isolated nodes), directed or not, at different
+    /// precisions, with as many threads as nodes or with thread ranges past the nodes.
+    #[test]
+    fn hyperball_skipping_unchanged_neighbourhoods_changes_nothing() {
+        use crate::components::test_utils::{graph, random_arcs};
+        let path: Vec<_> = (0..299).map(|u| (u, u + 1)).collect();
+        let mut parts = random_arcs(200, 300, 1);
+        parts.extend(path.iter().take(150).map(|&(u, v)| (u + 200, v + 200)));
+        for (name, header, n, arcs) in [
+            ("path", "general", 300, path.clone()),
+            ("path_symmetric", "symmetric", 300, path),
+            ("parts", "general", 400, parts.clone()),
+            ("parts_symmetric", "symmetric", 400, parts),
+            ("random", "general", 2000, random_arcs(2000, 3000, 2)),
+            ("tiny", "general", 3, vec![(0, 1)]),
+        ] {
+            let g = graph(name, header, n, &arcs);
+            for threads in [1, 3, 64] {
+                let skipping = (
+                    run_bits::<Precision4, _>(&g, threads),
+                    run_bits::<Precision8, _>(&g, threads),
+                );
+                NO_SKIPPING.store(true, std::sync::atomic::Ordering::Relaxed);
+                let all = (
+                    run_bits::<Precision4, _>(&g, threads),
+                    run_bits::<Precision8, _>(&g, threads),
+                );
+                NO_SKIPPING.store(false, std::sync::atomic::Ordering::Relaxed);
+                assert!(skipping == all, "{name}, {threads} threads");
+            }
+        }
+    }
 
     /// A small 4-clique: a connected graph with a trivially known structure (every node reaches
     /// every other node in exactly one hop), used to sanity-check `HyperBall`'s distance/

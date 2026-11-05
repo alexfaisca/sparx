@@ -335,10 +335,15 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
         })?;
     test_entry
         .get_or_try_init(|| -> Result<String, Box<dyn std::error::Error>> {
-            if Path::new(&e_fn).exists() {
+            // values are kept across runs, by the dataset's path: those of another version of it
+            // (with another number of nodes), or of an interrupted run, are computed again
+            let complete = std::fs::metadata(&e_fn)
+                .is_ok_and(|m| m.len() == (graph.size() * std::mem::size_of::<f64>()) as u64);
+            if complete {
                 eprintln!("found exact vals for {:?} at {e_fn}", graph_path);
                 Ok(e_fn)
             } else {
+                let _ = std::fs::remove_file(&e_fn);
                 // return Err(format!("no entry {e_fn}").into());
                 eprintln!("built exact vals for {:?}", graph_path);
                 eprintln!("built in {:?} {e_fn}", exact_value_dir());
