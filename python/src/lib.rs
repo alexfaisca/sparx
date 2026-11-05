@@ -26,7 +26,7 @@ use sparx::centralities::exact::{
 };
 use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::Precision;
-use sparx::centralities::pagerank::PageRank;
+use sparx::centralities::pagerank::{PageRank, PageRankEngine};
 use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
 use sparx::components::{strong::StronglyConnectedComponents, weak::ConnectedComponents};
@@ -566,13 +566,29 @@ fn pagerank<I: Ix, Dir: Directedness>(
     alpha: f64,
     tol: f64,
     max_iter: usize,
+    engine: PageRankEngine,
 ) -> Res<Out> {
     cleaning(g, || {
-        let mut p = PageRank::<_, _, _, f64, _>::new_with_conf(g, alpha, tol, max_iter)?;
+        let mut p = PageRank::<_, _, _, f64, _>::new_with_engine(g, alpha, tol, max_iter, engine)?;
         let v = p.ranks().to_vec();
         p.drop_cache()?;
         Ok(array(v))
     })
+}
+
+/// `pagerank`'s engine of a given name (`"pull"` only for undirected graphs).
+fn pagerank_engine(name: &str, directed: bool) -> PyResult<PageRankEngine> {
+    match name {
+        "auto" => Ok(PageRankEngine::Auto),
+        "pull" if directed => Err(PyValueError::new_err(
+            "engine 'pull' needs an undirected graph: use 'auto' or 'partition'",
+        )),
+        "pull" => Ok(PageRankEngine::Pull),
+        "partition" => Ok(PageRankEngine::PartitionCentric),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown PageRank engine {name:?}: expected 'auto', 'pull' or 'partition'"
+        ))),
+    }
 }
 
 /// Checks `pagerank`'s parameters (as the computation would, but raising `ValueError`).
@@ -1216,18 +1232,25 @@ graph_class!(UGraph, "Graph", {
     /// `RuntimeError` if that takes more than `max_iter`). networkx multiplies its `tol` by the
     /// number of nodes, which large graphs meet at once: its results are those of
     /// `tol=nx_tol * len(g)`.
-    #[pyo3(signature = (*, alpha = 0.85, tol = 1e-6, max_iter = 100))]
+    ///
+    /// `engine` is how ranks are computed, with the same results, bit for bit: `"pull"` (each
+    /// node sums its neighbours' contributions, the fastest while they fit in the cache),
+    /// `"partition"` (partition-centric, the fastest once they don't), or `"auto"` (`"pull"` up
+    /// to 8 MB of contributions, a million nodes, `"partition"` past it).
+    #[pyo3(signature = (*, alpha = 0.85, tol = 1e-6, max_iter = 100, engine = "auto"))]
     fn pagerank<'py>(
         &self,
         py: Python<'py>,
         alpha: f64,
         tol: f64,
         max_iter: usize,
+        engine: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         pagerank_params(alpha, tol, max_iter)?;
+        let engine = pagerank_engine(engine, false)?;
         self.inner.run(
             py,
-            |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter)),
+            |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter, engine)),
         )
     }
 
@@ -1408,18 +1431,23 @@ graph_class!(DGraph, "DiGraph", {
     /// iterations until the ranks change by less than `tol` in total (a `RuntimeError` if that
     /// takes more than `max_iter`). networkx multiplies its `tol` by the number of nodes, which
     /// large graphs meet at once: its results are those of `tol=nx_tol * len(g)`.
-    #[pyo3(signature = (*, alpha = 0.85, tol = 1e-6, max_iter = 100))]
+    ///
+    /// `engine` is `"auto"` or `"partition"` (partition-centric, the same): `"pull"` needs an
+    /// undirected graph (see `Graph.pagerank`).
+    #[pyo3(signature = (*, alpha = 0.85, tol = 1e-6, max_iter = 100, engine = "auto"))]
     fn pagerank<'py>(
         &self,
         py: Python<'py>,
         alpha: f64,
         tol: f64,
         max_iter: usize,
+        engine: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         pagerank_params(alpha, tol, max_iter)?;
+        let engine = pagerank_engine(engine, true)?;
         self.inner.run(
             py,
-            |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter)),
+            |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter, engine)),
         )
     }
 

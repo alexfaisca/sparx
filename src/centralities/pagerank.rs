@@ -27,7 +27,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// access to memory per arc, as by pulling contributions from neighbours, it streams through
 /// memory. The ranks are the same whatever the number of threads, bit for bit.
 ///
-/// Scratch memory: at most `4 * |E| + size_of::<W>() * (|E| + |V|)` bytes, and a few MB.
+/// Undirected graphs whose nodes' contributions fit in the cache (see [`PULL_MAX_BYTES`]) are
+/// ranked by each node summing its neighbours' contributions instead, which needs no bins and is
+/// faster there, for the same ranks, bit for bit: see [`PageRankEngine`] to choose either.
+///
+/// Scratch memory: at most `4 * |E| + size_of::<W>() * (|E| + |V|)` bytes and a few MB
+/// (partition-centric), or `2 * size_of::<W>() * |V|` bytes (pulling).
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
@@ -47,6 +52,29 @@ pub struct PageRank<
     /// Iterations computed.
     iterations: usize,
 }
+
+/// How [`PageRank`] is computed: both give the same ranks, bit for bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PageRankEngine {
+    /// [`Pull`](Self::Pull) for undirected graphs whose nodes' contributions (a `W` each) take
+    /// at most [`PULL_MAX_BYTES`], [`PartitionCentric`](Self::PartitionCentric) otherwise. The
+    /// default.
+    #[default]
+    Auto,
+    /// Each node sums its neighbours' contributions: no other memory than theirs, the fastest
+    /// while they fit in the cache, but a random access to memory per edge once they don't.
+    /// Undirected graphs only (a node's neighbours, in directed graphs, are those its arcs go to).
+    Pull,
+    /// The *Partition-Centric Processing Methodology* (see [`PageRank`]): the fastest once the
+    /// nodes' contributions don't fit in the cache.
+    PartitionCentric,
+}
+
+/// The largest contributions (a `W` per node) [`PageRankEngine::Auto`] pulls: 8 MB (with `f64`,
+/// 1M nodes). Measured on a CPU with a 20 MB last level cache, pulling was faster up to 8 MB of
+/// contributions, partition-centric from 12 MB on (by 1.2 to 1.6 times, on random graphs, but
+/// barely on graphs whose neighbours' ids are close, which pulling reads near each other).
+pub const PULL_MAX_BYTES: usize = 8 << 20;
 
 /// Flag of an arc's destination in a bin, marking it the first of its source node's arcs into
 /// the bin's partition: the source's contribution is the bin's next value.
@@ -95,9 +123,6 @@ fn parallel<F: Fn(usize) -> Result<(), String> + Sync>(
 /// it, by source partition and source node; and room for the source nodes' contributions, one
 /// per run of arcs.
 struct Layout<W: Weight> {
-    /// Base-2 logarithm of a partition's number of nodes.
-    shift: u32,
-    partitions: usize,
     ids: AbstractedProceduralMemoryMut<u32>,
     values: AbstractedProceduralMemoryMut<W>,
     /// Where each destination partition's bin starts in `ids` and in `values`, and where they
@@ -147,6 +172,21 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         tolerance: f64,
         max_iterations: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_engine(g, alpha, tolerance, max_iterations, PageRankEngine::Auto)
+    }
+
+    /// Computes the PageRank of every node (see [`new_with_conf`](Self::new_with_conf)) with a
+    /// given [`PageRankEngine`]: [`PageRankEngine::Pull`] is an error on directed graphs.
+    pub fn new_with_engine(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        alpha: f64,
+        tolerance: f64,
+        max_iterations: usize,
+        engine: PageRankEngine,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if engine == PageRankEngine::Pull && Dir::DIRECTED {
+            return Err("error PageRank pulls contributions on undirected graphs only".into());
+        }
         if !(0. ..=1.).contains(&alpha) {
             return Err(
                 format!("error PageRank's damping factor must be in [0, 1], not {alpha}").into(),
@@ -167,7 +207,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             ranks,
             iterations: 0,
         };
-        let computed = pagerank.compute(alpha, tolerance, max_iterations);
+        let pull = match engine {
+            PageRankEngine::Auto => {
+                !Dir::DIRECTED && g.size().saturating_mul(size_of::<W>()) <= PULL_MAX_BYTES
+            }
+            PageRankEngine::Pull => true,
+            PageRankEngine::PartitionCentric => false,
+        };
+        let computed = pagerank.compute(alpha, tolerance, max_iterations, pull);
         g.cleanup_cache(CacheFile::PageRank)?;
         match computed {
             Ok(iterations) => {
@@ -309,8 +356,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         drop(arc_cursors);
 
         Ok(Layout {
-            shift,
-            partitions: k,
             ids,
             values,
             id_starts,
@@ -319,27 +364,38 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         })
     }
 
-    /// Iterates until convergence, returning the number of iterations.
+    /// Iterates until convergence, pulling contributions or partition-centric, returning the
+    /// number of iterations.
     fn compute(
         &mut self,
         alpha: f64,
         tolerance: f64,
         max_iterations: usize,
+        pull: bool,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let n = self.g.size();
         if n == 0 {
             return Ok(0);
         }
-        let layout = self.layout()?;
-        let (k, shift) = (layout.partitions, layout.shift);
+        let layout = if pull { None } else { Some(self.layout()?) };
+        // the same partitions either way: their sums are added up in the same order
+        let shift = partition_shift(n);
+        let k = n.div_ceil(1 << shift);
         let threads = self.g.thread_num().min(k);
         let offsets = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
         let neighbours = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), self.g.width());
+        // pulled contributions are read while the next are written: those go to another array
         let contributions_mem = self.scratch::<W>(4, n)?;
-        let (ranks, contributions) = (self.ranks.shared_slice(), contributions_mem.shared_slice());
-        let (ids, values) = (layout.ids.shared_slice(), layout.values.shared_slice());
-        let value_cursors = layout.value_cursors.shared_slice();
-        let (id_starts, value_starts) = (&layout.id_starts, &layout.value_starts);
+        let next_mem = if pull {
+            Some(self.scratch::<W>(5, n)?)
+        } else {
+            None
+        };
+        let ranks = self.ranks.shared_slice();
+        let mut contributions = contributions_mem.shared_slice();
+        let mut next_contributions = next_mem
+            .as_ref()
+            .map_or(contributions, |m| m.shared_slice());
         let degree = |u: usize| offsets.get(u + 1).index() - offsets.get(u).index();
         let partition = |p: usize| (p << shift)..std::cmp::min((p + 1) << shift, n);
 
@@ -366,78 +422,122 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         let alpha_w = W::from_f64(alpha);
         let teleport = (1. - alpha) / n as f64;
 
-        for iteration in 1..=max_iterations {
-            // scatter: each node's contribution, once per partition it has arcs into, in that
-            // partition's bin (after earlier source partitions' nodes')
-            let next = AtomicUsize::new(0);
-            parallel(threads, |_| {
-                let mut values = values;
-                let mut cursor = vec![0usize; k];
-                loop {
-                    let ps = next.fetch_add(1, Ordering::Relaxed);
-                    if ps >= k {
-                        return Ok(());
+        // a partition's nodes' new ranks and contributions, from the sums of the contributions
+        // they get: the sums of their dangling nodes' ranks and of their ranks' change
+        let update = |nodes: std::ops::Range<usize>,
+                      sums: &[W],
+                      even_share: W,
+                      mut contributions: SharedSliceMut<W>|
+         -> (f64, f64) {
+            let mut ranks = ranks;
+            let (mut dangling, mut change) = (0f64, 0f64);
+            for (u, &sum) in nodes.zip(sums.iter()) {
+                let rank = alpha_w * sum + even_share;
+                change += (rank.to_f64() - ranks.get(u).to_f64()).abs();
+                *ranks.get_mut(u) = rank;
+                *contributions.get_mut(u) = match degree(u) {
+                    0 => {
+                        dangling += rank.to_f64();
+                        W::zero()
                     }
-                    for (pd, c) in cursor.iter_mut().enumerate() {
-                        *c = *value_cursors.get(ps * k + pd);
-                    }
-                    for u in partition(ps) {
-                        let contribution = *contributions.get(u);
-                        let mut last = usize::MAX;
-                        for e in offsets.get(u).index()..offsets.get(u + 1).index() {
-                            let pd = neighbours.get(e).index() >> shift;
-                            if pd != last {
-                                *values.get_mut(cursor[pd]) = contribution;
-                                cursor[pd] += 1;
-                                last = pd;
-                            }
-                        }
-                    }
-                }
-            })?;
+                    out => rank / W::from_usize(out),
+                };
+            }
+            (dangling, change)
+        };
 
-            // gather: each partition's bin summed into its nodes', in cache, then their new
-            // ranks and contributions
+        for iteration in 1..=max_iterations {
             let even_share = W::from_f64(alpha * dangling / n as f64 + teleport);
             let partials_slice = SharedSliceMut::<(f64, f64)>::new(partials.as_mut_ptr(), k);
-            let next = AtomicUsize::new(0);
-            parallel(threads, |_| {
-                let (mut ranks, mut contributions, mut partials) =
-                    (ranks, contributions, partials_slice);
-                let mut sums = vec![W::zero(); 1 << shift];
-                loop {
-                    let pd = next.fetch_add(1, Ordering::Relaxed);
-                    if pd >= k {
-                        return Ok(());
-                    }
-                    let nodes = partition(pd);
-                    let sums = &mut sums[..nodes.len()];
-                    sums.fill(W::zero());
-                    let (mut v, mut value) = (value_starts[pd], W::zero());
-                    for i in id_starts[pd]..id_starts[pd + 1] {
-                        let id = *ids.get(i);
-                        if id & FIRST != 0 {
-                            value = *values.get(v);
-                            v += 1;
-                        }
-                        sums[(id & !FIRST) as usize] += value;
-                    }
-                    let (mut dangling, mut change) = (0f64, 0f64);
-                    for (u, &sum) in nodes.zip(sums.iter()) {
-                        let rank = alpha_w * sum + even_share;
-                        change += (rank.to_f64() - ranks.get(u).to_f64()).abs();
-                        *ranks.get_mut(u) = rank;
-                        *contributions.get_mut(u) = match degree(u) {
-                            0 => {
-                                dangling += rank.to_f64();
-                                W::zero()
+            match &layout {
+                None => {
+                    // pull: each node sums its neighbours' contributions (in order, as the
+                    // partition-centric engine does)
+                    let next = AtomicUsize::new(0);
+                    parallel(threads, |_| {
+                        let mut partials = partials_slice;
+                        let mut sums = vec![W::zero(); 1 << shift];
+                        loop {
+                            let p = next.fetch_add(1, Ordering::Relaxed);
+                            if p >= k {
+                                return Ok(());
                             }
-                            out => rank / W::from_usize(out),
-                        };
-                    }
-                    *partials.get_mut(pd) = (dangling, change);
+                            let nodes = partition(p);
+                            for (v, sum) in nodes.clone().zip(sums.iter_mut()) {
+                                *sum = W::zero();
+                                for e in offsets.get(v).index()..offsets.get(v + 1).index() {
+                                    *sum += *contributions.get(neighbours.get(e).index());
+                                }
+                            }
+                            let len = nodes.len();
+                            *partials.get_mut(p) =
+                                update(nodes, &sums[..len], even_share, next_contributions);
+                        }
+                    })?;
+                    std::mem::swap(&mut contributions, &mut next_contributions);
                 }
-            })?;
+                Some(layout) => {
+                    let (ids, values) = (layout.ids.shared_slice(), layout.values.shared_slice());
+                    let value_cursors = layout.value_cursors.shared_slice();
+                    let (id_starts, value_starts) = (&layout.id_starts, &layout.value_starts);
+
+                    // scatter: each node's contribution, once per partition it has arcs into,
+                    // in that partition's bin (after earlier source partitions' nodes')
+                    let next = AtomicUsize::new(0);
+                    parallel(threads, |_| {
+                        let mut values = values;
+                        let mut cursor = vec![0usize; k];
+                        loop {
+                            let ps = next.fetch_add(1, Ordering::Relaxed);
+                            if ps >= k {
+                                return Ok(());
+                            }
+                            for (pd, c) in cursor.iter_mut().enumerate() {
+                                *c = *value_cursors.get(ps * k + pd);
+                            }
+                            for u in partition(ps) {
+                                let contribution = *contributions.get(u);
+                                let mut last = usize::MAX;
+                                for e in offsets.get(u).index()..offsets.get(u + 1).index() {
+                                    let pd = neighbours.get(e).index() >> shift;
+                                    if pd != last {
+                                        *values.get_mut(cursor[pd]) = contribution;
+                                        cursor[pd] += 1;
+                                        last = pd;
+                                    }
+                                }
+                            }
+                        }
+                    })?;
+
+                    // gather: each partition's bin summed into its nodes', in cache (once read,
+                    // contributions are rewritten in place)
+                    let next = AtomicUsize::new(0);
+                    parallel(threads, |_| {
+                        let mut partials = partials_slice;
+                        let mut sums = vec![W::zero(); 1 << shift];
+                        loop {
+                            let pd = next.fetch_add(1, Ordering::Relaxed);
+                            if pd >= k {
+                                return Ok(());
+                            }
+                            let nodes = partition(pd);
+                            let sums = &mut sums[..nodes.len()];
+                            sums.fill(W::zero());
+                            let (mut v, mut value) = (value_starts[pd], W::zero());
+                            for i in id_starts[pd]..id_starts[pd + 1] {
+                                let id = *ids.get(i);
+                                if id & FIRST != 0 {
+                                    value = *values.get(v);
+                                    v += 1;
+                                }
+                                sums[(id & !FIRST) as usize] += value;
+                            }
+                            *partials.get_mut(pd) = update(nodes, sums, even_share, contributions);
+                        }
+                    })?;
+                }
+            }
 
             let change: f64 = partials.iter().map(|p| p.1).sum();
             dangling = partials.iter().map(|p| p.0).sum();
@@ -547,6 +647,54 @@ mod test {
                 let total: f64 = pr.ranks().iter().sum();
                 assert!((total - 1.).abs() <= 1e-9, "{name}: ranks sum to {total}");
             }
+        }
+    }
+
+    /// On undirected graphs, both engines give the same ranks, bit for bit, in as many
+    /// iterations: of one partition or many, with or without parallel edges and self-loops, with
+    /// isolated nodes. Directed graphs can't be pulled.
+    #[test]
+    fn pulling_gives_the_partition_centric_ranks() {
+        for (name, n, arcs) in [
+            ("tiny", 5, vec![(0, 1), (1, 2), (2, 0), (3, 3)]),
+            ("one_partition", 900, random_arcs(900, 3000, 11)),
+            ("partitions", 3000, random_arcs(3000, 9000, 12)),
+            ("many_partitions", 70_000, random_arcs(70_000, 300_000, 13)),
+            ("isolated", 5000, random_arcs(5000, 1500, 14)),
+        ] {
+            let d = graph(name, "symmetric", n, &arcs);
+            for mode in [UndirectedMode::Collapse, UndirectedMode::Each] {
+                let g = d.to_undirected_with(mode).unwrap();
+                let run = |engine| {
+                    let mut pr =
+                        PageRank::<_, _, _, f64, _>::new_with_engine(g, 0.85, 1e-10, 1000, engine)
+                            .unwrap();
+                    let ranks: Vec<u64> = pr.ranks().iter().map(|r| r.to_bits()).collect();
+                    let iterations = pr.iterations();
+                    pr.drop_cache().unwrap();
+                    (ranks, iterations)
+                };
+                let (pulled, pcpm) = (
+                    run(PageRankEngine::Pull),
+                    run(PageRankEngine::PartitionCentric),
+                );
+                assert_eq!(pulled, pcpm, "{name}, {mode:?}");
+                assert_eq!(run(PageRankEngine::Auto), pulled, "{name}, {mode:?}");
+                let (want, _) = reference(g, 0.85, 1e-10);
+                let got: Vec<f64> = pulled.0.iter().map(|&b| f64::from_bits(b)).collect();
+                assert_close(&got, &want, 1e-12, name);
+            }
+            assert!(
+                PageRank::<_, _, _, f64, _>::new_with_engine(
+                    &d,
+                    0.85,
+                    1e-6,
+                    100,
+                    PageRankEngine::Pull
+                )
+                .is_err(),
+                "{name}: pulling a directed graph"
+            );
         }
     }
 

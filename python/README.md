@@ -64,6 +64,10 @@ with sparx.DiGraph("web.mtx") as d:            # directed
 * `pagerank`'s `tol` bounds the ranks' total change, while networkx's is multiplied by the
   number of nodes (which, ranks summing to 1, graphs of millions of nodes meet at once):
   networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`).
+* `pagerank(engine=...)` picks how ranks are computed, with the same results, bit for bit:
+  `"pull"` (fastest while the ranks fit in the CPU's cache; undirected graphs only),
+  `"partition"` (partition-centric, fastest once they don't) or `"auto"` (the default: `"pull"`
+  for undirected graphs of up to a million nodes or so, `"partition"` otherwise).
 * The cache lives in `./.cache/` (relative to the working directory) and is dropped when the
   graph is closed or garbage collected. With `keep_cache=True` it stays, and
   `sparx.Graph.open(g.cache_file)` reopens the graph without parsing it again.

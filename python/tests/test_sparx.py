@@ -789,11 +789,21 @@ def test_pagerank(nx_graph, index, alpha):
         np.testing.assert_allclose(g.pagerank(), [want[u] for u in range(len(g))], rtol=1e-6)
 
 
+def test_pagerank_engines_agree(nx_graph, index):
+    with sparx.Graph(undirected(nx_graph), index=index) as g:
+        auto, pull, partition = (g.pagerank(tol=1e-10, engine=e) for e in ("auto", "pull", "partition"))
+        # bit for bit
+        assert np.array_equal(pull, partition)
+        assert np.array_equal(auto, pull)
+
+
 @pytest.mark.parametrize("G", list(random_digraphs()))
 def test_directed_pagerank(G):
     with sparx.DiGraph(directed(G)) as g:
         want = nx.pagerank(G, tol=1e-10 / len(g), weight=None)
-        np.testing.assert_allclose(g.pagerank(tol=1e-10), [want[u] for u in range(len(g))], rtol=1e-6)
+        got = g.pagerank(tol=1e-10)
+        np.testing.assert_allclose(got, [want[u] for u in range(len(g))], rtol=1e-6)
+        assert np.array_equal(g.pagerank(tol=1e-10, engine="partition"), got)
 
 
 def test_pagerank_of_multigraphs_counts_parallel_arcs():
@@ -808,9 +818,15 @@ def test_pagerank_of_multigraphs_counts_parallel_arcs():
 
 def test_pagerank_arguments():
     with sparx.Graph(undirected(nx.karate_club_graph())) as g:
-        for kwargs in [{"alpha": 1.5}, {"alpha": -0.1}, {"tol": 0}, {"max_iter": 0}]:
+        for kwargs in [{"alpha": 1.5}, {"alpha": -0.1}, {"tol": 0}, {"max_iter": 0}, {"engine": "push"}]:
             with pytest.raises(ValueError):
                 g.pagerank(**kwargs)
+    with sparx.DiGraph(directed(nx.gnp_random_graph(10, 0.3, seed=0, directed=True))) as d:
+        with pytest.raises(ValueError, match="undirected"):
+            d.pagerank(engine="pull")
+        with pytest.raises(ValueError):
+            d.pagerank(engine="other")
+    with sparx.Graph(undirected(nx.karate_club_graph())) as g:
         with pytest.raises(RuntimeError, match="didn't converge"):
             g.pagerank(tol=1e-15, max_iter=2)
         assert abs(g.pagerank().sum() - 1) < 1e-9
