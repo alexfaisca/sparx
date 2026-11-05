@@ -184,10 +184,15 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
         })?;
     test_entry
         .get_or_try_init(|| -> Result<String, Box<dyn std::error::Error>> {
-            if Path::new(&e_fn).exists() {
+            // values are kept across runs, by the dataset's path: those of another version of it
+            // (with another number of nodes), or of an interrupted run, are computed again
+            let complete = std::fs::metadata(&e_fn)
+                .is_ok_and(|m| m.len() == (graph.size() * std::mem::size_of::<f64>()) as u64);
+            if complete {
                 eprintln!("found exact vals for {:?} at {e_fn}", graph_path);
                 Ok(e_fn)
             } else {
+                let _ = std::fs::remove_file(&e_fn);
                 // return Err(format!("no entry {e_fn}").into());
                 eprintln!("built exact vals for {:?}", graph_path);
                 eprintln!("built in {:?} {e_fn}", exact_value_dir());
@@ -222,8 +227,10 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                                                 println!("found isolated node at {u}");
                                                 *e.get_mut(u) = 0.0;
                                             } else {
-                                                *e.get_mut(u) =
-                                                    bfs.recheable() as f64 / bfs.total_distances();
+                                                // reachable nodes other than `u` itself, as in
+                                                // `ExactClosenessCentrality` and *HyperBall*
+                                                *e.get_mut(u) = (bfs.recheable() - 1) as f64
+                                                    / bfs.total_distances();
                                             }
                                         }
                                         Ok(())
@@ -249,11 +256,11 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                     }
                     FileType::ExactHarmonicCentrality(H::H) => {
                         println!("compute harmonic centrality");
-                        ExactHarmonicCentrality::new(graph, Some(true))?;
+                        ExactHarmonicCentrality::<_, _, _, f64>::new(graph, Some(true))?;
                     }
                     FileType::ExactLinCentrality(H::H) => {
                         println!("compute lin's centrality");
-                        ExactLinCentrality::new(graph)?;
+                        ExactLinCentrality::<_, _, _, f64>::new(graph)?;
                     }
                     _ => {}
                 };

@@ -10,18 +10,15 @@ use _verify::verify_trails;
 #[cfg(test)]
 mod _verify {
     use crate::{
-        graph::{
-            GraphMemoryMap,
-            cache::utils::{FileType, H, cache_file_name},
-        },
-        shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut},
+        graph::{self, GraphMemoryMap},
+        shared_slice::AbstractedProceduralMemoryMut,
     };
 
     #[allow(dead_code)]
-    pub(super) fn verify_trails(
-        graph: &GraphMemoryMap,
-        euler_trails: AbstractedProceduralMemoryMut<usize>,
-        euler_index: AbstractedProceduralMemoryMut<usize>,
+    pub(super) fn verify_trails<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+        graph: &GraphMemoryMap<N, E, Ix>,
+        euler_trails: AbstractedProceduralMemoryMut<Ix>,
+        euler_index: AbstractedProceduralMemoryMut<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // trails length == graph width
         if euler_trails.len() != graph.width() {
@@ -56,17 +53,9 @@ mod _verify {
         .into());
         }
 
-        let edge_checker = SharedSliceMut::<bool>::abst_mem_mut(
-            cache_file_name("", &FileType::Test(H::H), None)?.as_str(),
-            graph.width(),
-            true,
-        )?;
-        let mut check = edge_checker.shared_slice();
-        let mut k = 0;
-        for e_idx in 0..graph.width() {
-            *check.get_mut(e_idx) = false;
-            k += 1;
-        }
+        // whether each edge was used by a trail
+        let mut check = vec![false; graph.width()];
+        let k = graph.width();
 
         let trails: Vec<(usize, usize)> = euler_index
             .as_slice()
@@ -74,9 +63,9 @@ mod _verify {
             .enumerate()
             .map(|(idx, end)| {
                 if idx == 0 {
-                    (0, *end)
+                    (0, end.index())
                 } else {
-                    (*euler_index.get(idx - 1), *end)
+                    (euler_index.get(idx - 1).index(), end.index())
                 }
             })
             .collect();
@@ -90,22 +79,22 @@ mod _verify {
                 } else {
                     curr_node + 1
                 };
-                let c_node = euler_trails.get(curr_node);
-                let n_node = euler_trails.get(next_node);
-                let c_neighbours = graph.neighbours(*c_node)?;
+                let c_node = euler_trails.get(curr_node).index();
+                let n_node = euler_trails.get(next_node).index();
+                let c_neighbours = graph.neighbours(c_node)?;
                 let mut found = false;
                 for (idx, dest_node) in c_neighbours.enumerate() {
-                    if dest_node == *n_node {
-                        let b_idx = unsafe { edge_indexes.add(*c_node).read() };
+                    if dest_node == n_node {
+                        let b_idx = unsafe { edge_indexes.add(c_node).read() }.index();
                         let e_idx = b_idx + idx;
-                        if !*check.get(e_idx) {
+                        if !check[e_idx] {
                             // print!(
                             //     "{e_idx} (for {c_node} between ({} {}))-> ",
                             //     unsafe { edge_indexes.add(*c_node).read() },
                             //     unsafe { edge_indexes.add(*c_node + 1).read() }
                             // );
                             // println!("{}", unsafe { graph.edges_ptr().add(e_idx).read() });
-                            *check.get_mut(e_idx) = true;
+                            check[e_idx] = true;
                             found = true;
                             break;
                         }
@@ -121,8 +110,8 @@ mod _verify {
         }
 
         let mut i = 0;
-        for e_idx in 0..graph.width() {
-            if !*check.get(e_idx) {
+        for used in check.iter() {
+            if !used {
                 i += 1;
             }
         }

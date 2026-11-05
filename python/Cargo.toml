@@ -1,0 +1,22 @@
+[package]
+name = "sparx-python"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Python bindings of sparx"
+repository = "https://github.com/alexfaisca/sparx"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+# the extension module, wrapped by the `sparx` Python package
+name = "_sparx"
+crate-type = ["cdylib"]
+
+[features]
+gpu = ["sparx/gpu"]
+
+[dependencies]
+sparx = { package = "sparx-graph", path = ".." }
+pyo3 = { version = "0.30.1", features = ["extension-module", "abi3-py39"] }
+numpy = "0.30.0"

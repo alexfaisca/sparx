@@ -218,6 +218,23 @@ pub(crate) fn cleanup_cache(
         format!("error cleaning up cache for entries with name {match_entries_to}: {e}").into()
     })?;
     for entry in cache_entries {
+        // (another instance may have removed it meanwhile)
+        crate::shared_slice::remove_if_exists(entry.map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("error cleaning up cache entry: {e}").into()
+            },
+        )?)?;
+    }
+    Ok(())
+}
+
+/// Remove all cached `.tmp` files in `dir`.
+fn remove_tmp_files_from(dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cache_entries =
+        glob(&format!("{dir}/*.tmp")).map_err(|e| -> Box<dyn std::error::Error> {
+            format!("error cleaning up cache: {e}").into()
+        })?;
+    for entry in cache_entries {
         std::fs::remove_file(entry.map_err(|e| -> Box<dyn std::error::Error> {
             format!("error cleaning up cache entry: {e}").into()
         })?)?;
@@ -229,15 +246,7 @@ pub(crate) fn cleanup_cache(
 ///
 #[allow(dead_code)]
 pub(crate) fn remove_tmp_files_from_cache() -> Result<(), Box<dyn std::error::Error>> {
-    let cache_entries = glob((CACHE_DIR.to_string() + "/*.tmp").as_str()).map_err(
-        |e| -> Box<dyn std::error::Error> { format!("error cleaning up cache: {e}").into() },
-    )?;
-    for entry in cache_entries {
-        std::fs::remove_file(entry.map_err(|e| -> Box<dyn std::error::Error> {
-            format!("error cleaning up cache entry: {e}").into()
-        })?)?;
-    }
-    Ok(())
+    remove_tmp_files_from(CACHE_DIR)
 }
 
 /// Hides file types from users.
@@ -262,6 +271,8 @@ pub enum FileType {
     Helper(H),
     BFS(H),
     DFS(H),
+    DfsVisitor(H),
+    BfsVisitor(H),
     EulerIndex(H),
     EulerTrail(H),
     KCoreBZ(H),
@@ -269,6 +280,10 @@ pub enum FileType {
     Triangles(H),
     KTrussBEA(H),
     KTrussPKT(H),
+    DirectedTriangles(H, crate::k_truss::directed::DirectedTriangleType),
+    KTrussBEADirected(H, crate::k_truss::directed::DirectedTriangleType),
+    KTrussPKTDirected(H, crate::k_truss::directed::DirectedTriangleType),
+    DirectedAdjacency(H),
     ClusteringCoefficient(H),
     EdgeReciprocal(H),
     EdgeOver(H),
@@ -282,6 +297,12 @@ pub enum FileType {
     ExactClosenessCentrality(H),
     ExactHarmonicCentrality(H),
     ExactLinCentrality(H),
+    ConnectedComponents(H),
+    StronglyConnectedComponents(H),
+    KCoreDirected(H, crate::k_core::directed::CoreDegree),
+    DirectedClusteringCoefficient(H),
+    DirectedLouvain(H),
+    PageRank(H),
     #[cfg(any(test, feature = "bench"))]
     Test(H),
 }
@@ -351,6 +372,8 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
     static SUFFIX_FOR_HELPER: &str = "helper";
     static SUFFIX_FOR_BFS: &str = "bfs";
     static SUFFIX_FOR_DFS: &str = "dfs";
+    static SUFFIX_FOR_DFS_VISITOR: &str = "dfsvisitor";
+    static SUFFIX_FOR_BFS_VISITOR: &str = "bfsvisitor";
     static SUFFIX_FOR_EULER_INDEX: &str = "eulerindex";
     static SUFFIX_FOR_EULER_TRAIL: &str = "eulertrail";
     static SUFFIX_FOR_KCORE_BZ: &str = "kcoresbz";
@@ -385,6 +408,8 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::Helper(_) => SUFFIX_FOR_HELPER,
         FileType::BFS(_) => SUFFIX_FOR_BFS,
         FileType::DFS(_) => SUFFIX_FOR_DFS,
+        FileType::DfsVisitor(_) => SUFFIX_FOR_DFS_VISITOR,
+        FileType::BfsVisitor(_) => SUFFIX_FOR_BFS_VISITOR,
         FileType::EulerIndex(_) => SUFFIX_FOR_EULER_INDEX,
         FileType::EulerTrail(_) => SUFFIX_FOR_EULER_TRAIL,
         FileType::KCoreBZ(_) => SUFFIX_FOR_KCORE_BZ,
@@ -392,6 +417,10 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::Triangles(_) => SUFFIX_FOR_TRIANGLES,
         FileType::KTrussBEA(_) => SUFFIX_FOR_KTRUSS_BEA,
         FileType::KTrussPKT(_) => SUFFIX_FOR_KTRUSS_PKT,
+        FileType::DirectedTriangles(_, t) => t.triangles_suffix(),
+        FileType::KTrussBEADirected(_, t) => t.bea_suffix(),
+        FileType::KTrussPKTDirected(_, t) => t.pkt_suffix(),
+        FileType::DirectedAdjacency(_) => "directedadjacency",
         FileType::ClusteringCoefficient(_) => SUFFIX_FOR_CLUSTERING_COEFFICIENT,
         FileType::EdgeReciprocal(_) => SUFFIX_FOR_EDGE_RECIPROCAL,
         FileType::EdgeOver(_) => SUFFIX_FOR_EDGE_OVER,
@@ -405,6 +434,14 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::ExactClosenessCentrality(_) => SUFFIX_FOR_EXACT_CLOSENESS_CENTRALITY,
         FileType::ExactHarmonicCentrality(_) => SUFFIX_FOR_EXACT_HARMONIC_CENTRALITY,
         FileType::ExactLinCentrality(_) => SUFFIX_FOR_EXACT_LIN_CENTRALITY,
+        FileType::ConnectedComponents(_) => "components",
+        FileType::StronglyConnectedComponents(_) => "strongcomponents",
+        FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::Out) => "kcoreout",
+        FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::In) => "kcorein",
+        FileType::KCoreDirected(_, crate::k_core::directed::CoreDegree::Total) => "kcoretotal",
+        FileType::DirectedClusteringCoefficient(_) => "directedclustering",
+        FileType::DirectedLouvain(_) => "directedlouvain",
+        FileType::PageRank(_) => "pagerank",
         #[cfg(any(test, feature = "bench"))]
         FileType::Test(_) => SUFFIX_FOR_TEST,
     }
@@ -475,6 +512,8 @@ impl std::fmt::Display for FileType {
             FileType::Helper(_) => "Helper",
             FileType::BFS(_) => "BFS",
             FileType::DFS(_) => "DFS",
+            FileType::DfsVisitor(_) => "DfsVisitor",
+            FileType::BfsVisitor(_) => "BfsVisitor",
             FileType::EulerIndex(_) => "EulerIndex",
             FileType::EulerTrail(_) => "EulerTrail",
             FileType::KCoreBZ(_) => "KCoreBatageljZaversnik",
@@ -482,6 +521,10 @@ impl std::fmt::Display for FileType {
             FileType::Triangles(_) => "Triangles",
             FileType::KTrussBEA(_) => "KTrussBurkhardtEtAl",
             FileType::KTrussPKT(_) => "KTrussPKT",
+            FileType::DirectedTriangles(_, _) => "DirectedTriangles",
+            FileType::KTrussBEADirected(_, _) => "KTrussBurkhardtEtAlDirected",
+            FileType::KTrussPKTDirected(_, _) => "KTrussPKTDirected",
+            FileType::DirectedAdjacency(_) => "DirectedAdjacency",
             FileType::ClusteringCoefficient(_) => "ClusteringCoefficient",
             FileType::EdgeReciprocal(_) => "EdgeReciprocal",
             FileType::EdgeOver(_) => "EdgeOver",
@@ -495,6 +538,12 @@ impl std::fmt::Display for FileType {
             FileType::ExactClosenessCentrality(_) => "ExactClosenessCentrality",
             FileType::ExactHarmonicCentrality(_) => "ExactHarmonicCentrality",
             FileType::ExactLinCentrality(_) => "ExactLinCentrality",
+            FileType::ConnectedComponents(_) => "ConnectedComponents",
+            FileType::StronglyConnectedComponents(_) => "StronglyConnectedComponents",
+            FileType::KCoreDirected(_, _) => "KCoreDirected",
+            FileType::DirectedClusteringCoefficient(_) => "DirectedClusteringCoefficient",
+            FileType::DirectedLouvain(_) => "DirectedLouvain",
+            FileType::PageRank(_) => "PageRank",
             #[cfg(any(test, feature = "bench"))]
             FileType::Test(_) => "Test",
         };
@@ -804,23 +853,31 @@ mod test {
 
     #[test]
     fn test_remove_tmp_files_from_cache_removes_all_tmp() {
-        let cache_root = ensure_cache_dir();
+        // deliberately NOT the shared `CACHE_DIR` used by the rest of the suite: this test
+        // exercises a glob that matches *every* `.tmp` file in its target directory, so running
+        // it against the real, shared cache directory would delete any other concurrently
+        // running test's in-flight `.tmp` scratch files whenever their execution happened to
+        // overlap --- a real, confirmed source of severe flakiness under the default parallel
+        // test runner.
+        let scratch_dir = crate::graph::test_utils::unique_test_dir("remove_tmp_files_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(scratch_dir.clone());
+        fs::create_dir_all(&scratch_dir).unwrap();
 
-        let g1 = cache_root.join("index_9_idZ.tmp");
-        let g2 = cache_root.join("helper_2_idZ.tmp");
-        let keep = cache_root.join("edges_1_idZ.mmap"); // should remain
+        let g1 = scratch_dir.join("index_9_idZ.tmp");
+        let g2 = scratch_dir.join("helper_2_idZ.tmp");
+        let keep = scratch_dir.join("edges_1_idZ.mmap"); // should remain
 
         touch(&g1);
         touch(&g2);
         touch(&keep);
 
-        remove_tmp_files_from_cache().unwrap();
+        remove_tmp_files_from(scratch_dir.to_str().unwrap()).unwrap();
 
         assert!(!g1.exists(), "tmp file 1 should be gone");
         assert!(!g2.exists(), "tmp file 2 should be gone");
         assert!(keep.exists(), "non-tmp file must remain");
 
-        let _ = fs::remove_file(&keep);
+        let _ = fs::remove_dir_all(&scratch_dir);
     }
 
     // ---- cache_file_name_from_id sanity (helper used elsewhere) --------------

@@ -1,4 +1,6 @@
-use crate::graph::cache::{utils::apply_permutation_in_place, GraphCache, MultithreadedParserIndexBounds};
+use crate::graph::cache::{
+    GraphCache, MultithreadedParserIndexBounds, utils::apply_permutation_in_place,
+};
 
 use crossbeam::thread;
 
@@ -101,7 +103,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         Ok(bounds.into_boxed_slice())
     }
 
-    pub(super) fn parse_ggcat_max_node_id(input: &[u8]) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    pub(super) fn parse_ggcat_max_node_id(
+        input: &[u8],
+    ) -> Result<Option<usize>, Box<dyn std::error::Error>> {
         let mut begin = input.len().saturating_sub(1);
         let mut last_space = begin;
 
@@ -222,7 +226,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize]) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix]) + Send + Sync + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -237,7 +241,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
 
                     while let Some(line) = lines.next() {
                         if line.is_empty() {
@@ -260,7 +264,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                         }
 
                         node_neighbors.sort_unstable_by_key(|&n| n);
@@ -293,7 +297,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize], N) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix], N) + Send + Sync + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -308,7 +312,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
 
                     while let Some(line) = lines.next() {
                         if line.is_empty() {
@@ -337,7 +341,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                         }
 
                         node_neighbors.sort_unstable_by_key(|e| *e);
@@ -370,7 +374,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize], &[E]) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix], &[E]) + Send + Sync + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -385,7 +389,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
 
@@ -410,12 +414,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                             idx.push(idx.len());
                             if E::is_labeled() {
                                 edge_labels.push(
                                     E::new(Self::parse_ggcat_direction(
-                                        link_slice[0], 
+                                        link_slice[0],
                                         link_slice[2])
                                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error in thread {tid}: {e}").into()})?,
@@ -459,7 +463,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize], N, &[E]) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix], N, &[E]) + Send + Sync + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -474,7 +478,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
 
@@ -505,12 +509,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                             idx.push(idx.len());
                             if E::is_labeled() {
                                 edge_labels.push(
                                     E::new(Self::parse_ggcat_direction(
-                                        link_slice[0], 
+                                        link_slice[0],
                                         link_slice[2])
                                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error in thread {tid}: {e}").into()})?,
@@ -557,9 +561,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize]) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix]) + Send + Sync + Clone,
         FF: FnMut(usize) -> bool + Send + Sync + Clone,
-        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync + Clone,
+        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Sync
+            + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -578,7 +585,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
 
                     while let Some(line) = lines.next() {
                         if line.is_empty() {
@@ -601,7 +608,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                         }
 
                         if in_fst(id) {
@@ -651,9 +658,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize], &[E]) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix], &[E]) + Send + Sync + Clone,
         FF: FnMut(usize) -> bool + Send + Sync + Clone,
-        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync + Clone,
+        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Sync
+            + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -670,7 +680,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
 
@@ -697,12 +707,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                             idx.push(idx.len());
                             if E::is_labeled() {
                                 edge_labels.push(
                                     E::new(Self::parse_ggcat_direction(
-                                        link_slice[0], 
+                                        link_slice[0],
                                         link_slice[2])
                                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error in thread {tid}: {e}").into()})?,
@@ -763,9 +773,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize], N) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix], N) + Send + Sync + Clone,
         FF: FnMut(usize) -> bool + Send + Sync + Clone,
-        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync + Clone,
+        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Sync
+            + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -782,7 +795,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
 
                     let mut current_batch: Vec<(&[u8], u64)> = Vec::with_capacity(batch_size);
 
@@ -813,7 +826,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                         }
 
                         if in_fst(id) {
@@ -863,9 +876,14 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, &[usize], N, &[E]) + Send + Sync + Clone,
+        F: FnMut(usize, &[Ix], N, &[E]) + Send + Sync + Clone,
         FF: FnMut(usize) -> bool + Send + Sync + Clone,
-        FB: for<'b>  FnMut(&'b mut [(&'a [u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync + Clone,
+        FB: for<'b> FnMut(
+                &'b mut [(&'a [u8], u64)],
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Sync
+            + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 
@@ -882,7 +900,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                 handles.push(s.spawn(move |_|  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // this assumes UTF-8 but avoids full conversion 
                     let mut lines = input.split(|&b| b == b'\n');
-                    let mut node_neighbors = Vec::with_capacity(u16::MAX as usize);
+                    let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
 
@@ -915,12 +933,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                         for link in node {
                             let link_slice = &link.split(':').collect::<Vec<&str>>()[1..];
                             let dest: usize = link_slice[1].parse()?;
-                            node_neighbors.push(dest);
+                            node_neighbors.push(Ix::new(dest));
                             idx.push(idx.len());
                             if E::is_labeled() {
                                 edge_labels.push(
                                     E::new(Self::parse_ggcat_direction(
-                                        link_slice[0], 
+                                        link_slice[0],
                                         link_slice[2])
                                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                                         format!("error in thread {tid}: {e}").into()})?,
@@ -981,7 +999,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
     ) -> Result<(), Box<dyn std::error::Error>>
     where
         FF: FnMut(usize) -> bool + Send + Sync + Clone,
-        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync + Clone,
+        FB: FnMut(&mut [(&[u8], u64)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Sync
+            + Clone,
     {
         let bounds = Self::parse_ggcat_builder_thread_bounds(input, threads)?;
 

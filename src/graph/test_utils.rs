@@ -23,12 +23,175 @@ type ExactValueCache = DashMap<String, OnceCell<String>>;
 static TEST_CACHE: OnceCell<TestCache> = OnceCell::new();
 static EXACT_VALUE_CACHE: OnceCell<ExactValueCache> = OnceCell::new();
 
+#[cfg(test)]
+thread_local! {
+    /// Ids of the graph caches created on this thread, one list per live fixture guard (see
+    /// [`CacheGuard::dir`]), innermost last.
+    static GUARDED_CACHE_IDS: std::cell::RefCell<Vec<Vec<String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+/// Records a graph cache's id (as in its files' names) for the innermost live fixture guard on
+/// this thread, if any.
+pub(crate) fn register_cache_id(id: String) {
+    GUARDED_CACHE_IDS.with(|ids| {
+        if let Some(innermost) = ids.borrow_mut().last_mut() {
+            innermost.push(id);
+        }
+    });
+}
+
+#[cfg(test)]
+/// Removes, when dropped (also when a test fails), cached graphs' files --- their own, those of
+/// every algorithm run on them and their exact values, all named after the graph's unique id, and
+/// the graphs derived from them --- and a test's fixture directory.
+pub(crate) struct CacheGuard {
+    ids: Vec<String>,
+    fixture_dir: Option<PathBuf>,
+    /// Whether this guard collects the ids of the graphs created on its thread while it lives.
+    collects: bool,
+}
+
+#[cfg(test)]
+impl CacheGuard {
+    /// Guards `graph`'s cached files, and `fixture_dir` if given.
+    pub(crate) fn new<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>(
+        graph: &GraphMemoryMap<N, E, Ix, Dir>,
+        fixture_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            ids: graph.graph_id().into_iter().collect(),
+            fixture_dir,
+            collects: false,
+        }
+    }
+
+    /// Guards a test's fixture directory and every graph cache created on this thread while the
+    /// guard lives (by the test, or the helpers it calls).
+    pub(crate) fn dir(fixture_dir: PathBuf) -> Self {
+        GUARDED_CACHE_IDS.with(|ids| ids.borrow_mut().push(Vec::new()));
+        Self {
+            ids: Vec::new(),
+            fixture_dir: Some(fixture_dir),
+            collects: true,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CacheGuard {
+    fn drop(&mut self) {
+        if self.collects {
+            let collected = GUARDED_CACHE_IDS.with(|ids| ids.borrow_mut().pop());
+            self.ids.extend(collected.into_iter().flatten());
+        }
+        for id in &self.ids {
+            // graphs derived from it (transposes, undirected views), named after their own ids
+            let _ = crate::graph::cache::drop_derived_of(id);
+            // and exact values of it: named after its (unique) id, no other test reads them
+            for dir in ["", EXACT_VALUE_CACHE_DIR] {
+                if let Ok(files) = glob::glob(&format!("{CACHE_DIR}{dir}*{id}.*")) {
+                    for file in files.flatten() {
+                        let _ = std::fs::remove_file(file);
+                    }
+                }
+            }
+        }
+        if let Some(dir) = &self.fixture_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[cfg(test)]
+/// A test graph, removing its cached files and fixture directory when dropped (see
+/// [`CacheGuard`]); derefs to its [`GraphMemoryMap`].
+pub(crate) struct TestGraph<
+    N: graph::N = (),
+    E: graph::E = (),
+    Ix: graph::IndexType = usize,
+    Dir: graph::Directedness = graph::Undirected,
+> {
+    graph: GraphMemoryMap<N, E, Ix, Dir>,
+    // dropped after the graph (whose files it removes)
+    _guard: CacheGuard,
+}
+
+#[cfg(test)]
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>
+    TestGraph<N, E, Ix, Dir>
+{
+    pub(crate) fn new(graph: GraphMemoryMap<N, E, Ix, Dir>, fixture_dir: Option<PathBuf>) -> Self {
+        let _guard = CacheGuard::new(&graph, fixture_dir);
+        Self { graph, _guard }
+    }
+}
+
+#[cfg(test)]
+impl<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness> std::ops::Deref
+    for TestGraph<N, E, Ix, Dir>
+{
+    type Target = GraphMemoryMap<N, E, Ix, Dir>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.graph
+    }
+}
+
+#[cfg(test)]
+/// Parses a (committed, read only) fixture graph under a unique id, so that tests running
+/// algorithms on the same fixture concurrently never share cached files, with a guard removing
+/// those files (but not the fixture) when the test is done.
+pub(crate) fn open_fixture(
+    path: &Path,
+    threads: Option<u8>,
+) -> Result<(GraphMemoryMap, CacheGuard), Box<dyn std::error::Error>> {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let graph =
+        GraphMemoryMap::from_file(path, Some(format!("{name}_{}", unique_run_tag())), threads)?;
+    let guard = CacheGuard::new(&graph, None);
+    Ok((graph, guard))
+}
+
 pub(crate) fn mem_cache() -> &'static TestCache {
     TEST_CACHE.get_or_init(DashMap::new)
 }
 
 pub(crate) fn exact_value_cache() -> &'static ExactValueCache {
     EXACT_VALUE_CACHE.get_or_init(DashMap::new)
+}
+
+/// Returns a short, genuinely unique tag (`"<pid>_<thread-id>_<counter>"`), suitable for use as
+/// (part of) a cache id string, test-fixture directory name, or anywhere else uniqueness across
+/// concurrently-running tests matters. See [`unique_test_dir`]'s doc comment for why
+/// pid+thread-id alone is not sufficient.
+#[allow(dead_code)]
+pub(crate) fn unique_run_tag() -> String {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "{}_{:?}_{id}",
+        std::process::id(),
+        std::thread::current().id()
+    )
+}
+
+/// Returns a genuinely unique scratch directory for a test fixture file.
+///
+/// `std::process::id()` + `std::thread::current().id()` alone is *not* sufficient: cargo test's
+/// worker thread pool reuses OS threads across different test functions, so two different tests
+/// running on the same worker thread could derive the exact same deterministic path and race on
+/// (or silently reuse a stale cache for) each other's fixture file --- this was a real, confirmed
+/// source of cross-test flakiness when running the suite with its default parallelism. An
+/// atomic, monotonically increasing counter makes every call unique regardless of thread reuse
+/// or execution order.
+#[allow(dead_code)]
+pub(crate) fn unique_test_dir(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("sparx_{tag}_{}", unique_run_tag()))
 }
 
 #[allow(dead_code)]
@@ -172,25 +335,30 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
         })?;
     test_entry
         .get_or_try_init(|| -> Result<String, Box<dyn std::error::Error>> {
-            if Path::new(&e_fn).exists() {
+            // values are kept across runs, by the dataset's path: those of another version of it
+            // (with another number of nodes), or of an interrupted run, are computed again
+            let complete = std::fs::metadata(&e_fn)
+                .is_ok_and(|m| m.len() == (graph.size() * std::mem::size_of::<f64>()) as u64);
+            if complete {
                 eprintln!("found exact vals for {:?} at {e_fn}", graph_path);
                 Ok(e_fn)
             } else {
+                let _ = std::fs::remove_file(&e_fn);
                 // return Err(format!("no entry {e_fn}").into());
                 eprintln!("built exact vals for {:?}", graph_path);
                 eprintln!("built in {:?} {e_fn}", exact_value_dir());
                 match value_type {
                     FileType::ExactClosenessCentrality(H::H) => {
                         println!("compute closeness centrality");
-                        ExactClosenessCentrality::new(graph, Some(true))?;
+                        ExactClosenessCentrality::<_, _, _, f64>::new(graph, Some(true))?;
                     }
                     FileType::ExactHarmonicCentrality(H::H) => {
                         println!("compute harmonic centrality");
-                        ExactHarmonicCentrality::new(graph, Some(true))?;
+                        ExactHarmonicCentrality::<_, _, _, f64>::new(graph, Some(true))?;
                     }
                     FileType::ExactLinCentrality(H::H) => {
                         println!("compute lin's centrality");
-                        ExactLinCentrality::new(graph)?;
+                        ExactLinCentrality::<_, _, _, f64>::new(graph)?;
                     }
                     _ => {}
                 };

@@ -1,5 +1,10 @@
 pub mod batagelj_zaversnik;
+pub mod count;
+pub mod directed;
 pub mod liu_et_al;
+
+#[cfg(test)]
+mod width_test;
 
 #[cfg(test)]
 use _verify::verify_k_cores;
@@ -7,124 +12,62 @@ use _verify::verify_k_cores;
 #[cfg(test)]
 mod _verify {
     use crate::{
-        graph::{GraphMemoryMap, cache::utils::{FileType, H, cache_file_name}},
-        shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut},
+        graph::{self, GraphMemoryMap},
+        k_core::count::CoreCount,
+        shared_slice::AbstractedProceduralMemoryMut,
     };
 
-    use crossbeam::thread;
-    use num_cpus::get_physical;
-    use std::sync::{Arc, Barrier};
+    use std::collections::BTreeSet;
 
-    #[allow(dead_code)]
-    pub(super) fn verify_k_cores(
-        graph: &GraphMemoryMap,
-        edge_coreness: AbstractedProceduralMemoryMut<u8>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let threads = get_physical() * 2;
+    /// Each node's coreness by a simple sequential reference: repeatedly take a node of minimum
+    /// (current) degree, whose coreness is that degree, and decrement its neighbours' degrees
+    /// (once per neighbour list entry, i.e. per parallel edge) where higher. A node's degree is
+    /// its neighbour list's length, self-loops and parallel edges included --- the convention the
+    /// decompositions follow.
+    pub(super) fn reference_coreness<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+        graph: &GraphMemoryMap<N, E, Ix>,
+    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
         let node_count = graph.size();
-        let node_load = node_count.div_ceil(threads);
+        let mut degree: Vec<usize> = (0..node_count)
+            .map(|v| graph.neighbours(v).map(|n| n.count()))
+            .collect::<Result<_, _>>()?;
+        let mut queue: BTreeSet<(usize, usize)> = (0..node_count).map(|v| (degree[v], v)).collect();
+        let mut coreness = vec![0; node_count];
+        while let Some((deg_v, v)) = queue.pop_first() {
+            coreness[v] = deg_v;
+            for u in graph.neighbours(v)? {
+                if degree[u] > deg_v && queue.remove(&(degree[u], u)) {
+                    degree[u] -= 1;
+                    queue.insert((degree[u], u));
+                }
+            }
+        }
+        Ok(coreness)
+    }
 
-        // coreness length == graph width
-        if edge_coreness.len() != graph.width() {
+    /// Verifies `node_coreness` (one value per node) is `graph`'s k-core decomposition.
+    #[allow(dead_code)]
+    pub(super) fn verify_k_cores<N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>(
+        graph: &GraphMemoryMap<N, E, Ix>,
+        node_coreness: AbstractedProceduralMemoryMut<Cx>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let coreness = node_coreness.as_slice();
+        if coreness.len() != graph.size() {
             return Err(format!(
-                "k-cores invalid: graph width is {} but coreness vec has length {}",
-                graph.width(),
-                edge_coreness.len()
+                "k-cores invalid: graph has {} nodes but coreness has length {}",
+                graph.size(),
+                coreness.len()
             )
             .into());
         }
-        if graph.width() == 0 {
-            return Ok(());
+        let expected = reference_coreness(graph)?;
+        match (0..graph.size()).find(|&v| coreness[v].to_usize() != expected[v]) {
+            Some(v) => Err(format!(
+                "k-cores invalid: node {v} has coreness {:?}, expected {}",
+                coreness[v], expected[v]
+            )
+            .into()),
+            None => Ok(()),
         }
-
-        let e_coreness = edge_coreness.shared_slice();
-        // coreness check test filename
-        let cct_fn = cache_file_name("", &FileType::Test(H::H), None)?;
-        let node_coreness = SharedSliceMut::<u8>::abst_mem_mut(
-            &cct_fn,
-            node_count,
-            true,
-        )?;
-        let mut n_coreness = node_coreness.shared_slice();
-
-        let synchronize = Arc::new(Barrier::new(threads));
-
-        thread::scope(
-            |scope| -> Result<(), Box<dyn std::error::Error>> {
-                let mut res = vec![];
-                for tid in 0..threads {
-                    let synchronize = synchronize.clone();
-
-                    let start = std::cmp::min(tid * node_load, node_count);
-                    let end = std::cmp::min(start + node_load, node_count);
-
-                    res.push(scope.spawn(
-                        move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                            for u in start..end {
-                                let mut n_core = 0;
-                                let mut cardinality = 0;
-                                for e_idx in graph.index_node(u) {
-                                    match e_coreness.get(e_idx).cmp(&n_core) {
-                                        std::cmp::Ordering::Greater => {
-                                        n_core = *e_coreness.get(e_idx);
-                                        cardinality = 1;
-                                        }
-                                        std::cmp::Ordering::Equal => {
-                                        cardinality += 1;
-                                        }
-                                        std::cmp::Ordering::Less => {}
-                                    };
-                                }
-                                if cardinality < n_core {
-                                    return Err(format!("invalid k-core: cardinality is {cardinality} but node coreness is {n_core}").into());
-                                }
-                                *n_coreness.get_mut(u) = n_core;
-                            }
-
-                            synchronize.wait();
-
-                            let mut higher_deg_than_core;
-                            for u in start..end {
-                                higher_deg_than_core = 0;
-                                let core = *n_coreness.get(u);
-                                for e_idx in graph.index_node(u) {
-                                    let dest_node = unsafe { graph.neighbours_ptr().add(e_idx).read() };
-                                    let n_core = *n_coreness.get(dest_node);
-                                    // ensure coreness((u,v)) == min(coreness(u), coreness(v))
-                                    if *e_coreness.get(e_idx) > n_core {
-                                        return Err(
-                                            format!(
-                                                "invalid k-core: edge ({u}, {dest_node}) has coreness {} which is bigger than {dest_node}'s coreness {}'",
-                                                *e_coreness.get(e_idx), 
-                                                *n_coreness.get(dest_node)
-                                                ).into()
-                                            );
-                                    }
-                                    // ensure k-core membership maximality
-                                    if n_core > core {
-                                        higher_deg_than_core += 1;
-                                    }
-                                }
-                                if higher_deg_than_core > core as usize {
-                                    return Err(format!("invalid k-core: node {u}: deg_≥{core} = {higher_deg_than_core}, {u} should be in a higher k-core").into());
-                                }
-                            }
-                            Ok(())
-                        },
-                    ));
-                }
-                // join results
-                for r in res {
-                    let joined_r = match r.join() {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return Err(format!("{:?}", e).into());
-                        }
-                    };
-                    joined_r.map_err(|e| -> Box<dyn std::error::Error> {format!("{:?}", e).into()})?;
-                }
-                Ok(())
-            },
-        ).map_err(|e| -> Box<dyn std::error::Error> {format!("{:?}", e).into()})?
     }
 }

@@ -7,28 +7,42 @@ use num_cpus::get_physical;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 
-type ProceduralMemoryHierholzers = (
-    AbstractedProceduralMemoryMut<usize>,
-    AbstractedProceduralMemoryMut<u8>,
+type ProceduralMemoryHierholzers<Ix> = (
+    AbstractedProceduralMemoryMut<Ix>,
+    // each node's arcs left to walk: a degree, which `Ix` holds
+    AbstractedProceduralMemoryMut<Ix>,
 );
 
-type AllEulerTrailsConcatenatedWithBounds<'a> = (&'a [usize], Box<[(usize, usize)]>);
+type AllEulerTrailsConcatenatedWithBounds<'a, Ix> = (&'a [Ix], Box<[(usize, usize)]>);
 
 /// For the computation of the euler trail(s) of a [`GraphMemoryMap`] instance using *Hierholzer's Algorithm*.
 ///
+/// Each trail is a closed walk using every arc of a connected component once, following arcs
+/// out of nodes: undirected graphs' edges are walked once each way. A directed graph must
+/// therefore have, at every node, as many arcs in as out (be Eulerian), which is checked: other
+/// directed graphs have no closed trails covering their arcs.
+///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
-pub struct AlgoHierholzer<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+pub struct AlgoHierholzer<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which the euler trail(s) is(are) computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the euler trails.
-    euler_trails: AbstractedProceduralMemoryMut<usize>,
+    euler_trails: AbstractedProceduralMemoryMut<Ix>,
     /// Memmapped slice containing the starting position of each euler trail.
-    euler_indices: AbstractedProceduralMemoryMut<usize>,
+    euler_indices: AbstractedProceduralMemoryMut<Ix>,
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    AlgoHierholzer<'a, N, E, Ix, Dir>
+{
     /// Performs graph traversal using *Hierholzer's Algorithm*, computing the euler trails of a [`GraphMemoryMap`] instance.
     ///
     /// The resulting Euler trail(s) is(are) stored in memory (in a memmapped file) nodewise[^1].
@@ -45,7 +59,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     /// * `g` --- the [`GraphMemoryMap`] instance for which *Hierholzer's Algorithm* is to be performed in.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html
-    pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut euler = Self::new_no_compute(g)?;
         let proc_mem = euler.init_cache_mem()?;
 
@@ -71,7 +85,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html
     pub fn get_or_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let t_fn = g.build_cache_filename(CacheFile::EulerTrail, None)?;
         if Path::new(&t_fn).exists() {
@@ -118,15 +132,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     /// This method will return [`Some`] if `idx` is smaller than the number of euler trails found upon performing *Hierholzer's* graph traversal algorithm and [`None`] otherwise, i.e. iff `idx < trail_index.len()`.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn get_trail(&self, idx: usize) -> Option<&[usize]> {
+    pub fn get_trail(&self, idx: usize) -> Option<&[Ix]> {
         if idx < self.euler_indices.len() {
             // get trail start index
             let start = match idx.overflowing_sub(1) {
                 (_, true) => 0,
-                (i, false) => *self.euler_indices.get(i),
+                (i, false) => self.euler_indices.get(i).index(),
             };
             // get trail end index
-            let end = *self.euler_indices.get(idx);
+            let end = self.euler_indices.get(idx).index();
             // slice concatenated trails based on start & end indexes
             self.euler_trails.slice(start, end)
         } else {
@@ -142,7 +156,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     /// [^1]: bounds are given as a tuple (start_idx: [`usize`], end_idx: [`usize`]).
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn get_all_trails(&'a self) -> AllEulerTrailsConcatenatedWithBounds<'a> {
+    pub fn get_all_trails(&'a self) -> AllEulerTrailsConcatenatedWithBounds<'a, Ix> {
         let mut bounds: Vec<(usize, usize)> = Vec::with_capacity(self.euler_indices.len());
         self.euler_indices
             .as_slice()
@@ -151,9 +165,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
             .for_each(|(idx, &end_pos)| {
                 let start = match idx.overflowing_sub(1) {
                     (_, true) => 0,
-                    (i, false) => *self.euler_indices.get(i),
+                    (i, false) => self.euler_indices.get(i).index(),
                 };
-                bounds.push((start, end_pos));
+                bounds.push((start, end_pos.index()));
             });
         (self.euler_trails.as_slice(), bounds.into_boxed_slice())
     }
@@ -164,18 +178,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
         let t_fn = this.g.build_cache_filename(CacheFile::EulerTrail, None)?;
         let i_fn = this.g.build_cache_filename(CacheFile::EulerIndex, None)?;
         this.g.cleanup_cache(CacheFile::EulerTrail)?;
-        std::fs::remove_file(t_fn)?;
-        std::fs::remove_file(i_fn)?;
+        crate::shared_slice::remove_if_exists(t_fn)?;
+        crate::shared_slice::remove_if_exists(i_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    AlgoHierholzer<'a, N, E, Ix, Dir>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g)
     }
@@ -183,7 +199,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g)
     }
@@ -192,7 +208,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     #[inline(always)]
     pub fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryHierholzers, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryHierholzers<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -200,7 +216,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     #[inline(always)]
     pub(crate) fn init_cache_mem(
         &self,
-    ) -> Result<ProceduralMemoryHierholzers, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryHierholzers<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -208,7 +224,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryHierholzers,
+        proc_mem: ProceduralMemoryHierholzers<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -217,7 +233,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryHierholzers,
+        proc_mem: ProceduralMemoryHierholzers<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -237,29 +253,47 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // closed trails need as many arcs in as out of every node (free for symmetric graphs)
+        if Dir::DIRECTED && !g.is_symmetric()? {
+            let a_fn = g.build_cache_filename(CacheFile::EulerIndex, Some(0))?;
+            let mut arcs_in = ScratchMem::<usize>::new(a_fn, g.size())?;
+            for v in &g[..] {
+                arcs_in[v.index()] += 1;
+            }
+            for (v, &arcs_in) in arcs_in.iter().enumerate() {
+                let arcs_out = g.node_degree(v);
+                if arcs_in != arcs_out {
+                    return Err(format!(
+                        "error Hierholzer's algorithm needs every node of a directed graph to have \
+                         as many arcs in as out, but node {v} has {arcs_in} in and {arcs_out} out"
+                    )
+                    .into());
+                }
+            }
+        }
         let i_fn = g.build_cache_filename(CacheFile::EulerIndex, None)?;
         let t_fn = g.build_cache_filename(CacheFile::EulerTrail, None)?;
         Ok(Self {
             g,
-            euler_trails: SharedSliceMut::<usize>::abst_mem_mut(&t_fn, g.width(), true)?,
-            euler_indices: SharedSliceMut::<usize>::abst_mem_mut(&i_fn, 1, true)?,
+            euler_trails: SharedSliceMut::<Ix>::abst_mem_mut(&t_fn, g.width(), true)?,
+            euler_indices: SharedSliceMut::<Ix>::abst_mem_mut(&i_fn, 1, true)?,
         })
     }
 
     fn init_cache_mem_impl(
         &self,
-    ) -> Result<ProceduralMemoryHierholzers, Box<dyn std::error::Error>> {
+    ) -> Result<ProceduralMemoryHierholzers<Ix>, Box<dyn std::error::Error>> {
         let node_count = self.g.size();
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
 
         let e_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(0))?;
         let c_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(1))?;
 
-        let edges = SharedSliceMut::<usize>::abst_mem_mut(&e_fn, node_count, true)?;
-        let count = SharedSliceMut::<u8>::abst_mem_mut(&c_fn, node_count, true)?;
+        let edges = SharedSliceMut::<Ix>::abst_mem_mut(&e_fn, node_count, true)?;
+        let count = SharedSliceMut::<Ix>::abst_mem_mut(&c_fn, node_count, true)?;
 
         thread::scope(|scope| {
             // initializations always uses at least two threads per core
@@ -275,7 +309,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
                 scope.spawn(move |_| {
                     for k in begin..end {
                         *edges.get_mut(k) = *index_ptr.get(k);
-                        *count.get_mut(k) = (*index_ptr.get(k + 1) - *index_ptr.get(k)) as u8;
+                        *count.get_mut(k) =
+                            Ix::new(index_ptr.get(k + 1).index() - index_ptr.get(k).index());
                     }
                 });
             }
@@ -290,20 +325,35 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
 
     fn compute_with_proc_mem_impl(
         &mut self,
-        proc_mem: ProceduralMemoryHierholzers,
+        proc_mem: ProceduralMemoryHierholzers<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = match self.g.size() {
             0 => return Ok(()),
             i => i,
         };
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), self.g.width());
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), self.g.width());
 
         let (mut edges, mut edge_count) = proc_mem;
 
         let mut start_vertex_counter = 0usize;
         let mut cycles = self.euler_trails.shared_slice();
         let mut write_idx = 0usize;
-        let mut indices = Vec::<usize>::with_capacity(128);
+        // each trail starts at a node left without unused arcs once it's found: one per node
+        let mut indices = ScratchStack::<usize>::new(
+            self.build_cache_filename(CacheFile::EulerIndex, Some(1))?,
+            node_count,
+        )?;
+        // each push onto the stack (and each cycle node but the first) follows an unused arc:
+        // neither outgrows the graph's arcs, and the starting node's
+        let arc_count = self.g.width();
+        let mut stack = ScratchStack::<usize>::new(
+            self.build_cache_filename(CacheFile::EulerTrail, Some(2))?,
+            arc_count + 1,
+        )?;
+        let mut cycle = ScratchStack::<Ix>::new(
+            self.build_cache_filename(CacheFile::EulerTrail, Some(3))?,
+            arc_count + 1,
+        )?;
         // find cycles until no unused edges remain
         loop {
             let start_v = loop {
@@ -315,7 +365,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
                 if idx >= node_count {
                     break None;
                 }
-                if *edge_count.get(idx) > 0 {
+                if edge_count.get(idx).index() > 0 {
                     break Some(idx);
                 }
                 start_vertex_counter += 1;
@@ -328,22 +378,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
             };
 
             // Hierholzer's DFS
-            let mut stack: Vec<usize> = Vec::with_capacity(node_count);
-            let mut cycle: Vec<usize> = Vec::with_capacity(node_count);
-
             stack.push(start_v);
             while let Some(&v) = stack.last() {
-                if *edge_count.get(v) > 0 {
-                    *edge_count.get_mut(v) -= 1;
-                    stack.push(*neighbours_ptr.get(*edges.get(v)));
-                    *edges.get_mut(v) += 1;
+                if edge_count.get(v).index() > 0 {
+                    *edge_count.get_mut(v) = Ix::new(edge_count.get(v).index() - 1);
+                    let next_node = neighbours_ptr.get(edges.get(v).index()).index();
+                    stack.push(next_node);
+                    *edges.get_mut(v) = Ix::new(edges.get(v).index() + 1);
                 } else {
                     stack.pop();
-                    cycle.push(v);
+                    cycle.push(Ix::new(v));
                 }
             }
             if !cycle.is_empty() {
-                cycle.reverse();
+                cycle.as_mut_slice().reverse();
 
                 let cycle_slice = cycle.as_slice();
                 let end = cycle_slice.len() - 1;
@@ -359,13 +407,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
             }
         }
 
+        let indices = indices.as_slice();
         if indices.len() == 1 {
-            *self.euler_indices.get_mut(0) = indices[0];
+            *self.euler_indices.get_mut(0) = Ix::new(indices[0]);
         } else {
             let i_fn = self.build_cache_filename(CacheFile::EulerIndex, None)?;
-            self.euler_indices = SharedSliceMut::abst_mem_mut(&i_fn, indices.len(), true)?;
+            self.euler_indices = SharedSliceMut::<Ix>::abst_mem_mut(&i_fn, indices.len(), true)?;
             indices.iter().enumerate().for_each(|(idx, &val)| {
-                *self.euler_indices.get_mut(idx) = val;
+                *self.euler_indices.get_mut(idx) = Ix::new(val);
             });
         }
 
@@ -380,7 +429,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoHierholzer<'a, N, E
 
 #[cfg(test)]
 mod test {
-    use crate::test_common::get_or_init_dataset_cache_entry;
     use crate::trails::verify_trails;
 
     use super::*;
@@ -401,10 +449,8 @@ mod test {
     }
 
     fn generic_test<P: AsRef<Path>>(path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let graph = GraphMemoryMap::init_from_cache(
-            get_or_init_dataset_cache_entry(path.as_ref())?,
-            Some(16),
-        )?;
+        // a private copy: tests on the same fixture may run concurrently
+        let (graph, _cache) = crate::graph::test_utils::open_fixture(path.as_ref(), Some(16))?;
         let het = AlgoHierholzer::new(&graph)?;
 
         verify_trails(&graph, het.euler_trails, het.euler_indices)
@@ -412,24 +458,24 @@ mod test {
 
     // generate test cases from dataset
     graph_tests! {
-        ggcat_1_5 => "../ggcat/graphs/random_graph_1_5.lz4",
-        ggcat_2_5 => "../ggcat/graphs/random_graph_2_5.lz4",
-        ggcat_3_5 => "../ggcat/graphs/random_graph_3_5.lz4",
-        ggcat_4_5 => "../ggcat/graphs/random_graph_4_5.lz4",
-        ggcat_5_5 => "../ggcat/graphs/random_graph_5_5.lz4",
-        ggcat_6_5 => "../ggcat/graphs/random_graph_6_5.lz4",
-        ggcat_7_5 => "../ggcat/graphs/random_graph_7_5.lz4",
-        ggcat_8_5 => "../ggcat/graphs/random_graph_8_5.lz4",
-        ggcat_9_5 => "../ggcat/graphs/random_graph_9_5.lz4",
-        ggcat_1_10 => "../ggcat/graphs/random_graph_1_10.lz4",
-        // ggcat_2_10 => "../ggcat/graphs/random_graph_2_10.lz4",
-        ggcat_3_10 => "../ggcat/graphs/random_graph_3_10.lz4",
-        ggcat_4_10 => "../ggcat/graphs/random_graph_4_10.lz4",
-        ggcat_5_10 => "../ggcat/graphs/random_graph_5_10.lz4",
-        // ggcat_6_10 => "../ggcat/graphs/random_graph_6_10.lz4",
-        // ggcat_7_10 => "../ggcat/graphs/random_graph_7_10.lz4",
-        // ggcat_8_10 => "../ggcat/graphs/random_graph_8_10.lz4",
-        // ggcat_9_10 => "../ggcat/graphs/random_graph_9_10.lz4",
+        ggcat_1_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_1_5.lz4"),
+        ggcat_2_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_2_5.lz4"),
+        ggcat_3_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_3_5.lz4"),
+        ggcat_4_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_4_5.lz4"),
+        ggcat_5_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_5_5.lz4"),
+        ggcat_6_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_6_5.lz4"),
+        ggcat_7_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_7_5.lz4"),
+        ggcat_8_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_8_5.lz4"),
+        ggcat_9_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_9_5.lz4"),
+        ggcat_1_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_1_10.lz4"),
+        // ggcat_2_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_2_10.lz4"),
+        ggcat_3_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_3_10.lz4"),
+        ggcat_4_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_4_10.lz4"),
+        ggcat_5_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_5_10.lz4"),
+        // ggcat_6_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_6_10.lz4"),
+        // ggcat_7_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_7_10.lz4"),
+        // ggcat_8_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_8_10.lz4"),
+        // ggcat_9_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_9_10.lz4"),
         // ggcat_8_15 => "../ggcat/graphs/random_graph_8_15.lz4",
         // ggcat_9_15 => "../ggcat/graphs/random_graph_9_15.lz4",
         // … add the rest

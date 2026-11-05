@@ -11,22 +11,47 @@ type ProceduralMemoryDFS = (AbstractedProceduralMemoryMut<bool>,);
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
-pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+/// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): it visits the nodes `source` reaches.
+/// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
+/// [`Direction::In`] visits the nodes that reach `source`. To ignore their directions, run it on the graph's
+/// [`to_undirected`](../../graph/struct.GraphMemoryMap.html#method.to_undirected).
+///
+/// [`Direction`]: ../../graph/direction/enum.Direction.html
+/// [`Direction::Out`]: ../../graph/direction/enum.Direction.html#variant.Out
+/// [`Direction::In`]: ../../graph/direction/enum.Direction.html#variant.In
+/// [`DiGraph`]: ../../graph/type.DiGraph.html
+pub struct DFS<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness = Undirected> {
     /// Graph in which the DFS is to be performed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Source node for DFS.
     source: usize,
     /// Memmapped slice containing the nodes in discovery order.
-    order: AbstractedProceduralMemoryMut<usize>,
+    order: AbstractedProceduralMemoryMut<Ix>,
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix, Directed> {
+    /// Performs a depth first search from `source`, following arcs in a given [`Direction`] (see the type's documentation):
+    /// the same as [`new`](Self::new) on [`GraphMemoryMap::view`]`(direction)`, which the
+    /// results are then of (its node ids are the graph's).
+    ///
+    /// [`GraphMemoryMap::view`]: ../../graph/struct.GraphMemoryMap.html#method.view
+    pub fn new_directed(
+        g: &'a DiGraph<N, E, Ix>,
+        source: usize,
+        direction: Direction,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new(g.view(direction)?, source)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<'a, N, E, Ix, Dir> {
     /// Performs DFS in a [`GraphMemoryMap`] instance.
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bfs = Self::new_no_compute(g, source)?;
@@ -38,25 +63,25 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     }
 
     /// Returns all nodes' discovery order as determined by the DFS with the given source.
-    pub fn get_order(&'a self) -> &'a [usize] {
+    pub fn get_order(&'a self) -> &'a [Ix] {
         self.order.as_slice()
     }
 
     /// Removes all cached files pertaining to this algorithm's execution's results.
     pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let this = ManuallyDrop::new(self);
-        let out_fn = this.g.build_cache_filename(CacheFile::BFS, None)?;
-        std::fs::remove_file(out_fn)?;
+        let out_fn = this.g.build_cache_filename(CacheFile::DFS, None)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<'a, N, E, Ix, Dir> {
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source)
@@ -65,7 +90,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
     pub(crate) fn new_no_compute(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_no_compute_impl(g, source)
@@ -116,7 +141,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
     }
 
     fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         source: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if source >= g.size() {
@@ -130,7 +155,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
         Ok(Self {
             g,
             source,
-            order: SharedSliceMut::<usize>::abst_mem_mut(&out_fn, g.size(), true)?,
+            order: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
         })
     }
 
@@ -151,11 +176,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
         let (mut visited,) = proc_mem;
         let mut ord = self.order.shared_slice();
 
-        let mut next = Vec::with_capacity(self.g.size());
+        // a node's unvisited neighbours are pushed once, when it's visited: at most one entry per
+        // arc, and the source's
+        let s_fn = self.build_cache_filename(CacheFile::DFS, Some(2))?;
+        let mut next = ScratchStack::<usize>::new(s_fn, self.g.width() + 1)?;
 
         next.push(self.source);
-        *ord.get_mut(0) = self.source;
-        let mut idx = 1;
+        // the loop below marks a node visited and writes it into `ord` the first time it's
+        // popped; pre-seeding `ord[0]`/pre-pushing the source here while *also* letting the loop
+        // process it as its first iteration would write the source twice (once here, once as the
+        // loop's first pop, since it isn't marked visited yet) and overflow `ord` by one slot for
+        // any graph where every node is reachable from `source` --- so the source must only be
+        // pushed onto the stack, not separately pre-written.
+        let mut idx = 0;
 
         // find cycles until no unused edges remain
         while let Some(u) = next.pop() {
@@ -163,7 +196,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DFS<'a, N, E, Ix> {
                 continue;
             }
             *visited.get_mut(u) = true;
-            *ord.get_mut(idx) = u;
+            *ord.get_mut(idx) = Ix::new(u);
             idx += 1;
             for v in self.g.neighbours(u)?.rev() {
                 if !*visited.get(v) {

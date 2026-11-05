@@ -1,13 +1,17 @@
 use crate::shared_slice::SharedSliceMut;
 
-use super::{utils::apply_permutation_in_place, GraphCache};
+use super::{AccumulatorAtomic, GraphCache, utils::apply_permutation_in_place};
 
 use crossbeam::thread;
 
 #[allow(dead_code)]
 impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     #[inline(always)]
-    pub(super) fn sort_edges(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<usize>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn sort_edges<D: AccumulatorAtomic>(
+        offsets: SharedSliceMut<D::Plain>,
+        neighbors: SharedSliceMut<Ix>,
+        threads: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = offsets.len().saturating_sub(1);
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();
@@ -16,12 +20,12 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let begin = std::cmp::min(node_load * tid, node_count);
                 let end = std::cmp::min(begin + node_load, node_count);
                 let mut neighbors = neighbors;
-    
+
                 let handle = s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         for node in begin..end {
-                            let begin = *offsets.get(node);
-                            let end = *offsets.get(node + 1);
+                            let begin = D::widen(*offsets.get(node));
+                            let end = D::widen(*offsets.get(node + 1));
                             let node_edges = neighbors.mut_slice(begin, end).ok_or_else(
                                 || -> Box<dyn std::error::Error + Send + Sync> {
                                     format!("error getting node {node}'s edges as a mut slice for ordering")
@@ -34,7 +38,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 });
                 handles.push(handle);
             }
-    
+
             for (idx, handle) in handles.into_iter().enumerate() {
                 handle
                     .join()
@@ -51,7 +55,12 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     }
 
     #[inline(always)]
-    pub(super) fn sort_edges_with_labels(offsets: SharedSliceMut<usize>, neighbors: SharedSliceMut<usize>, edge_labels: SharedSliceMut<E>, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn sort_edges_with_labels<D: AccumulatorAtomic>(
+        offsets: SharedSliceMut<D::Plain>,
+        neighbors: SharedSliceMut<Ix>,
+        edge_labels: SharedSliceMut<E>,
+        threads: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = offsets.len().saturating_sub(1);
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
             let mut handles = Vec::new();
@@ -61,16 +70,17 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 let end = std::cmp::min(begin + node_load, node_count);
                 let mut neighbors = neighbors;
                 let mut edge_labels = edge_labels;
-    
+
                 let handle = s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let mut idx = Vec::with_capacity(u16::MAX as usize);
+                        let mut destination: Vec<usize> = Vec::new();
                         for node in begin..end {
-                            let begin = *offsets.get(node);
-                            let end = *offsets.get(node + 1);
-                            (0..end - begin).for_each(|v| {
-                                idx.push(v);
-                            });
+                            let begin = D::widen(*offsets.get(node));
+                            let end = D::widen(*offsets.get(node + 1));
+                            // this node's permutation only
+                            idx.clear();
+                            idx.extend(0..end - begin);
                             let node_edges = neighbors.mut_slice(begin, end).ok_or_else(
                                 || -> Box<dyn std::error::Error + Send + Sync> {
                                     format!("error getting node {node}'s edges as a mut slice for ordering")
@@ -83,14 +93,21 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                                         .into()
                                 },
                             )?;
+                            // idx[k]: the edge that goes to position k; applying it needs each edge's
+                            // position instead
                             idx.sort_by_key(|&i| node_edges[i]);
-                            apply_permutation_in_place(idx.as_mut_slice(), node_edges, edge_labels);
+                            destination.clear();
+                            destination.resize(idx.len(), 0);
+                            for (position, &edge) in idx.iter().enumerate() {
+                                destination[edge] = position;
+                            }
+                            apply_permutation_in_place(destination.as_mut_slice(), node_edges, edge_labels);
                         }
                         Ok(())
                 });
                 handles.push(handle);
             }
-    
+
             for (idx, handle) in handles.into_iter().enumerate() {
                 handle
                     .join()

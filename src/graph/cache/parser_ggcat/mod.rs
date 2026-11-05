@@ -1,10 +1,10 @@
 mod producers;
 
 use super::{
-    GraphCache,
+    AccumulatorAtomic, GraphCache,
     utils::{FileType, H},
 };
-use crate::shared_slice::AbstractedProceduralMemoryMut;
+use crate::shared_slice::{AbstractedProceduralMemoryMut, SharedSliceMut};
 
 use num_cpus::get_physical;
 use portable_atomic::{AtomicUsize, Ordering};
@@ -36,7 +36,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
     /// [`DEFAULT_BATCHING_SIZE`]: ./struct.GraphCache.html#associatedconstant.DEFAULT_BATCHING_SIZE
-    pub(super) fn from_ggcat_file_impl<P: AsRef<Path>>(
+    pub(super) fn from_ggcat_file_impl<P: AsRef<Path>, D: AccumulatorAtomic>(
         path: P,
         id: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -51,13 +51,13 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // parse optional inputs && fallback to defaults for the Nones found
         let id = id.map_or(path_str.to_string(), |id| id);
         let batching = Some(Self::DEFAULT_BATCHING_SIZE);
-        let (input, tmp_path) = Self::read_input_file(path)?;
+        let (input, tmp_path) = Self::read_input_file(path, &id, 0)?;
 
         // init cache
         let mut cache = Self::init_with_id(&id, batching)?;
 
         // parse and cache input
-        cache.parallel_parse_ggcat_bytes_mmap(&input[..])?;
+        cache.parallel_parse_ggcat_bytes_mmap::<D>(&input[..])?;
 
         // if a tmp file was created delete it
         if let Some(p) = tmp_path {
@@ -85,7 +85,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
     /// [`DEFAULT_BATCHING_SIZE`]: ./struct.GraphCache.html#associatedconstant.DEFAULT_BATCHING_SIZE
-    pub(super) fn from_ggcat_file_with_fst_impl<P: AsRef<Path>>(
+    pub(super) fn from_ggcat_file_with_fst_impl<P: AsRef<Path>, D: AccumulatorAtomic>(
         path: P,
         id: Option<String>,
         batch: Option<usize>,
@@ -103,13 +103,13 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let id = id.map_or(path_str.to_string(), |id| id);
         let batching = Some(batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b));
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { false });
-        let (input, tmp_path) = Self::read_input_file(path)?;
+        let (input, tmp_path) = Self::read_input_file(path, &id, 0)?;
 
         // init cache
         let mut cache = Self::init_with_id(&id, batching)?;
 
         // parse and cache input
-        cache.parallel_parse_with_fst_ggcat_bytes_mmap(&input[..], in_fst)?;
+        cache.parallel_parse_with_fst_ggcat_bytes_mmap::<D>(&input[..], in_fst)?;
 
         // if a tmp file was created delete it
         if let Some(p) = tmp_path {
@@ -144,7 +144,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { true });
 
         // self.parallel_fst_from_ggcat_with_reader(path, batching, in_fst, get_physical())?;
-        let (input, tmp) = Self::read_input_file(path)?;
+        let (input, tmp) = Self::read_input_file(path, &self.cache_id()?, 0)?;
 
         self.parallel_parse_fst_ggcat_bytes_mmap(
             &input[..],
@@ -184,7 +184,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// * An error occurs writing the node into the memmapped cache files.
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
-    fn parallel_parse_ggcat_bytes_mmap(
+    fn parallel_parse_ggcat_bytes_mmap<D: AccumulatorAtomic>(
         &mut self,
         input: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -215,33 +215,43 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (r, false) => r,
         };
 
-        let mut offsets =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.offsets_file, offsets_size)?;
+        let d_fn = Self::init_cache_file_from_id_or_random(
+            &self.cache_id()?,
+            FileType::Helper(H::H),
+            Some(1),
+        )?;
+        let degrees = SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
-        // parse node degrees
+        // parse node degrees. a single node's degree exceeding `D`'s width is reported as an
+        // `AccumulatorOverflow`, never silently wrapped --- see `AccumulatorAtomic`'s
+        // documentation.
+        let overflowed = portable_atomic::AtomicBool::new(false);
         Self::parallel_edge_counter_parse_ggcat_bytes_mmap_with(
             input,
             {
-                let mut offsets = offsets.shared_slice();
+                let degrees = degrees.shared_slice();
+                let overflowed = &overflowed;
                 move |id, edge_count| {
-                    *offsets.get_mut(id) = edge_count;
+                    if degrees
+                        .get(id)
+                        .checked_store(edge_count, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        overflowed.store(true, Ordering::Relaxed);
+                    }
                 }
             },
             threads,
         )?;
-
-        // prefix sum degrees to get node offsets
-        let mut sum = 0;
-        for u in 0..node_count {
-            let degree = *offsets.get(u);
-            *offsets.get_mut(u) = sum;
-            sum += degree;
+        if overflowed.load(Ordering::Relaxed) {
+            return Err(super::AccumulatorOverflow.into());
         }
-        *offsets.get_mut(node_count) = sum;
-        offsets.flush()?;
 
-        let neighbors =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.neighbors_file, sum)?;
+        // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
+        let (_degrees_owner, offsets, sum) =
+            self.finalize_ix_offsets(degrees, offsets_size, None)?;
+
+        let neighbors = AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&self.edgelabel_file, sum)?;
         let nodelabels =
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
@@ -250,11 +260,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_no_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     move |node_id, neighbors_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node {node_id}");
                     }
                 },
@@ -264,13 +273,12 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_node_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     move |node_id, neighbors_slice, node_label| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node ");
                     }
                 },
@@ -281,15 +289,14 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_edge_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, edgelabels_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edgelabels slice for node");
                     }
                 },
@@ -300,17 +307,16 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_node_edge_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, node_label, edgelabels_slice| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edgelabels slice for node");
                     }
                 },
@@ -321,8 +327,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         }
 
         neighbors.flush_async()?;
-        drop(offsets);
         drop(neighbors);
+        drop(_degrees_owner);
+        std::fs::remove_file(&d_fn)?;
 
         std::fs::remove_file(&self.metalabel_filename)?;
 
@@ -333,9 +340,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // for batch_file in batches {
         //     let _ = std::fs::remove_file(batch_file);
         // }
-
-        self.graph_bytes = sum;
-        self.index_bytes = offsets_size;
 
         Ok(())
     }
@@ -365,7 +369,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// * An error occurs writing the node into the memmapped cache files.
     ///
     /// [`GraphCache`]: ./struct.GraphCache.html#
-    fn parallel_parse_with_fst_ggcat_bytes_mmap(
+    fn parallel_parse_with_fst_ggcat_bytes_mmap<D: AccumulatorAtomic>(
         &mut self,
         input: &[u8],
         in_fst: fn(usize) -> bool,
@@ -397,33 +401,43 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             (r, false) => r,
         };
 
-        let mut offsets =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.offsets_file, offsets_size)?;
+        let d_fn = Self::init_cache_file_from_id_or_random(
+            &self.cache_id()?,
+            FileType::Helper(H::H),
+            Some(1),
+        )?;
+        let degrees = SharedSliceMut::<D>::abst_mem_mut(&d_fn, offsets_size, true)?;
 
-        // parse node degrees
+        // parse node degrees. a single node's degree exceeding `D`'s width is reported as an
+        // `AccumulatorOverflow`, never silently wrapped --- see `AccumulatorAtomic`'s
+        // documentation.
+        let overflowed = portable_atomic::AtomicBool::new(false);
         Self::parallel_edge_counter_parse_ggcat_bytes_mmap_with(
             input,
             {
-                let mut offsets = offsets.shared_slice();
+                let degrees = degrees.shared_slice();
+                let overflowed = &overflowed;
                 move |id, edge_count| {
-                    *offsets.get_mut(id) = edge_count;
+                    if degrees
+                        .get(id)
+                        .checked_store(edge_count, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        overflowed.store(true, Ordering::Relaxed);
+                    }
                 }
             },
             threads,
         )?;
-
-        // prefix sum degrees to get node offsets
-        let mut sum = 0;
-        for u in 0..node_count {
-            let degree = *offsets.get(u);
-            *offsets.get_mut(u) = sum;
-            sum += degree;
+        if overflowed.load(Ordering::Relaxed) {
+            return Err(super::AccumulatorOverflow.into());
         }
-        *offsets.get_mut(node_count) = sum;
-        offsets.flush()?;
 
-        let neighbors =
-            AbstractedProceduralMemoryMut::<usize>::from_file(&self.neighbors_file, sum)?;
+        // prefix sum degrees to get node offsets, persisting them, Ix-width, into `self.offsets_file`
+        let (_degrees_owner, offsets, sum) =
+            self.finalize_ix_offsets(degrees, offsets_size, None)?;
+
+        let neighbors = AbstractedProceduralMemoryMut::<Ix>::from_file(&self.neighbors_file, sum)?;
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&self.edgelabel_file, sum)?;
         let nodelabels =
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
@@ -450,11 +464,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_meta_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     move |node_id, neighbors_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                     }
                 },
@@ -486,13 +499,12 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_node_meta_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     move |node_id, neighbors_slice, node_label| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                     }
                 },
@@ -525,15 +537,14 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_edge_meta_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, edgelabels_slice| {
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edge labels slice for node");
                     }
                 },
@@ -566,17 +577,16 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             Self::parallel_full_labels_parse_ggcat_bytes_mmap_with(
                 input,
                 {
-                    let offsets = offsets.shared_slice();
                     let mut neighbors = neighbors.shared_slice();
                     let mut nodelabels = nodelabels.shared_slice();
                     let mut edgelabels = edgelabels.shared_slice();
                     move |node_id, neighbors_slice, node_label, edgelabels_slice| {
                         *nodelabels.get_mut(node_id) = node_label;
                         neighbors
-                            .write_slice(*offsets.get(node_id), neighbors_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), neighbors_slice)
                             .expect("error failed to write neigh slice for node");
                         edgelabels
-                            .write_slice(*offsets.get(node_id), edgelabels_slice)
+                            .write_slice(D::widen(*offsets.get(node_id)), edgelabels_slice)
                             .expect("error failed to write edge labels slice for node");
                     }
                 },
@@ -608,6 +618,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             edgelabels.flush_async()?;
         }
 
+        drop(_degrees_owner);
+        std::fs::remove_file(&d_fn)?;
+
         // if graph cache was used to build a graph then the graph's fst holds meatlabel_filename
         // open, hence, it must be removed so that the new fst may be built
         std::fs::remove_file(&self.metalabel_filename)?;
@@ -633,8 +646,6 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         // Cleanup temp batch filenames file
         std::fs::remove_file(&h_fn)?;
 
-        self.graph_bytes = sum;
-        self.index_bytes = offsets_size;
         Ok(())
     }
 
@@ -719,5 +730,107 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         std::fs::remove_file(&h_fn)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::GraphCache;
+    use crate::graph::label::VoidLabel;
+    use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
+    use std::io::Write;
+
+    fn write_tiny_ggcat(path: &std::path::Path) {
+        let mut f = std::fs::File::create(path).expect("error creating ggcat fixture");
+        for (id, dest) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
+            writeln!(f, ">{id} 31 1 x:x:{dest}").unwrap();
+            writeln!(f, "ACGT").unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// Regression test for the `Ix`-generic cache pipeline: parsing the same GGCAT-format input
+    /// with both `usize` and `u32` as the index type must produce identical graphs (same
+    /// node/edge counts and neighbour lists), and the resulting cache's metadata must faithfully
+    /// reflect the narrower index width.
+    #[test]
+    fn ggcat_parser_round_trips_for_usize_and_u32_ix() {
+        let dir = unique_test_dir("ggcat_ix_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let path = dir.join("tiny.txt");
+        write_tiny_ggcat(&path);
+
+        let cache_usize = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(
+            &path,
+            Some(format!("ggcat_ix_test_usize_{run_tag}")),
+            None,
+            None,
+        )
+        .expect("usize ggcat parse should succeed");
+        let graph_usize = crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::init_from_cache(
+            cache_usize,
+            Some(1),
+        )
+        .expect("usize graph init should succeed");
+
+        let cache_u32 = GraphCache::<VoidLabel, VoidLabel, u32>::from_file(
+            &path,
+            Some(format!("ggcat_ix_test_u32_{run_tag}")),
+            None,
+            None,
+        )
+        .expect("u32 ggcat parse should succeed");
+        let graph_u32 =
+            crate::graph::DiGraph::<VoidLabel, VoidLabel, u32>::init_from_cache(cache_u32, Some(1))
+                .expect("u32 graph init should succeed");
+
+        assert_eq!(graph_usize.size(), graph_u32.size());
+        assert_eq!(graph_usize.width(), graph_u32.width());
+        for u in 0..graph_usize.size() {
+            let mut n_usize: Vec<usize> = graph_usize.neighbours(u).unwrap().collect();
+            let mut n_u32: Vec<usize> = graph_u32.neighbours(u).unwrap().collect();
+            n_usize.sort();
+            n_u32.sort();
+            assert_eq!(
+                n_usize, n_u32,
+                "node {u} neighbours differ between usize and u32 Ix"
+            );
+        }
+
+        let meta_u32 = graph_u32.metadata().expect("error reading u32 metadata");
+        assert_eq!(meta_u32.index_size, std::mem::size_of::<u32>());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Concurrent parses of the same compressed input (under different cache ids) used to share
+    /// the helper file its contents were decompressed into, corrupting each other: they must all
+    /// succeed, with identical graphs.
+    #[test]
+    fn concurrent_parses_of_the_same_compressed_input() {
+        let path = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ggcat/random_graph_9_5.lz4"
+        ));
+        let graphs: Vec<(usize, usize, Vec<usize>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        let (graph, _cache) =
+                            crate::graph::test_utils::open_fixture(path, Some(2)).unwrap();
+                        let neighbours = (0..graph.size())
+                            .flat_map(|u| graph.neighbours(u).unwrap())
+                            .collect();
+                        (graph.size(), graph.width(), neighbours)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(graphs[0].1 > 0);
+        assert!(graphs.iter().all(|g| *g == graphs[0]));
     }
 }

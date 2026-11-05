@@ -1,21 +1,24 @@
 use crate::graph;
 use crate::graph::*;
 use crate::shared_slice::*;
-use crate::utils::OneOrMany;
 
 use crossbeam::thread;
 use portable_atomic::{AtomicUsize, Ordering};
-use smallvec::SmallVec;
-use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
+use super::count::{TriangleCount, TriangleCounter};
+use super::directed::{DirectedAdjacency, DirectedTriangleType, DirectedTriangles};
 use super::triangles::Triangles;
+use super::{TriangleIndex, check_support_range};
 
-type ProceduralMemoryPKT = (
-    AbstractedProceduralMemoryMut<usize>,
-    AbstractedProceduralMemoryMut<usize>,
+/// Edges of a sub-level a thread claims at a time.
+const POP_CHUNK: usize = 64;
+
+type ProceduralMemoryPKT<Ix> = (
+    AbstractedProceduralMemoryMut<Ix>,
+    AbstractedProceduralMemoryMut<Ix>,
     AbstractedProceduralMemoryMut<bool>,
     AbstractedProceduralMemoryMut<bool>,
     AbstractedProceduralMemoryMut<bool>,
@@ -23,19 +26,46 @@ type ProceduralMemoryPKT = (
 
 /// For the computation of a [`GraphMemoryMap`] instance's k-truss decomposition as described in ["Shared-memory Graph Truss Decomposition"](https://doi.org/10.48550/arXiv.1707.02000) by Kamir H. and Madduri K.
 ///
+/// Trussness is stored as `Tx` integers (`u8` by default, see [`TriangleCount`]). For directed
+/// graphs (see [`new_directed`](Self::new_directed)), the decomposition is over the triangles
+/// of a [`DirectedTriangleType`].
+///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+/// [`TriangleCount`]: ../count/trait.TriangleCount.html#
+/// [`DirectedTriangleType`]: ../directed/enum.DirectedTriangleType.html#
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AlgoPKT<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
+pub struct AlgoPKT<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Tx: TriangleCount = u8,
+    Dir: Directedness = Undirected,
+> {
     /// Graph for which edge trussness is computed.
-    g: &'a GraphMemoryMap<N, E, Ix>,
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     /// Memmapped slice containing the trussness of each edge.
-    k_trusses: AbstractedProceduralMemoryMut<u8>,
+    k_trusses: AbstractedProceduralMemoryMut<Tx>,
     threads: usize,
+    /// The triangles' type, for directed graphs.
+    directed: Option<DirectedTriangleType>,
 }
+
+/// Cached file of a decomposition (of an undirected graph, or of a directed one's triangles of a
+/// given type).
+fn cache_file(directed: Option<DirectedTriangleType>) -> CacheFile {
+    match directed {
+        None => CacheFile::KTrussPKT,
+        Some(t) => CacheFile::KTrussPKTDirected(t),
+    }
+}
+
 #[allow(dead_code)]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     /// Performs the *PKT Alrgorithm*'s k-truss decomposition as described in ["Shared-memory Graph Truss Decomposition"](https://doi.org/10.48550/arXiv.1707.02000) by Kamir H. and Madduri K.
+    ///
+    /// Trussness is stored as `u8`s, see [`new_tx`](Self::new_tx) for other widths.
     ///
     /// # Arguments
     ///
@@ -43,12 +73,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut pkt = Self::new_no_compute(g, g.thread_num())?;
-        let proc_mem = pkt.init_cache_mem()?;
-
-        pkt.compute_with_proc_mem(proc_mem)?;
-
-        Ok(pkt)
+        Self::new_tx(g, g.thread_num())
     }
 
     /// Searches for a previously cached result, and if not found performs the *PKT Alrgorithm*'s k-truss decomposition as described in ["Shared-memory Graph Truss Decomposition"](https://doi.org/10.48550/arXiv.1707.02000) by Kamir H. and Madduri K.
@@ -61,17 +86,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     pub fn get_or_compute(
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let t_fn = g.build_cache_filename(CacheFile::KTrussPKT, None)?;
-        if Path::new(&t_fn).exists() {
-            if let Ok(k_trusses) = AbstractedProceduralMemoryMut::from_file_name(&t_fn) {
-                return Ok(Self {
-                    g,
-                    k_trusses,
-                    threads: g.thread_num(),
-                });
-            }
-        }
-        Self::new(g)
+        Self::get_or_compute_tx(g)
     }
 
     /// Performs the *PKT Alrgorithm*'s 'k-truss decomposition as described in ["Shared-memory Graph Truss Decomposition"](https://doi.org/10.48550/arXiv.1707.02000) by Kamir H. and Madduri K.
@@ -86,6 +101,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_tx(g, threads)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
+    AlgoPKT<'a, N, E, Ix, Tx>
+{
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition, storing trussness as `Tx` integers.
+    pub fn new_tx(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        threads: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut pkt = Self::new_no_compute(g, threads)?;
         let proc_mem = pkt.init_cache_mem()?;
 
@@ -94,43 +122,54 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         Ok(pkt)
     }
 
-    /// Returns the trussness of a given edge of a [`GraphMemoryMap`] instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `e_idx` --- the index of the edge whose trussness is to be returned.
-    ///
-    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn trussness(&self, e_idx: usize) -> u8 {
-        assert!(e_idx < self.g.width());
-        *self.k_trusses.get(e_idx)
+    /// Searches for a previously cached `Tx` result, computing it if not found.
+    pub fn get_or_compute_tx(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let t_fn = g.build_cache_filename(CacheFile::KTrussPKT, None)?;
+        if Path::new(&t_fn).exists() {
+            // a cache of another graph (version) or trussness width would have another length
+            if let Ok(k_trusses) = AbstractedProceduralMemoryMut::<Tx>::from_file_name(&t_fn)
+                && k_trusses.as_slice().len() == g.width()
+            {
+                return Ok(Self {
+                    g,
+                    k_trusses,
+                    threads: g.thread_num(),
+                    directed: None,
+                });
+            }
+        }
+        Self::new_tx(g, g.thread_num())
     }
 
-    /// Returns a slice containing the trussness of each edge of the [`GraphMemoryMap`] instance.
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition from precomputed `triangles` of `g`
+    /// (e.g. counted on a GPU, with [`Triangles::new_gpu`]), which are consumed: their counts are
+    /// used as working memory.
     ///
-    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-    pub fn k_trusses(&self) -> &[u8] {
-        self.k_trusses.as_slice()
-    }
-
-    /// Removes all cached files pertaining to this algorithm's execution's results.
-    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let this = ManuallyDrop::new(self);
-        let out_fn = this.g.build_cache_filename(CacheFile::KTrussPKT, None)?;
-        std::fs::remove_file(out_fn)?;
-        Ok(())
+    /// [`Triangles::new_gpu`]: ../triangles/struct.Triangles.html#method.new_gpu
+    pub fn new_with_triangles(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        triangles: Triangles<'a, N, E, Ix, Tx>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let pkt = Self::new_no_compute(g, g.thread_num())?;
+        let proc_mem = pkt.init_cache_mem()?;
+        pkt.compute_with_triangles(proc_mem, triangles)?;
+        Ok(pkt)
     }
 }
 
 #[allow(dead_code)]
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
+    AlgoPKT<'a, N, E, Ix, Tx>
+{
     #[cfg(feature = "bench")]
     #[inline(always)]
     pub fn new_no_compute(
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_no_compute_impl(g, threads)
+        Self::new_no_compute_impl(g, threads, None)
     }
 
     #[cfg(not(feature = "bench"))]
@@ -139,18 +178,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_no_compute_impl(g, threads)
+        Self::new_no_compute_impl(g, threads, None)
     }
 
     #[cfg(feature = "bench")]
     #[inline(always)]
-    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT, Box<dyn std::error::Error>> {
+    pub fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
     #[cfg(not(feature = "bench"))]
     #[inline(always)]
-    pub(crate) fn init_cache_mem(&self) -> Result<ProceduralMemoryPKT, Box<dyn std::error::Error>> {
+    pub(crate) fn init_cache_mem(
+        &self,
+    ) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
         self.init_cache_mem_impl()
     }
 
@@ -158,7 +199,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     #[inline(always)]
     pub fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryPKT,
+        proc_mem: ProceduralMemoryPKT<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -167,7 +208,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
     #[inline(always)]
     pub(crate) fn compute_with_proc_mem(
         &mut self,
-        proc_mem: ProceduralMemoryPKT,
+        proc_mem: ProceduralMemoryPKT<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.compute_with_proc_mem_impl(proc_mem)
     }
@@ -177,65 +218,137 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         self.g.width()
     }
 
-    fn new_no_compute_impl(
-        g: &'a GraphMemoryMap<N, E, Ix>,
-        threads: usize,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let threads = threads.max(1);
-        let out_fn = g.build_cache_filename(CacheFile::KTrussPKT, None)?;
-        let k_trusses = SharedSliceMut::<u8>::abst_mem_mut(&out_fn, g.width(), true)?;
-        Ok(Self {
-            g,
-            k_trusses,
-            threads,
-        })
-    }
-
-    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryPKT, Box<dyn std::error::Error>> {
-        let edge_count = self.g.width();
-
-        let c_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(0))?;
-        let n_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(1))?;
-        let p_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(2))?;
-        let ic_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(3))?;
-        let in_fn = self.g.build_cache_filename(CacheFile::KTrussPKT, Some(4))?;
-
-        let curr = SharedSliceMut::<usize>::abst_mem_mut(&c_fn, edge_count, true)?;
-        let next = SharedSliceMut::<usize>::abst_mem_mut(&n_fn, edge_count, true)?;
-        let processed = SharedSliceMut::<bool>::abst_mem_mut(&p_fn, edge_count, true)?;
-        let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&ic_fn, edge_count, true)?;
-        let in_next = SharedSliceMut::<bool>::abst_mem_mut(&in_fn, edge_count, true)?;
-
+    fn init_cache_mem_impl(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
+        let mem = self.scratch_mem()?;
         // pre-initialize the memmapped files if they don't exist
         let _edge_reciprocal = self.g.edge_reciprocal()?;
         let _edge_out = self.g.edge_over()?;
-
-        Ok((curr, next, processed, in_curr, in_next))
+        Ok(mem)
     }
 
     fn compute_with_proc_mem_impl(
         &self,
-        proc_mem: ProceduralMemoryPKT,
+        proc_mem: ProceduralMemoryPKT<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let node_count = self.g.size();
+        self.compute_with_triangles(proc_mem, Triangles::new_tx(self.g)?)
+    }
+
+    /// Decomposes the (undirected) graph from its `triangles`, whose counts are used (and
+    /// consumed) as working memory.
+    fn compute_with_triangles(
+        &self,
+        proc_mem: ProceduralMemoryPKT<Ix>,
+        mut triangles: Triangles<'a, N, E, Ix, Tx>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if triangles.all_triangles().len() != self.g.width() {
+            return Err(format!(
+                "error expected the triangles of a graph with {} edges, got {}",
+                self.g.width(),
+                triangles.all_triangles().len()
+            )
+            .into());
+        }
+        let edge_reciprocal = self.g.edge_reciprocal()?;
+        let index = TriangleIndex::Undirected {
+            offsets: SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size()),
+            neighbours: SharedSlice::<Ix>::new(self.g.neighbours_ptr(), self.g.width()),
+            reciprocal: edge_reciprocal.shared_slice(),
+        };
+        self.peel(proc_mem, triangles.triangles_shares_slice(), &index)?;
+        triangles.drop_cache()?;
+        Ok(())
+    }
+}
+
+/// Shared by the decompositions of undirected graphs' triangles and directed graphs'.
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir: Directedness>
+    AlgoPKT<'a, N, E, Ix, Tx, Dir>
+{
+    /// The working memory of a decomposition.
+    fn scratch_mem(&self) -> Result<ProceduralMemoryPKT<Ix>, Box<dyn std::error::Error>> {
+        let edge_count = self.g.width();
+        let file = |seq| {
+            self.g
+                .build_cache_filename(cache_file(self.directed), Some(seq))
+        };
+
+        let curr = SharedSliceMut::<Ix>::abst_mem_mut(&file(0)?, edge_count, true)?;
+        let next = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, edge_count, true)?;
+        let processed = SharedSliceMut::<bool>::abst_mem_mut(&file(2)?, edge_count, true)?;
+        let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&file(3)?, edge_count, true)?;
+        let in_next = SharedSliceMut::<bool>::abst_mem_mut(&file(4)?, edge_count, true)?;
+
+        Ok((curr, next, processed, in_curr, in_next))
+    }
+
+    /// Returns the trussness of a given edge of a [`GraphMemoryMap`] instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `e_idx` --- the index of the edge whose trussness is to be returned.
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    pub fn trussness(&self, e_idx: usize) -> Tx {
+        assert!(e_idx < self.g.width());
+        *self.k_trusses.get(e_idx)
+    }
+    /// Returns a slice containing the trussness of each edge of the [`GraphMemoryMap`] instance.
+    ///
+    /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
+    pub fn k_trusses(&self) -> &[Tx] {
+        self.k_trusses.as_slice()
+    }
+    /// The triangles' type, for decompositions of directed graphs.
+    pub fn triangle_type(&self) -> Option<DirectedTriangleType> {
+        self.directed
+    }
+    /// Removes all cached files pertaining to this algorithm's execution's results.
+    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let this = ManuallyDrop::new(self);
+        let out_fn = this
+            .g
+            .build_cache_filename(cache_file(this.directed), None)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
+        Ok(())
+    }
+    fn new_no_compute_impl(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        threads: usize,
+        directed: Option<DirectedTriangleType>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let threads = threads.max(1);
+        let out_fn = g.build_cache_filename(cache_file(directed), None)?;
+        let k_trusses = SharedSliceMut::<Tx>::abst_mem_mut(&out_fn, g.width(), true)?;
+        Ok(Self {
+            g,
+            k_trusses,
+            threads,
+            directed,
+        })
+    }
+    /// ParTriangle-AM4 --- adjusted for multigraphs and directed triangle types: peels edges by
+    /// increasing support `s` (their triangle counts, consumed), storing their trussness.
+    fn peel(
+        &self,
+        proc_mem: ProceduralMemoryPKT<Ix>,
+        s: SharedSliceMut<Tx::Atomic>,
+        index: &TriangleIndex<'_, 'a, N, E, Ix>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let edge_count = self.g.width();
 
         let threads = self.threads;
         let edge_load = edge_count.div_ceil(threads);
 
-        let index_ptr = SharedSlice::<usize>::new(self.g.offsets_ptr(), self.g.offsets_size());
-        let neighbours_ptr = SharedSlice::<usize>::new(self.g.neighbours_ptr(), edge_count);
+        let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
 
         // Shared arrays
         let (curr, next, processed, in_curr, in_next) = proc_mem;
-        let edge_reciprocal = self.g.edge_reciprocal()?;
 
         // Thread syncronization
         let synchronize = Arc::new(Barrier::new(threads));
 
         thread::scope(|scope| {
-            let edge_load = node_count.div_ceil(threads);
-
             for tid in 0..threads {
                 // eid is unnecessary as graph + index alwready do the job
                 let mut curr = curr.shared_slice();
@@ -249,8 +362,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                 scope.spawn(move |_| {
                     // initialize edge_out, x, curr, next, in_curr, in_next & processed
                     for edge_offset in begin..end {
-                        *curr.get_mut(edge_offset) = 0;
-                        *next.get_mut(edge_offset) = 0;
+                        *curr.get_mut(edge_offset) = Ix::new(0);
+                        *next.get_mut(edge_offset) = Ix::new(0);
                         *in_curr.get_mut(edge_offset) = false;
                         *in_next.get_mut(edge_offset) = false;
                         *processed.get_mut(edge_offset) = false;
@@ -260,14 +373,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
 
-        // ParTriangle-AM4 --- adjusted for multigraphs
-        let mut triangles = Triangles::new(self.g)?;
-        let s = triangles.triangles_shares_slice();
-        let mut l: u8 = 1;
+        check_support_range::<Tx>(s.as_slice())?;
+        // with only some roles selected, an edge without triangles counting towards its support
+        // may still be in triangles counting towards others': it's peeled (at level 0) like any
+        // other edge, rather than just discarded
+        let peel_unsupported = !index.symmetric();
+        let mut l: usize = if peel_unsupported { 0 } else { 1 };
         let buff_size = 4096;
         let total_duds = Arc::new(AtomicUsize::new(0));
-        let curr = SharedQueueMut::from_shared_slice(curr.shared_slice());
-        let next = SharedQueueMut::from_shared_slice(next.shared_slice());
+        let curr = SharedQueueMut::<Ix>::from_shared_slice(curr.shared_slice());
+        let next = SharedQueueMut::<Ix>::from_shared_slice(next.shared_slice());
 
         thread::scope(|scope| {
             let mut res = Vec::new();
@@ -277,7 +392,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                 let s = s.clone();
                 let mut curr = curr.clone();
                 let mut next = next.clone();
-                let er = edge_reciprocal.shared_slice();
                 let mut in_curr = in_curr.shared_slice();
                 let mut in_next = in_next.shared_slice();
                 let mut processed = processed.shared_slice();
@@ -290,14 +404,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                 let end = std::cmp::min(begin + edge_load, edge_count);
 
                 res.push(scope.spawn(
-                    move |_| -> Result<Box<[usize]>, Box<dyn std::error::Error + Send + Sync>> {
-                        let mut res = vec![0usize; u8::MAX as usize];
-                        let mut buff = vec![0; buff_size];
+                    move |_| -> Result<Vec<usize>, Box<dyn std::error::Error + Send + Sync>> {
+                        // edges per support level (for verbose output)
+                        let mut res = vec![0usize; 1];
+                        let mut buff = vec![Ix::new(0); buff_size];
                         let mut i = 0;
 
                         // Remove 0-triangle edges
                         for e in begin..end {
-                            if s.get(e).load(Ordering::Relaxed) == 0 {
+                            if s.get(e).count() == 0
+                                && (!peel_unsupported || !index.may_be_in_triangle(e))
+                            {
                                 *processed.get_mut(e) = true;
                                 res[0] += 1;
                                 i += 1;
@@ -319,12 +436,33 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                             }
                         };
 
-                        // println!("triangles removed");
-                        let mut neighbours = HashMap::<usize, OneOrMany<usize>>::new();
+                        // decrements edge `$x`'s support (above `l`), moving it to the next
+                        // sub-level if it reaches `l`
+                        macro_rules! decrement {
+                            ($x:expr) => {{
+                                let x = $x;
+                                let prev = s.get(x).sub_count(1);
+                                if prev == l + 1 {
+                                    *in_next.get_mut(x) = true;
+                                    buff[i] = Ix::new(x);
+                                    i += 1;
+                                    if i == buff_size {
+                                        next.push_slice(&buff[..]);
+                                        i = 0;
+                                    }
+                                }
+                                if prev <= l {
+                                    s.get(x).set_count(l);
+                                }
+                            }};
+                        }
+
+                        let mut closing = Vec::new();
                         while todo > 0 {
                             for e in begin..end {
-                                if s.get(e).load(Ordering::Relaxed) == l {
-                                    buff[i] = e;
+                                // (edges without support set aside up front are already processed)
+                                if s.get(e).count() == l && !*processed.get(e) {
+                                    buff[i] = Ix::new(e);
                                     *in_curr.get_mut(e) = true;
                                     i += 1;
                                 }
@@ -339,7 +477,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                             }
                             synchronize.wait();
 
-                            // println!("new cicle initialized {} {:?}", todo, curr.ptr);
                             while !curr.is_empty() {
                                 todo = match todo.overflowing_sub(curr.len()) {
                                     (r, false) => r,
@@ -363,135 +500,56 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                 let begin = std::cmp::min(tid * thread_load, curr.len());
                                 let end = std::cmp::min(begin + thread_load, curr.len());
 
-                                while let Some(u_v) = curr.pop() {
-                                    let u = *neighbours_ptr.get(*er.get(u_v));
-                                    let v = *neighbours_ptr.get(u_v);
+                                // edges are claimed in chunks: one contended update per chunk
+                                while let Some(chunk) = curr.pop_chunk(POP_CHUNK) {
+                                    for u_v in chunk {
+                                        let u_v = u_v.index();
+                                        let u = index.source(u_v);
+                                        let v = neighbours_ptr.get(u_v).index();
 
-                                    let edges_start = *index_ptr.get(u);
-                                    let edges_stop = *index_ptr.get(u + 1);
-
-                                    // mark u neighbours
-                                    for u_w in edges_start..edges_stop {
-                                        let w = *neighbours_ptr.get(u_w);
-                                        if w != u && w != v {
-                                            match neighbours.entry(w) {
-                                                std::collections::hash_map::Entry::Vacant(e) => {
-                                                    e.insert(OneOrMany::One(u_w));
-                                                }
-                                                std::collections::hash_map::Entry::Occupied(
-                                                    mut e,
-                                                ) => match e.get_mut() {
-                                                    OneOrMany::One(prev_u_w) => {
-                                                        let mut u_ws: SmallVec<[usize; 4]> =
-                                                            SmallVec::new();
-                                                        u_ws.push(*prev_u_w);
-                                                        u_ws.push(u_w);
-                                                        *e.get_mut() = OneOrMany::Many(u_ws);
-                                                    }
-                                                    OneOrMany::Many(u_ws) => u_ws.push(u_w),
-                                                },
-                                            }
-                                        }
-                                    }
-
-                                    for v_w in *index_ptr.get(v)..*index_ptr.get(v + 1) {
-                                        let w = *neighbours_ptr.get(v_w);
-                                        let u_ws = match neighbours.get(&w) {
-                                            Some(i) => match i {
-                                                OneOrMany::One(u_w) => Box::new([*u_w]),
-                                                OneOrMany::Many(u_ws) => {
-                                                    u_ws.clone().into_boxed_slice()
-                                                }
-                                            },
-                                            None => Box::new([]),
-                                        };
-                                        for u_w in u_ws {
-                                            let w_u = *er.get(u_w);
-                                            if *processed.get(v_w) || *processed.get(w_u) {
+                                        index.closing(u, v, &mut closing);
+                                        for c in closing.iter() {
+                                            let (f, g) = (c.f, c.g);
+                                            if *processed.get(f) || *processed.get(g) {
                                                 continue;
                                             }
-
-                                            if s.get(v_w).load(Ordering::Relaxed) > l
-                                                && s.get(w_u).load(Ordering::Relaxed) > l
+                                            // the triangle's support is taken from each of its other
+                                            // edges (whose role in it counts) still above `l` once:
+                                            // by `u -> v` unless the third edge is also in this
+                                            // sub-level, and lower (it then takes it itself)
+                                            if c.f_counts
+                                                && s.get(f).count() > l
+                                                && (u_v < g || !*in_curr.get(g))
                                             {
-                                                let prev_l_v_w =
-                                                    s.get(v_w).fetch_sub(1, Ordering::Relaxed);
-                                                if prev_l_v_w == l + 1 {
-                                                    *in_next.get_mut(v_w) = true;
-                                                    buff[i] = v_w;
-                                                    i += 1;
-                                                    if i == buff_size {
-                                                        next.push_slice(&buff[..]);
-                                                        i = 0;
-                                                    }
-                                                }
-                                                if prev_l_v_w <= l {
-                                                    s.get(v_w).store(l, Ordering::Relaxed);
-                                                }
-                                                let prev_l_w_u =
-                                                    s.get(w_u).fetch_sub(1, Ordering::Relaxed);
-                                                if prev_l_w_u == l + 1 {
-                                                    *in_next.get_mut(w_u) = true;
-                                                    buff[i] = w_u;
-                                                    i += 1;
-                                                    if i == buff_size {
-                                                        next.push_slice(&buff[..]);
-                                                        i = 0;
-                                                    }
-                                                }
-                                                if prev_l_w_u <= l {
-                                                    s.get(w_u).store(l, Ordering::Relaxed);
-                                                }
-                                            } else if s.get(v_w).load(Ordering::Relaxed) > l
-                                                && (u_v < w_u || !*in_curr.get(w_u))
+                                                decrement!(f);
+                                            }
+                                            if c.g_counts
+                                                && s.get(g).count() > l
+                                                && (u_v < f || !*in_curr.get(f))
                                             {
-                                                let prev_l_v_w =
-                                                    s.get(v_w).fetch_sub(1, Ordering::Relaxed);
-                                                if prev_l_v_w == l + 1 {
-                                                    *in_next.get_mut(v_w) = true;
-                                                    buff[i] = v_w;
-                                                    i += 1;
-                                                    if i == buff_size {
-                                                        next.push_slice(&buff[..]);
-                                                        i = 0;
-                                                    }
-                                                }
-                                                if prev_l_v_w <= l {
-                                                    s.get(v_w).store(l, Ordering::Relaxed);
-                                                }
-                                            } else if s.get(w_u).load(Ordering::Relaxed) > l
-                                                && (u_v < v_w || !*in_curr.get(v_w))
-                                            {
-                                                let prev_l_w_u =
-                                                    s.get(w_u).fetch_sub(1, Ordering::Relaxed);
-                                                if prev_l_w_u == l + 1 {
-                                                    *in_next.get_mut(w_u) = true;
-                                                    buff[i] = w_u;
-                                                    i += 1;
-                                                    if i == buff_size {
-                                                        next.push_slice(&buff[..]);
-                                                        i = 0;
-                                                    }
-                                                }
-                                                if prev_l_w_u <= l {
-                                                    s.get(w_u).store(l, Ordering::Relaxed);
-                                                }
+                                                decrement!(g);
                                             }
                                         }
                                     }
-
-                                    neighbours.clear();
                                 }
                                 if i > 0 {
                                     next.push_slice(&buff[0..i]);
                                     i = 0;
                                 }
+
+                                // the sub-level's edges are only marked processed once every thread
+                                // is done with them: until then, triangles between them must still be
+                                // seen (and counted once, by the `in_curr` tie-break above)
+                                synchronize.wait();
+
+                                if res.len() <= l {
+                                    res.resize(l + 1, 0);
+                                }
                                 for e_idx in begin..end {
-                                    let edge = *to_process.get(e_idx);
+                                    let edge = to_process.get(e_idx).index();
                                     *processed.get_mut(edge) = true;
-                                    *in_curr.get_mut(e_idx) = false;
-                                    // println
-                                    res[l as usize] += 1;
+                                    *in_curr.get_mut(edge) = false;
+                                    res[l] += 1;
                                 }
 
                                 synchronize.wait();
@@ -505,30 +563,22 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                                 synchronize.wait();
                                 synchronize.wait();
                             }
-                            l = match l.overflowing_add(1) {
-                                (r, false) => r,
-                                _ => {
-                                    return Err(format!(
-                                        "error overflow when adding to l ({l} - 1)"
-                                    )
-                                    .into());
-                                }
-                            };
+                            l += 1;
                             synchronize.wait();
                         }
 
                         synchronize.wait();
 
                         // by definition any non-trivial subgraph is at least a 2-truss: other
-                        // values go up from there.
+                        // values go up from there (supports were checked to fit `Tx - 2`).
                         for e in begin..end {
-                            *trussness.get_mut(e) = s.get(e).load(Ordering::Relaxed) + 2;
+                            *trussness.get_mut(e) = Tx::from_usize(s.get(e).count() + 2);
                         }
-                        Ok(res.into_boxed_slice())
+                        Ok(res)
                     },
                 ));
             }
-            let joined_res: Vec<Box<[usize]>> = res
+            let joined_res: Vec<Vec<usize>> = res
                 .into_iter()
                 .map(|v| v.join().expect("error thread panicked").expect("error"))
                 .collect();
@@ -536,37 +586,139 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix> {
                 std::env::var("BRUIJNX_VERBOSE").unwrap_or_else(|_| "0".to_string());
             let verbose: bool = env_verbose_val == "1";
             if verbose {
-                let mut r = vec![0usize; u8::MAX as usize];
-                for i in 0..u8::MAX as usize - 2 {
-                    for v in joined_res.clone() {
-                        r[i + 2] += v[i];
+                // edges per trussness (support + 2)
+                let levels = joined_res.iter().map(|v| v.len()).max().unwrap_or(0);
+                let mut r = vec![0usize; levels + 2];
+                for v in joined_res.iter() {
+                    for (support, count) in v.iter().enumerate() {
+                        r[support + 2] += count;
                     }
                 }
-
-                let mut max = 0;
-                r.iter().enumerate().for_each(|(i, v)| {
-                    if *v != 0 && i > max {
-                        max = i;
-                    }
-                });
-                r.resize(max + 1, 0);
                 println!("k-trussness {:?}", r);
             }
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
 
+        // cleanup cache (curr, next, processed, in_curr and in_next)
+        self.g.remove_tmp_files(cache_file(self.directed), 0..5)?;
+
+        Ok(())
+    }
+}
+
+/// Decompositions of a directed graph's triangles of a given type.
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> AlgoPKT<'a, N, E, Ix, u8, Directed> {
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph, over its
+    /// triangles of type `triangle_type` (an edge is in the k-truss if it's in at least `k - 2`
+    /// triangles, in a selected role, of the k-truss). Trussness is stored as `u8`s, see
+    /// [`new_directed_tx`](Self::new_directed_tx) for other widths.
+    pub fn new_directed(
+        g: &'a DiGraph<N, E, Ix>,
+        triangle_type: DirectedTriangleType,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_directed_tx(g, triangle_type, g.thread_num())
+    }
+}
+
+#[allow(dead_code)]
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
+    AlgoPKT<'a, N, E, Ix, Tx, Directed>
+{
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph, over its
+    /// triangles of type `triangle_type`, storing trussness as `Tx` integers.
+    pub fn new_directed_tx(
+        g: &'a DiGraph<N, E, Ix>,
+        triangle_type: DirectedTriangleType,
+        threads: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // the merged adjacency serves both counting and peeling
+        let adjacency = DirectedAdjacency::build(g, threads)?;
+        let result = (|| {
+            // with only some roles selected, edges without support are peeled too, but only those
+            // in some triangle can matter
+            let in_triangle = match triangle_type.symmetric() {
+                true => None,
+                false => Some(adjacency.in_triangle_flags()?),
+            };
+            let triangles = DirectedTriangles::<N, E, Ix, Tx>::new_with_adjacency(
+                g,
+                triangle_type,
+                &adjacency,
+                in_triangle.as_ref().map(|f| f.shared_slice()),
+            )?;
+            let pkt = Self::new_no_compute_impl(g, threads, Some(triangle_type))?;
+            let proc_mem = pkt.scratch_mem()?;
+            pkt.compute_directed_with_triangles(
+                proc_mem,
+                triangles,
+                Some((&adjacency, in_triangle.as_ref().map(|f| f.shared_slice()))),
+            )?;
+            Ok(pkt)
+        })();
+        adjacency.cleanup()?;
+        result
+    }
+    /// Performs the *PKT Alrgorithm*'s k-truss decomposition of a directed graph from its
+    /// precomputed `triangles` (of their type), which are consumed: their counts are used as
+    /// working memory.
+    pub fn new_directed_with_triangles(
+        g: &'a DiGraph<N, E, Ix>,
+        triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let pkt = Self::new_no_compute_impl(g, g.thread_num(), Some(triangles.triangle_type()))?;
+        let proc_mem = pkt.scratch_mem()?;
+        pkt.compute_directed_with_triangles(proc_mem, triangles, None)?;
+        Ok(pkt)
+    }
+    /// Decomposes the directed graph from its `triangles`, whose counts are used (and consumed)
+    /// as working memory.
+    fn compute_directed_with_triangles(
+        &self,
+        proc_mem: ProceduralMemoryPKT<Ix>,
+        mut triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
+        adjacency: Option<(
+            &DirectedAdjacency<'a, N, E, Ix>,
+            Option<SharedSliceMut<portable_atomic::AtomicBool>>,
+        )>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if triangles.all_triangles().len() != self.g.width() {
+            return Err(format!(
+                "error expected the triangles of a graph with {} edges, got {}",
+                self.g.width(),
+                triangles.all_triangles().len()
+            )
+            .into());
+        }
+        // the caller's merged adjacency, or one built (and removed) here
+        let built = match adjacency {
+            Some(_) => None,
+            None => Some(DirectedAdjacency::build(self.g, self.threads)?),
+        };
+        let (adjacency, in_triangle) = match (adjacency, built.as_ref()) {
+            (Some((adjacency, in_triangle)), _) => (adjacency, in_triangle),
+            (None, Some(built)) => (built, None),
+            (None, None) => return Err("error no merged adjacency".into()),
+        };
+        let index = TriangleIndex::Directed {
+            adjacency,
+            offsets: SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size()),
+            roles: triangles.triangle_type().roles(),
+            in_triangle,
+        };
+        let result = self.peel(proc_mem, triangles.triangles_shares_slice(), &index);
+        if let Some(built) = built {
+            built.cleanup()?;
+        }
+        result?;
         triangles.drop_cache()?;
-
-        // cleanup cache
-        self.g.cleanup_cache(CacheFile::KTrussPKT)?;
-
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{k_truss::verify_k_trusses, test_common::get_or_init_dataset_cache_entry};
+    use crate::k_truss::verify_k_trusses;
 
     use super::*;
     use paste::paste;
@@ -586,35 +738,33 @@ mod test {
     }
 
     fn generic_test<P: AsRef<Path>>(path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let graph = GraphMemoryMap::init_from_cache(
-            get_or_init_dataset_cache_entry(path.as_ref())?,
-            Some(16),
-        )?;
+        // a private copy: tests on the same fixture may run concurrently
+        let (graph, _cache) = crate::graph::test_utils::open_fixture(path.as_ref(), Some(16))?;
         let pkt_k_trusses = AlgoPKT::new(&graph)?;
 
-        verify_k_trusses(&graph, pkt_k_trusses.k_trusses)
+        verify_k_trusses(&graph, pkt_k_trusses.k_trusses())
     }
 
     // generate test cases from dataset
     graph_tests! {
-        ggcat_1_5 => "../ggcat/graphs/random_graph_1_5.lz4",
-        ggcat_2_5 => "../ggcat/graphs/random_graph_2_5.lz4",
-        ggcat_3_5 => "../ggcat/graphs/random_graph_3_5.lz4",
-        ggcat_4_5 => "../ggcat/graphs/random_graph_4_5.lz4",
-        ggcat_5_5 => "../ggcat/graphs/random_graph_5_5.lz4",
-        ggcat_6_5 => "../ggcat/graphs/random_graph_6_5.lz4",
-        ggcat_7_5 => "../ggcat/graphs/random_graph_7_5.lz4",
-        ggcat_8_5 => "../ggcat/graphs/random_graph_8_5.lz4",
-        // ggcat_9_5 => "../ggcat/graphs/random_graph_9_5.lz4",
-        // ggcat_1_10 => "../ggcat/graphs/random_graph_1_10.lz4",
-        // ggcat_2_10 => "../ggcat/graphs/random_graph_2_10.lz4",
-        // ggcat_3_10 => "../ggcat/graphs/random_graph_3_10.lz4",
-        // ggcat_4_10 => "../ggcat/graphs/random_graph_4_10.lz4",
-        // ggcat_5_10 => "../ggcat/graphs/random_graph_5_10.lz4",
-        // ggcat_6_10 => "../ggcat/graphs/random_graph_6_10.lz4",
-        // ggcat_7_10 => "../ggcat/graphs/random_graph_7_10.lz4",
-        // ggcat_8_10 => "../ggcat/graphs/random_graph_8_10.lz4",
-        // ggcat_9_10 => "../ggcat/graphs/random_graph_9_10.lz4",
+        ggcat_1_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_1_5.lz4"),
+        ggcat_2_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_2_5.lz4"),
+        ggcat_3_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_3_5.lz4"),
+        ggcat_4_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_4_5.lz4"),
+        ggcat_5_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_5_5.lz4"),
+        ggcat_6_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_6_5.lz4"),
+        ggcat_7_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_7_5.lz4"),
+        ggcat_8_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_8_5.lz4"),
+        // ggcat_9_5 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_9_5.lz4"),
+        // ggcat_1_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_1_10.lz4"),
+        // ggcat_2_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_2_10.lz4"),
+        // ggcat_3_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_3_10.lz4"),
+        // ggcat_4_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_4_10.lz4"),
+        // ggcat_5_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_5_10.lz4"),
+        // ggcat_6_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_6_10.lz4"),
+        // ggcat_7_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_7_10.lz4"),
+        // ggcat_8_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_8_10.lz4"),
+        // ggcat_9_10 => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ggcat/random_graph_9_10.lz4"),
         // ggcat_8_15 => "../ggcat/graphs/random_graph_8_15.lz4",
         // ggcat_9_15 => "../ggcat/graphs/random_graph_9_15.lz4",
         // … add the rest

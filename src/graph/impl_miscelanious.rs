@@ -1,7 +1,13 @@
 use super::GraphMemoryMap;
 
 #[allow(dead_code)]
-impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphMemoryMap<N, E, Ix> {
+impl<
+    N: crate::graph::N,
+    E: crate::graph::E,
+    Ix: crate::graph::IndexType,
+    Dir: crate::graph::Directedness,
+> GraphMemoryMap<N, E, Ix, Dir>
+{
     #[inline(always)]
     pub(super) fn is_neighbour_impl(&self, u: usize, v: usize) -> Option<usize> {
         assert!(
@@ -11,8 +17,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
             self.size()
         );
 
-        let mut floor = unsafe { (self.index.as_ptr() as *const usize).add(u).read() };
-        let mut ceil = unsafe { (self.index.as_ptr() as *const usize).add(u + 1).read() };
+        let mut floor = unsafe { (self.index.as_ptr() as *const Ix).add(u).read().index() };
+        let mut ceil = unsafe { (self.index.as_ptr() as *const Ix).add(u + 1).read().index() };
         // binary search on neighbours w, where w < v
         loop {
             // may happen if u + 1 overflows
@@ -20,7 +26,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 return None;
             }
             let m = floor + (ceil - floor) / 2;
-            let dest = unsafe { (self.graph.as_ptr() as *const usize).add(m).read() };
+            let dest = unsafe { (self.graph.as_ptr() as *const Ix).add(m).read().index() };
             match dest.cmp(&v) {
                 std::cmp::Ordering::Equal => break Some(m),
                 std::cmp::Ordering::Greater => ceil = m - 1,

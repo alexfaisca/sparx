@@ -1,7 +1,7 @@
 use crate::{
     centralities::hyper_ball::HyperBall8,
     communities::{gve_louvain::AlgoGVELouvain, hk_relax::HKRelax},
-    k_core::liu_et_al::AlgoLiuEtAl,
+    k_core::{batagelj_zaversnik::AlgoBatageljZaversnik, liu_et_al::AlgoLiuEtAl},
     k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT},
     trails::hierholzer::AlgoHierholzer,
 };
@@ -19,8 +19,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         AlgoLiuEtAl::new(self)
     }
     /// Performs k-core decomposition on the graph using Batagelj & Zavernik's algorithm.
-    pub fn k_core_bz(&self) -> Result<AlgoBurkhardtEtAl<'_, N, E, Ix>, Box<dyn std::error::Error>> {
-        AlgoBurkhardtEtAl::new(self)
+    pub fn k_core_bz(
+        &self,
+    ) -> Result<AlgoBatageljZaversnik<'_, N, E, Ix>, Box<dyn std::error::Error>> {
+        AlgoBatageljZaversnik::new(self)
     }
     /// Performs k-core decomposition on the graph using Liu et al's algorithm.
     pub fn k_core_lea(&self) -> Result<AlgoLiuEtAl<'_, N, E, Ix>, Box<dyn std::error::Error>> {
@@ -31,7 +33,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         AlgoBurkhardtEtAl::new(self)
     }
     /// Performs k-truss decomposition on the graph using Burkhardt et al's algorithm.
-    pub fn k_truss_bea(&self) -> Result<AlgoBurkhardtEtAl<'_, N, E, Ix>, Box<dyn std::error::Error>> {
+    pub fn k_truss_bea(
+        &self,
+    ) -> Result<AlgoBurkhardtEtAl<'_, N, E, Ix>, Box<dyn std::error::Error>> {
         AlgoBurkhardtEtAl::new(self)
     }
     /// Performs k-truss decomposition on the graph using the Parallel K-Truss algorithm.
