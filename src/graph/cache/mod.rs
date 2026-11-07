@@ -1656,6 +1656,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             CacheFile::ExactLin => FileType::ExactLinCentrality(H::H),
             CacheFile::ConnectedComponents => FileType::ConnectedComponents(H::H),
             CacheFile::StronglyConnectedComponents => FileType::StronglyConnectedComponents(H::H),
+            CacheFile::Biconnectivity => FileType::Biconnectivity(H::H),
             CacheFile::KCoreDirected(d) => FileType::KCoreDirected(H::H, d),
             CacheFile::DirectedClusteringCoefficient => {
                 FileType::DirectedClusteringCoefficient(H::H)

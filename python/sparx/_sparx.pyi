@@ -39,6 +39,14 @@ class Components(TypedDict):
     count: int
     sizes: npt.NDArray[np.int64]
 
+class Biconnectivity(TypedDict):
+    components: npt.NDArray[np.int64]
+    heads: npt.NDArray[np.int64]
+    articulation_points: npt.NDArray[np.int64]
+    bridges: npt.NDArray[np.int64]
+    two_edge_components: npt.NDArray[np.int64]
+    two_edge_count: int
+
 class Graph:
     """An undirected graph: loading a directed dataset raises `RuntimeError` (load it as a `DiGraph`)."""
 
@@ -101,6 +109,8 @@ class Graph:
         max_iter: int = 100,
         engine: Literal["auto", "pull", "partition"] = "auto",
     ) -> npt.NDArray[np.float64]: ...
+    def biconnectivity(self) -> Biconnectivity: ...
+    def biconnected_components(self) -> list[npt.NDArray[np.int64]]: ...
     def bfs(self, source: int) -> npt.NDArray[np.int64]: ...
     def to_directed(self) -> DiGraph:
         """The graph as a `DiGraph` mapping this graph's cache entry: usable while this graph is open."""

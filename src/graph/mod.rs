@@ -369,6 +369,8 @@ pub enum CacheFile {
     /// Weakly connected components (connected components, for undirected graphs).
     ConnectedComponents,
     StronglyConnectedComponents,
+    /// Biconnected components, articulation points, bridges and 2-edge-connected components.
+    Biconnectivity,
     /// k-core decomposition of a directed graph, by in-, out- or total degree.
     KCoreDirected(crate::k_core::directed::CoreDegree),
     DirectedClusteringCoefficient,

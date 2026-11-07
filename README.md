@@ -32,6 +32,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
   - [SIMD](#simd)
   - [Directed graphs](#directed-graphs)
+  - [Biconnectivity](#biconnectivity)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -586,13 +587,72 @@ parallel edges, which triangle based algorithms count separately. `Graph::into_d
 
 | Takes | Algorithms |
 |---|---|
-| `Graph` | Triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
+| `Graph` | Biconnectivity (biconnected components, articulation points, bridges, 2-edge-connected components), triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
 | `DiGraph` | `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs) |
 | either | BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall (CPU and GPU), exact closeness/harmonic/Lin centralities, `ConnectedComponents` (weak), `StronglyConnectedComponents`, `directed_modularity`, Hierholzer's Euler trails (on a directed graph, every node needs as many arcs in as out) |
 
 The algorithms that work on either follow arcs out of nodes (`Direction::Out`: distances *from*
 a node). On a `DiGraph`, their `new_directed(.., Direction::In)` follows them in instead (distances
 *to* a node, networkx's convention); to ignore directions, run them on `to_undirected()`.
+
+## Biconnectivity
+
+`Biconnectivity` computes, for undirected graphs (`Graph`) only, in one run:
+
+* the **biconnected components**: maximal sets of nodes linked by at least two paths sharing no
+  node but their ends (or a pair linked by a bridge). Every edge is in exactly one, and two
+  share at most one node, an articulation point;
+* the **articulation points**: nodes whose removal disconnects some of their neighbours;
+* the **bridges**: edges whose removal disconnects their ends (one of several parallel edges
+  never is, nor is a self-loop);
+* the **2-edge-connected components**: the connected components of the graph without its
+  bridges.
+
+```rust
+use sparx::components::biconnected::Biconnectivity;
+
+let mut b = Biconnectivity::new(&g)?;
+let count = b.count();                        // biconnected components, numbered 0..count
+let c = b.component(7);                       // node 7's (None if it heads all of its)
+let nodes = b.component_nodes(c.unwrap());    // its nodes, its head included
+let cut = b.articulation_points();            // sorted node ids
+let bridges = b.bridges();                    // sorted [smaller, larger] pairs
+let two_edge = b.two_edge_components();       // per node
+b.drop_cache()?;
+```
+
+It implements *FAST-BCC* ([Dong, Wang, Gu and Sun, PPoPP 2023](https://doi.org/10.48550/arXiv.2301.01356)).
+The usual algorithm, Hopcroft and Tarjan's, is a depth-first search and so is inherently
+sequential. FAST-BCC instead streams through the edges in parallel a few times and keeps only
+arrays with one value per node or tree edge, in memory-mapped scratch files:
+
+1. A spanning forest, by lock-free union-find.
+2. The trees rooted in parallel, by ranking their Euler tours (each walked in parallel between
+   sampled arcs). Each node's subtree is then an interval of preorder numbers.
+3. For each subtree, the smallest and largest preorder number reached by an edge out of it,
+   from range minimum and maximum queries over its interval. The queries use a sparse table
+   over blocks of 64 nodes.
+4. A tree edge from `p` to its child `c` is a bridge if no edge leaves `c`'s subtree, and a
+   *fence* if none leaves `p`'s. The biconnected components are the connected components (by
+   union-find again) of the graph without fences and without edges between a node and one of
+   its ancestors. Each component's *head* is its top node's parent, and articulation points are
+   heads (a tree's root must head two components or more).
+
+Each node is labelled with one biconnected component it's in and doesn't head, and `heads()`
+gives each component's head. An articulation point is in several components, and which of the
+ones it doesn't head labels it depends on the threads. Isolated nodes, and nodes heading every
+component they're in, have no label. Every other result is the same whatever the threads.
+Parallel edges and self-loops are handled.
+
+Measured on 32 cores, against a sequential, iterative Hopcroft–Tarjan (each result checked equal
+to Hopcroft–Tarjan's):
+
+| Graph | \|V\| | \|E\| | Connected components | `Biconnectivity` | Hopcroft–Tarjan |
+|---|---|---|---|---|---|
+| synthetic protein graph (`prot20`) | 3.2M | 128M | 0.13 s | 1.12 s | 2.59 s |
+| random graph | 8.4M | 84M | 0.36 s | 4.89 s | 11.78 s |
+| de Bruijn graph (`graph_8_15`) | 21.9M | 68.7M | 0.91 s | 5.65–7.70 s | 10.02 s |
+| de Bruijn graph (`graph_9_15`) | 50.3M | 198.8M | 1.95 s | 21.18 s | 31.77 s |
 
 ## Python
 

@@ -830,3 +830,40 @@ def test_pagerank_arguments():
         with pytest.raises(RuntimeError, match="didn't converge"):
             g.pagerank(tol=1e-15, max_iter=2)
         assert abs(g.pagerank().sum() - 1) < 1e-9
+
+
+def test_biconnectivity(nx_graph, index):
+    with sparx.Graph(undirected(nx_graph), index=index) as g:
+        want = sorted(sorted(c) for c in nx.biconnected_components(nx_graph))
+        got = [c.tolist() for c in g.biconnected_components()]
+        assert got == want  # both by their smallest node
+        b = g.biconnectivity()
+        # the per node form holds the same components: each with its head
+        rebuilt = [{u for u in range(len(g)) if b["components"][u] == c} | {h} for c, h in enumerate(b["heads"])]
+        assert sorted(sorted(c) for c in rebuilt) == want
+        assert b["articulation_points"].tolist() == sorted(nx.articulation_points(nx_graph))
+        assert b["bridges"].shape == (len(list(nx.bridges(nx_graph))), 2)
+        assert [tuple(e) for e in b["bridges"].tolist()] == sorted((min(e), max(e)) for e in nx.bridges(nx_graph))
+        # 2-edge-connected components, numbered by their smallest node
+        parts = sorted(sorted(c) for c in nx.k_edge_components(nx_graph, k=2))
+        labels = b["two_edge_components"]
+        assert b["two_edge_count"] == len(parts)
+        assert sorted(sorted(np.flatnonzero(labels == c).tolist()) for c in range(len(parts))) == parts
+        assert [labels[p[0]] for p in parts] == list(range(len(parts)))
+
+
+def test_biconnectivity_of_multigraphs():
+    # parallel edges aren't bridges, and change neither components nor articulation points
+    edges = [(0, 1), (0, 1), (1, 2), (2, 3), (3, 1), (3, 4), (4, 5), (5, 5)]
+    path = write_mtx("multi_bcc.mtx", 7, [(max(e), min(e)) for e in edges], True)
+    simple = nx.Graph(edges)
+    simple.add_node(6)
+    simple.remove_edges_from(nx.selfloop_edges(simple))
+    with sparx.Graph(path) as g:
+        b = g.biconnectivity()
+        assert [c.tolist() for c in g.biconnected_components()] == sorted(sorted(c) for c in nx.biconnected_components(simple))
+        assert b["articulation_points"].tolist() == sorted(nx.articulation_points(simple))
+        assert [tuple(e) for e in b["bridges"].tolist()] == [(3, 4), (4, 5)]
+        assert b["components"][6] == -1  # isolated
+    # only undirected graphs
+    assert not hasattr(sparx.DiGraph, "biconnectivity")

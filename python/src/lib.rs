@@ -29,7 +29,9 @@ use sparx::centralities::hyper_log_log::Precision;
 use sparx::centralities::pagerank::{PageRank, PageRankEngine};
 use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
-use sparx::components::{strong::StronglyConnectedComponents, weak::ConnectedComponents};
+use sparx::components::{
+    biconnected::Biconnectivity, strong::StronglyConnectedComponents, weak::ConnectedComponents,
+};
 use sparx::graph::{
     CacheFile, Directed, Directedness, GraphMemoryMap, IndexType, Undirected, UndirectedMode,
 };
@@ -70,6 +72,25 @@ fn dict(entries: Vec<(&'static str, Out)>) -> Out {
 
 fn pair(a: Out, b: Out) -> Out {
     Box::new(move |py| Ok((a(py)?, b(py)?).into_pyobject(py)?.into_any()))
+}
+
+/// A list of arrays.
+fn arrays(vs: Vec<Vec<i64>>) -> Out {
+    Box::new(move |py| {
+        let items: Vec<_> = vs.into_iter().map(|v| v.into_pyarray(py)).collect();
+        Ok(pyo3::types::PyList::new(py, items)?.into_any())
+    })
+}
+
+/// A `(len, 2)` array of pairs.
+fn pairs(v: Vec<[i64; 2]>) -> Out {
+    Box::new(move |py| {
+        let len = v.len();
+        let flat: Vec<i64> = v.into_iter().flatten().collect();
+        let a = numpy::ndarray::Array2::from_shape_vec((len, 2), flat)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(a.into_pyarray(py).into_any())
+    })
 }
 
 fn number<T: for<'py> IntoPyObject<'py> + Send + 'static>(x: T) -> Out {
@@ -421,6 +442,64 @@ fn directed_k_core<I: Ix, Cx: CoreCount + Element>(
         let v = array(a.k_cores().to_vec());
         a.drop_cache()?;
         Ok(v)
+    })
+}
+
+/// Node ids as `int64`s, `-1` for `Ix::max()` (none).
+fn optional_ix_array<I: Ix>(s: &[I]) -> Out {
+    let none = <I as IndexType>::max();
+    array(
+        s.iter()
+            .map(|&x| if x == none { -1 } else { x.index() as i64 })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn biconnectivity<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
+    cleaning(g, || {
+        let mut b = Biconnectivity::new(g)?;
+        let bridges = b
+            .bridges()
+            .iter()
+            .map(|e| [e[0].index() as i64, e[1].index() as i64])
+            .collect();
+        let r = dict(vec![
+            ("components", optional_ix_array(b.components())),
+            ("heads", ix_array(b.heads())),
+            (
+                "articulation_points",
+                array(
+                    b.articulation_points()
+                        .into_iter()
+                        .map(|u| u as i64)
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+            ("bridges", pairs(bridges)),
+            ("two_edge_components", ix_array(b.two_edge_components())),
+            ("two_edge_count", number(b.two_edge_count())),
+        ]);
+        b.drop_cache()?;
+        Ok(r)
+    })
+}
+
+/// Each biconnected component's nodes, sorted: those listed in it, and its head.
+fn biconnected_components<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
+    cleaning(g, || {
+        let mut b = Biconnectivity::new(g)?;
+        let mut sets: Vec<Vec<i64>> = b.heads().iter().map(|h| vec![h.index() as i64]).collect();
+        let none = <I as IndexType>::max();
+        for (u, &c) in b.components().iter().enumerate() {
+            if c != none {
+                sets[c.index()].push(u as i64);
+            }
+        }
+        for set in &mut sets {
+            set.sort_unstable();
+        }
+        b.drop_cache()?;
+        Ok(arrays(sets))
     })
 }
 
@@ -1252,6 +1331,27 @@ graph_class!(UGraph, "Graph", {
             py,
             |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter, engine)),
         )
+    }
+
+    /// Biconnected components, articulation points, bridges and 2-edge-connected components, as
+    /// arrays: `{"components": per node, "heads": per component, "articulation_points": ...,
+    /// "bridges": (len, 2), "two_edge_components": per node, "two_edge_count": ...}`.
+    ///
+    /// Every edge is in one biconnected component, made of the nodes listed in it by
+    /// `components` (`-1` for isolated nodes, and nodes in components they all head) and its
+    /// head (an articulation point, unless the component is the only one it's in). Components
+    /// are numbered by their smallest node, bridges are pairs (the smaller first), sorted.
+    fn biconnectivity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner
+            .run(py, |g| with_graph!(g, g => biconnectivity(g)))
+    }
+
+    /// The nodes of each biconnected component, sorted, as networkx's
+    /// `biconnected_components` (a list of arrays: for graphs of millions of components,
+    /// `biconnectivity()`'s per node arrays are much smaller), by their smallest node.
+    fn biconnected_components<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner
+            .run(py, |g| with_graph!(g, g => biconnected_components(g)))
     }
 
     /// BFS distance of each node from `source` (`-1` for nodes it doesn't reach).

@@ -4,6 +4,7 @@
 //!
 //! Both number components `0..count()` by their smallest node: component `0` is node `0`'s,
 //! component `1` that of the smallest node outside it, and so on.
+pub mod biconnected;
 pub mod strong;
 pub mod weak;
 

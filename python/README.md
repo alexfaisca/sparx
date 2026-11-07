@@ -29,6 +29,9 @@ with sparx.Graph("graph.mtx", index="u32") as g:  # undirected
     closeness = g.closeness()                  # exact
     ranks = g.pagerank()                       # alpha=0.85, tol=1e-6 (in total, see below)
     dist = g.bfs(0)                            # -1 where unreachable
+    bcc = g.biconnectivity()                   # {"components", "heads", "articulation_points",
+                                               #  "bridges", "two_edge_components", "two_edge_count"}
+    blocks = g.biconnected_components()        # node arrays, as networkx's biconnected_components
 
 with sparx.DiGraph("web.mtx") as d:            # directed
     d.in_degree(0), d.in_neighbours(0)         # and degree/neighbours: out-arcs
@@ -61,6 +64,12 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   is the width of triangle counts, trussness and coreness values; a value that doesn't fit, such
   as a node of degree 256 in a `"u8"` `k_core`, fails with an error rather than overflowing.
 * Undirected edges are stored once in each direction; per-edge results follow `csr()`.
+* `biconnectivity` and `biconnected_components` are on `sparx.Graph` only. In `"components"`,
+  each node is labelled with one biconnected component it's in and doesn't head, and `"heads"`
+  gives each component's head (the node it shares with the component above it). Isolated nodes,
+  and nodes heading every component they're in, are labelled -1. `biconnected_components()` lists every component's
+  nodes, heads included. `"bridges"` is an `(n, 2)` array of sorted pairs, and parallel edges
+  are never bridges.
 * `pagerank`'s `tol` bounds the ranks' total change, while networkx's is multiplied by the
   number of nodes (which, ranks summing to 1, graphs of millions of nodes meet at once):
   networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`).

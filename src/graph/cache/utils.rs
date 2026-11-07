@@ -299,6 +299,7 @@ pub enum FileType {
     ExactLinCentrality(H),
     ConnectedComponents(H),
     StronglyConnectedComponents(H),
+    Biconnectivity(H),
     KCoreDirected(H, crate::k_core::directed::CoreDegree),
     DirectedClusteringCoefficient(H),
     DirectedLouvain(H),
@@ -442,6 +443,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::DirectedClusteringCoefficient(_) => "directedclustering",
         FileType::DirectedLouvain(_) => "directedlouvain",
         FileType::PageRank(_) => "pagerank",
+        FileType::Biconnectivity(_) => "biconnectivity",
         #[cfg(any(test, feature = "bench"))]
         FileType::Test(_) => SUFFIX_FOR_TEST,
     }
@@ -544,6 +546,7 @@ impl std::fmt::Display for FileType {
             FileType::DirectedClusteringCoefficient(_) => "DirectedClusteringCoefficient",
             FileType::DirectedLouvain(_) => "DirectedLouvain",
             FileType::PageRank(_) => "PageRank",
+            FileType::Biconnectivity(_) => "Biconnectivity",
             #[cfg(any(test, feature = "bench"))]
             FileType::Test(_) => "Test",
         };
