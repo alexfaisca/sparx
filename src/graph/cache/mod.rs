@@ -1663,6 +1663,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             }
             CacheFile::DirectedLouvain => FileType::DirectedLouvain(H::H),
             CacheFile::PageRank => FileType::PageRank(H::H),
+            CacheFile::Assortativity => FileType::Assortativity(H::H),
         }
     }
 

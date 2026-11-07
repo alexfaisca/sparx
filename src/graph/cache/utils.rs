@@ -304,6 +304,7 @@ pub enum FileType {
     DirectedClusteringCoefficient(H),
     DirectedLouvain(H),
     PageRank(H),
+    Assortativity(H),
     #[cfg(any(test, feature = "bench"))]
     Test(H),
 }
@@ -444,6 +445,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::DirectedLouvain(_) => "directedlouvain",
         FileType::PageRank(_) => "pagerank",
         FileType::Biconnectivity(_) => "biconnectivity",
+        FileType::Assortativity(_) => "assortativity",
         #[cfg(any(test, feature = "bench"))]
         FileType::Test(_) => SUFFIX_FOR_TEST,
     }
@@ -547,6 +549,7 @@ impl std::fmt::Display for FileType {
             FileType::DirectedLouvain(_) => "DirectedLouvain",
             FileType::PageRank(_) => "PageRank",
             FileType::Biconnectivity(_) => "Biconnectivity",
+            FileType::Assortativity(_) => "Assortativity",
             #[cfg(any(test, feature = "bench"))]
             FileType::Test(_) => "Test",
         };

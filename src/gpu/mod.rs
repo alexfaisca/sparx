@@ -69,4 +69,17 @@ pub trait GpuBackend {
         edge_reciprocal: &[Ix],
         counts: &mut [u32],
     ) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// The sum, over every arc `u -> v` of `graph` (each parallel arc counting), of
+    /// `x[u] * y[v]`: the only sum over arcs of the [assortativity] coefficients'. Computed
+    /// exactly: `y`'s values are summed by node in 64 bits, the sums multiplied by `x`'s in 96 and
+    /// added up in 128.
+    ///
+    /// [assortativity]: ../assortativity/index.html
+    fn arc_products(
+        &self,
+        graph: &Self::Graph,
+        x: &[u32],
+        y: &[u32],
+    ) -> Result<u128, Box<dyn std::error::Error>>;
 }

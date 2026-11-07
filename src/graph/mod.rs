@@ -377,6 +377,8 @@ pub enum CacheFile {
     /// Louvain partition of a directed graph (by Leicht and Newman's directed modularity).
     DirectedLouvain,
     PageRank,
+    /// Assortativity coefficients' scratch arrays.
+    Assortativity,
 }
 
 enum GraphFile {

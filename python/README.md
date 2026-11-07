@@ -32,6 +32,10 @@ with sparx.Graph("graph.mtx", index="u32") as g:  # undirected
     bcc = g.biconnectivity()                   # {"components", "heads", "articulation_points",
                                                #  "bridges", "two_edge_components", "two_edge_count"}
     blocks = g.biconnected_components()        # node arrays, as networkx's biconnected_components
+    r = g.degree_assortativity()               # Newman's (networkx's degree_assortativity_coefficient)
+    rho = g.degree_assortativity(method="spearman")  # of the degrees' ranks
+    g.numeric_assortativity(values)            # a number per node
+    g.attribute_assortativity(labels)          # an integer category per node
 
 with sparx.DiGraph("web.mtx") as d:            # directed
     d.in_degree(0), d.in_neighbours(0)         # and degree/neighbours: out-arcs
@@ -41,6 +45,7 @@ with sparx.DiGraph("web.mtx") as d:            # directed
     cc = d.clustering()                        # Fagiolo's: {"local", "average"}
     communities = d.louvain()                  # by directed modularity
     reach = d.bfs(0, direction="in")           # "out", "in" or "both" (ignoring directions)
+    r = d.degree_assortativity(x="out", y="in")  # any of "out" and "in" at either end
     scc = d.components(kind="strong")          # {"components", "count", "sizes"}
     u = d.to_undirected()                      # a sparx.Graph, valid while d is open
     m = d.to_undirected(mode="each")           # "collapse" (default), "each" (per arc) or "mutual"
@@ -70,6 +75,12 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   and nodes heading every component they're in, are labelled -1. `biconnected_components()` lists every component's
   nodes, heads included. `"bridges"` is an `(n, 2)` array of sorted pairs, and parallel edges
   are never bridges.
+* Assortativity coefficients match networkx's, multigraphs included. `method="spearman"`
+  correlates the degrees' ranks rather than the degrees themselves: on graphs with heavy-tailed
+  degrees, Pearson's coefficient shrinks as they grow, while Spearman's doesn't. Degree and
+  attribute coefficients are exact, and the same whatever the number of threads; a coefficient
+  is `NaN` where it's undefined (for example, all degrees equal). `attribute_assortativity`
+  takes integer labels: for others, pass `numpy.unique(labels, return_inverse=True)[1]`.
 * `pagerank`'s `tol` bounds the ranks' total change, while networkx's is multiplied by the
   number of nodes (which, ranks summing to 1, graphs of millions of nodes meet at once):
   networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`).
@@ -80,8 +91,8 @@ with sparx.DiGraph("web.mtx") as d:            # directed
 * The cache lives in `./.cache/` (relative to the working directory) and is dropped when the
   graph is closed or garbage collected. With `keep_cache=True` it stays, and
   `sparx.Graph.open(g.cache_file)` reopens the graph without parsing it again.
-* With GPU support (built with the `gpu` feature: `maturin build --features gpu`), `triangles`
-  and `hyperball` take `gpu=True`, and run on any Vulkan, Metal or DX12 GPU.
+* With GPU support (built with the `gpu` feature: `maturin build --features gpu`), `triangles`,
+  `hyperball` and `degree_assortativity` take `gpu=True`, and run on any Vulkan, Metal or DX12 GPU.
 
 ## Building from source
 

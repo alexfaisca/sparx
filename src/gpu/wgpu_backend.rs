@@ -409,6 +409,14 @@ struct TrianglesUniforms {
     _pad: [u32; 2],
 }
 
+/// `arc_products.wgsl`'s uniform parameters.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ArcProductsUniforms {
+    nodes: u32,
+    _pad: [u32; 3],
+}
+
 /// Bindings of `hyperball.wgsl` before the counter segments'.
 const HYPERBALL_FIXED_BINDINGS: usize = 6;
 
@@ -685,5 +693,80 @@ impl GpuBackend for WgpuBackend {
         self.queue.submit([encoder.finish()]);
 
         self.download(&counts_buffer, bytemuck::cast_slice_mut(counts))
+    }
+
+    fn arc_products(
+        &self,
+        graph: &WgpuGraph,
+        x: &[u32],
+        y: &[u32],
+    ) -> Result<u128, Box<dyn std::error::Error>> {
+        let nodes = graph.nodes;
+        if x.len() != nodes || y.len() != nodes {
+            return Err(format!(
+                "error expected {nodes} values of each end, got {} and {}",
+                x.len(),
+                y.len()
+            )
+            .into());
+        }
+        self.check_storage_buffers(5)?;
+        let groups = self.linear_workgroups(nodes as u64)?;
+        let group_count = groups.0 as u64 * groups.1 as u64;
+
+        use wgpu::BufferUsages as U;
+        let x_buffer = self.storage_buffer("tails' values", nodes as u64 * 4, U::COPY_DST)?;
+        let y_buffer = self.storage_buffer("heads' values", nodes as u64 * 4, U::COPY_DST)?;
+        let partials_buffer = self.storage_buffer("arc products", group_count * 16, U::COPY_SRC)?;
+        let uniform = self.uniform_buffer::<ArcProductsUniforms>("arc products params");
+        self.upload(&x_buffer, bytemuck::cast_slice(x))?;
+        self.upload(&y_buffer, bytemuck::cast_slice(y))?;
+        let uniforms = ArcProductsUniforms {
+            nodes: nodes as u32,
+            _pad: [0; 3],
+        };
+        self.queue
+            .write_buffer(&uniform, 0, bytemuck::bytes_of(&uniforms));
+
+        use wgpu::BufferBindingType as B;
+        let storage = |read_only| B::Storage { read_only };
+        let kernels = self.kernels(
+            "arc products",
+            include_str!("arc_products.wgsl"),
+            &[
+                storage(true),
+                storage(true),
+                storage(true),
+                storage(true),
+                storage(false),
+                B::Uniform,
+            ],
+            &["arc_products"],
+        );
+        let bind_group = self.bind_group(
+            &kernels.layout,
+            &[
+                &graph.offsets,
+                &graph.neighbours,
+                &x_buffer,
+                &y_buffer,
+                &partials_buffer,
+                &uniform,
+            ],
+        );
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        Self::dispatch(&mut encoder, &kernels.pipelines[0], &bind_group, groups);
+        self.queue.submit([encoder.finish()]);
+
+        let mut partials = vec![[0u32; 4]; group_count as usize];
+        self.download(&partials_buffer, bytemuck::cast_slice_mut(&mut partials))?;
+        Ok(partials
+            .iter()
+            .map(|l| {
+                l.iter()
+                    .rev()
+                    .fold(0u128, |acc, &limb| (acc << 32) | limb as u128)
+            })
+            .sum())
     }
 }

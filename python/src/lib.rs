@@ -15,12 +15,16 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use numpy::{Element, IntoPyArray};
+use numpy::{AllowTypeChange, Element, IntoPyArray, PyArrayLike1};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use sparx::assortativity::{
+    Correlation, DegreeType, attribute_assortativity, degree_assortativity,
+    directed_degree_assortativity, numeric_assortativity,
+};
 use sparx::centralities::exact::{
     ExactClosenessCentrality, ExactHarmonicCentrality, ExactLinCentrality,
 };
@@ -443,6 +447,101 @@ fn directed_k_core<I: Ix, Cx: CoreCount + Element>(
         a.drop_cache()?;
         Ok(v)
     })
+}
+
+/// A correlation by name: `"pearson"` or `"spearman"`.
+fn correlation(name: &str) -> PyResult<Correlation> {
+    match name {
+        "pearson" => Ok(Correlation::Pearson),
+        "spearman" => Ok(Correlation::Spearman),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown correlation {name:?}: expected 'pearson' or 'spearman'"
+        ))),
+    }
+}
+
+/// A directed graph's degree by name: `"out"` or `"in"`.
+fn degree_type(name: &str) -> PyResult<DegreeType> {
+    match name {
+        "out" => Ok(DegreeType::Out),
+        "in" => Ok(DegreeType::In),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown degree {name:?}: expected 'out' or 'in'"
+        ))),
+    }
+}
+
+fn degree_assortativity_of<I: Ix>(g: &G<I, Undirected>, c: Correlation) -> Res<Out> {
+    cleaning(g, || Ok(number(degree_assortativity(g, c)?)))
+}
+
+#[cfg(feature = "gpu")]
+fn degree_assortativity_gpu_of<I: Ix>(g: &G<I, Undirected>, c: Correlation) -> Res<Out> {
+    cleaning(g, || {
+        use sparx::gpu::{GpuBackend, WgpuBackend};
+        let backend = WgpuBackend::new()?;
+        let device_graph = backend.upload_graph(g)?;
+        let r = sparx::assortativity::degree_assortativity_gpu(g, c, &backend, &device_graph)?;
+        Ok(number(r))
+    })
+}
+
+fn directed_degree_assortativity_of<I: Ix>(
+    g: &G<I, Directed>,
+    x: DegreeType,
+    y: DegreeType,
+    c: Correlation,
+) -> Res<Out> {
+    cleaning(g, || Ok(number(directed_degree_assortativity(g, x, y, c)?)))
+}
+
+#[cfg(feature = "gpu")]
+fn directed_degree_assortativity_gpu_of<I: Ix>(
+    g: &G<I, Directed>,
+    x: DegreeType,
+    y: DegreeType,
+    c: Correlation,
+) -> Res<Out> {
+    cleaning(g, || {
+        use sparx::gpu::{GpuBackend, WgpuBackend};
+        let backend = WgpuBackend::new()?;
+        let device_graph = backend.upload_graph(g)?;
+        let r = sparx::assortativity::directed_degree_assortativity_gpu(
+            g,
+            x,
+            y,
+            c,
+            &backend,
+            &device_graph,
+        )?;
+        Ok(number(r))
+    })
+}
+
+fn numeric_assortativity_of<I: Ix, Dir: Directedness>(g: &G<I, Dir>, values: &[f64]) -> Res<Out> {
+    cleaning(g, || Ok(number(numeric_assortativity(g, values)?)))
+}
+
+fn attribute_assortativity_of<I: Ix, Dir: Directedness>(
+    g: &G<I, Dir>,
+    labels: &[usize],
+) -> Res<Out> {
+    cleaning(g, || Ok(number(attribute_assortativity(g, labels)?)))
+}
+
+/// Per node values from Python (any array-like, converted to `float64`).
+fn float_values(values: PyArrayLike1<'_, f64, AllowTypeChange>) -> Vec<f64> {
+    values.as_array().iter().copied().collect()
+}
+
+/// Per node labels from Python (any array-like, converted to `int64`): only which are equal
+/// matters, so negative ones are kept as their bits.
+fn int_labels(labels: PyArrayLike1<'_, i64, AllowTypeChange>) -> Vec<usize> {
+    labels
+        .as_array()
+        .iter()
+        .map(|&l| l as u64 as usize)
+        .collect()
 }
 
 /// Node ids as `int64`s, `-1` for `Ix::max()` (none).
@@ -1354,6 +1453,63 @@ graph_class!(UGraph, "Graph", {
             .run(py, |g| with_graph!(g, g => biconnected_components(g)))
     }
 
+    /// Degree assortativity: the correlation of the degrees at either end of each edge (each
+    /// way), degrees counting self-loops twice. `method` is `"pearson"` (Newman's coefficient,
+    /// networkx's `degree_assortativity_coefficient`) or `"spearman"` (the same of the degrees'
+    /// ranks: robust on graphs with heavy-tailed degrees, whose Pearson coefficient shrinks as
+    /// they grow). Computed exactly, the same whatever the threads; `NaN` where undefined (all
+    /// degrees equal, or no edges). With `gpu=True` the sum over edges runs on a GPU.
+    #[pyo3(signature = (*, method = "pearson", gpu = false))]
+    fn degree_assortativity<'py>(
+        &self,
+        py: Python<'py>,
+        method: &str,
+        gpu: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let c = correlation(method)?;
+        if gpu {
+            #[cfg(feature = "gpu")]
+            return self.inner.run(
+                py,
+                |g| with_graph!(g, g => degree_assortativity_gpu_of(g, c)),
+            );
+            #[cfg(not(feature = "gpu"))]
+            return Err(no_gpu());
+        }
+        self.inner
+            .run(py, |g| with_graph!(g, g => degree_assortativity_of(g, c)))
+    }
+
+    /// Numeric assortativity: Pearson's correlation of `values[u]` and `values[v]` over every
+    /// edge (each way), networkx's `numeric_assortativity_coefficient`. `values` holds a number
+    /// per node.
+    fn numeric_assortativity<'py>(
+        &self,
+        py: Python<'py>,
+        values: PyArrayLike1<'py, f64, AllowTypeChange>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let values = float_values(values);
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => numeric_assortativity_of(g, &values)),
+        )
+    }
+
+    /// Attribute assortativity: Newman's coefficient of `labels` (an integer category per node:
+    /// for others, pass `numpy.unique(labels, return_inverse=True)[1]`), networkx's
+    /// `attribute_assortativity_coefficient`. Computed exactly.
+    fn attribute_assortativity<'py>(
+        &self,
+        py: Python<'py>,
+        labels: PyArrayLike1<'py, i64, AllowTypeChange>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let labels = int_labels(labels);
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => attribute_assortativity_of(g, &labels)),
+        )
+    }
+
     /// BFS distance of each node from `source` (`-1` for nodes it doesn't reach).
     #[pyo3(signature = (source))]
     fn bfs<'py>(&self, py: Python<'py>, source: usize) -> PyResult<Bound<'py, PyAny>> {
@@ -1548,6 +1704,65 @@ graph_class!(DGraph, "DiGraph", {
         self.inner.run(
             py,
             |g| with_graph!(g, g => pagerank(g, alpha, tol, max_iter, engine)),
+        )
+    }
+
+    /// Degree assortativity of a directed graph: the correlation, over every arc `u -> v`, of
+    /// `u`'s degree `x` and `v`'s degree `y` (each `"out"` or `"in"`; networkx's defaults).
+    /// `method` is `"pearson"` (networkx's `degree_assortativity_coefficient`) or `"spearman"`
+    /// (see `Graph.degree_assortativity`). With `gpu=True` the sum over arcs runs on a GPU.
+    #[pyo3(signature = (*, x = "out", y = "in", method = "pearson", gpu = false))]
+    fn degree_assortativity<'py>(
+        &self,
+        py: Python<'py>,
+        x: &str,
+        y: &str,
+        method: &str,
+        gpu: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (x, y, c) = (degree_type(x)?, degree_type(y)?, correlation(method)?);
+        if gpu {
+            #[cfg(feature = "gpu")]
+            return self.inner.run(
+                py,
+                |g| with_graph!(g, g => directed_degree_assortativity_gpu_of(g, x, y, c)),
+            );
+            #[cfg(not(feature = "gpu"))]
+            return Err(no_gpu());
+        }
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => directed_degree_assortativity_of(g, x, y, c)),
+        )
+    }
+
+    /// Numeric assortativity: Pearson's correlation of `values[u]` and `values[v]` over every
+    /// edge (each way), networkx's `numeric_assortativity_coefficient`. `values` holds a number
+    /// per node.
+    fn numeric_assortativity<'py>(
+        &self,
+        py: Python<'py>,
+        values: PyArrayLike1<'py, f64, AllowTypeChange>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let values = float_values(values);
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => numeric_assortativity_of(g, &values)),
+        )
+    }
+
+    /// Attribute assortativity: Newman's coefficient of `labels` (an integer category per node:
+    /// for others, pass `numpy.unique(labels, return_inverse=True)[1]`), networkx's
+    /// `attribute_assortativity_coefficient`. Computed exactly.
+    fn attribute_assortativity<'py>(
+        &self,
+        py: Python<'py>,
+        labels: PyArrayLike1<'py, i64, AllowTypeChange>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let labels = int_labels(labels);
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => attribute_assortativity_of(g, &labels)),
         )
     }
 

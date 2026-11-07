@@ -867,3 +867,74 @@ def test_biconnectivity_of_multigraphs():
         assert b["components"][6] == -1  # isolated
     # only undirected graphs
     assert not hasattr(sparx.DiGraph, "biconnectivity")
+
+
+def spearman_of_pairs(pairs):
+    from scipy.stats import spearmanr
+
+    x, y = zip(*pairs)
+    return spearmanr(x, y).statistic
+
+
+def test_degree_assortativity(nx_graph, index):
+    path = undirected(nx_graph)
+    with sparx.Graph(path, index=index) as g:
+        assert g.degree_assortativity() == pytest.approx(nx.degree_assortativity_coefficient(nx_graph), abs=1e-9)
+        pairs = list(nx.node_degree_xy(nx_graph))
+        assert g.degree_assortativity(method="spearman") == pytest.approx(spearman_of_pairs(pairs), abs=1e-9)
+        with pytest.raises(ValueError):
+            g.degree_assortativity(method="kendall")
+
+
+def test_degree_assortativity_of_multigraphs():
+    # parallel edges count each, self-loops once (and twice in their node's degree), as in a
+    # networkx MultiGraph
+    edges = [(0, 1), (0, 1), (1, 2), (2, 3), (3, 1), (3, 4), (4, 5), (5, 5), (2, 2), (0, 6)]
+    M = nx.MultiGraph(edges)
+    path = write_mtx("multi_assort.mtx", 7, [(max(e), min(e)) for e in edges], True)
+    with sparx.Graph(path) as g:
+        assert g.degree_assortativity() == pytest.approx(nx.degree_assortativity_coefficient(M), abs=1e-9)
+        values = np.arange(7) * 0.5
+        nx.set_node_attributes(M, {u: values[u] for u in M}, "value")
+        assert g.numeric_assortativity(values) == pytest.approx(nx.numeric_assortativity_coefficient(M, "value"), abs=1e-9)
+
+
+def test_directed_degree_assortativity(digraph):
+    with sparx.DiGraph(directed(digraph)) as d:
+        for x, y in itertools.product(["out", "in"], repeat=2):
+            expected = nx.degree_assortativity_coefficient(digraph, x=x, y=y)
+            assert d.degree_assortativity(x=x, y=y) == pytest.approx(expected, abs=1e-9)
+            pairs = list(nx.node_degree_xy(digraph, x=x, y=y))
+            assert d.degree_assortativity(x=x, y=y, method="spearman") == pytest.approx(spearman_of_pairs(pairs), abs=1e-9)
+        with pytest.raises(ValueError):
+            d.degree_assortativity(x="total")
+
+
+def test_attribute_and_numeric_assortativity(nx_graph, digraph):
+    for G, cls, write in [(nx_graph, sparx.Graph, undirected), (digraph, sparx.DiGraph, directed)]:
+        n = G.number_of_nodes()
+        labels = [(u * 7) % 3 for u in range(n)]
+        values = [((u * 37) % 11) * 0.25 - 1 for u in range(n)]
+        nx.set_node_attributes(G, dict(enumerate(labels)), "label")
+        nx.set_node_attributes(G, dict(enumerate(values)), "value")
+        with cls(write(G)) as g:
+            assert g.attribute_assortativity(labels) == pytest.approx(nx.attribute_assortativity_coefficient(G, "label"), abs=1e-9)
+            # any integer labels, negative ones included, and lists
+            assert g.attribute_assortativity(np.array(labels) * -1000) == pytest.approx(g.attribute_assortativity(labels))
+            assert g.numeric_assortativity(values) == pytest.approx(nx.numeric_assortativity_coefficient(G, "value"), abs=1e-9)
+            with pytest.raises(RuntimeError):
+                g.numeric_assortativity(values[:-1])
+
+
+def test_degree_assortativity_of_regular_graphs_is_nan():
+    with sparx.Graph(undirected(nx.cycle_graph(6))) as g:
+        assert np.isnan(g.degree_assortativity())
+
+
+@pytest.mark.skipif(not sparx.GPU, reason="built without GPU support")
+def test_degree_assortativity_gpu(nx_graph, digraph):
+    with sparx.Graph(undirected(nx_graph)) as g:
+        for method in ["pearson", "spearman"]:
+            assert g.degree_assortativity(method=method, gpu=True) == g.degree_assortativity(method=method)
+    with sparx.DiGraph(directed(digraph)) as d:
+        assert d.degree_assortativity(x="in", y="out", gpu=True) == d.degree_assortativity(x="in", y="out")

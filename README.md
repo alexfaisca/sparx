@@ -33,6 +33,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [SIMD](#simd)
   - [Directed graphs](#directed-graphs)
   - [Biconnectivity](#biconnectivity)
+  - [Assortativity](#assortativity)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -482,7 +483,8 @@ let total_cores = DirectedKCores::<_, _, _, u32>::new_cx(&d, CoreDegree::Total)?
 
 ## GPU HyperBall & Triangles
 
-With the `gpu` feature, *HyperBall* and per-edge triangle counting can run on a GPU through
+With the `gpu` feature, *HyperBall*, per-edge triangle counting and degree assortativity's sum
+over arcs can run on a GPU through
 [wgpu](https://wgpu.rs) (Vulkan, Metal or DX12, so on GPUs of any vendor). The graph's CSR is
 uploaded once and can be reused by several runs; results (and cached files) are the same as on
 the CPU --- *HyperBall*'s counters bit for bit, while its distance accumulators are computed in
@@ -587,9 +589,9 @@ parallel edges, which triangle based algorithms count separately. `Graph::into_d
 
 | Takes | Algorithms |
 |---|---|
-| `Graph` | Biconnectivity (biconnected components, articulation points, bridges, 2-edge-connected components), triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
-| `DiGraph` | `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs) |
-| either | BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall (CPU and GPU), exact closeness/harmonic/Lin centralities, `ConnectedComponents` (weak), `StronglyConnectedComponents`, `directed_modularity`, Hierholzer's Euler trails (on a directed graph, every node needs as many arcs in as out) |
+| `Graph` | Degree assortativity, biconnectivity (biconnected components, articulation points, bridges, 2-edge-connected components), triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
+| `DiGraph` | Directed degree assortativity (any of in- and out-degree at either end), `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs) |
+| either | Numeric and attribute assortativity, BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall (CPU and GPU), exact closeness/harmonic/Lin centralities, `ConnectedComponents` (weak), `StronglyConnectedComponents`, `directed_modularity`, Hierholzer's Euler trails (on a directed graph, every node needs as many arcs in as out) |
 
 The algorithms that work on either follow arcs out of nodes (`Direction::Out`: distances *from*
 a node). On a `DiGraph`, their `new_directed(.., Direction::In)` follows them in instead (distances
@@ -653,6 +655,65 @@ to Hopcroft–Tarjan's):
 | random graph | 8.4M | 84M | 0.36 s | 4.89 s | 11.78 s |
 | de Bruijn graph (`graph_8_15`) | 21.9M | 68.7M | 0.91 s | 5.65–7.70 s | 10.02 s |
 | de Bruijn graph (`graph_9_15`) | 50.3M | 198.8M | 1.95 s | 21.18 s | 31.77 s |
+
+## Assortativity
+
+`sparx::assortativity` measures how alike linked nodes are: the correlation, over every arc (each
+undirected edge counting both ways), of a value of the nodes at either end.
+
+```rust
+use sparx::assortativity::*;
+
+// Newman's degree assortativity (networkx's degree_assortativity_coefficient)
+let r = degree_assortativity(&g, Correlation::Pearson)?;
+// the same of the degrees' ranks
+let rho = degree_assortativity(&g, Correlation::Spearman)?;
+// directed graphs: any of out- and in-degree at either end (networkx's defaults: out, in)
+let r = directed_degree_assortativity(&d, DegreeType::Out, DegreeType::In, Correlation::Pearson)?;
+// a number per node (networkx's numeric_assortativity_coefficient)
+let r = numeric_assortativity(&g, &values)?;
+// a category per node (networkx's attribute_assortativity_coefficient)
+let r = attribute_assortativity(&g, &labels)?;
+```
+
+Results match networkx's, multigraphs included: parallel edges count each, and an undirected
+node's degree counts its self-loops twice. A coefficient is `NaN` where it's undefined, for
+example on a regular graph, whose degrees are all equal.
+
+**Spearman's correlation.** Pearson's coefficient is a poor measure on graphs with
+heavy-tailed degrees. Its value depends on the graph's size, and in disassortative graphs it
+goes to zero as they grow. Litvak and van der Hofstad propose rank correlations instead
+(["Uncovering disassortativity in large scale-free networks"](https://doi.org/10.1103/PhysRevE.87.022801),
+and van der Hoorn and Litvak for
+[directed graphs](https://doi.org/10.1080/15427951.2014.927038)). `Correlation::Spearman`
+correlates the degrees' ranks among the arcs' ends, with ties given their average rank.
+
+**How they're computed.** Every coefficient is one parallel pass over the edges, plus streaming
+passes over the nodes. Numeric assortativity on a directed graph needs a second pass over the
+edges.
+
+* The pass's only scattered memory reads are each arc's head's value. Degrees and categories are
+  stored in the narrowest unsigned integer type that holds them, one byte per node for most de
+  Bruijn graphs, so these reads hit the CPU's caches as often as possible.
+* The values are prefetched 16 arcs ahead (the `_mm_prefetch` SSE instruction, part of every
+  x86-64 CPU). On a 50 million node graph, whose degrees outgrow the last-level cache, this is
+  20% faster.
+* Degree and attribute coefficients are computed exactly: their sums are integers (in 128 bits,
+  and their products in 256), so they're the same whatever the number of threads. Numeric
+  assortativity sums floats with compensation, in a fixed order, so it is the same whatever the
+  threads too.
+
+`degree_assortativity_gpu` and `directed_degree_assortativity_gpu` compute the pass's sum on a
+GPU, exactly. WGSL has no 64-bit integers, so the GPU kernel works in 32-bit limbs, and each
+workgroup adds its products up in 128 bits. Results are the same as on the CPU, bit for bit.
+
+Measured on 32 cores, best of 3, against a sequential pass in RAM computing the same Pearson
+coefficient:
+
+| Graph | \|V\| | \|E\| | Pearson | Spearman | Attribute | Numeric | Sequential Pearson | Connected components |
+|---|---|---|---|---|---|---|---|---|
+| de Bruijn graph (`graph_8_15`) | 21.9M | 34.4M | 103 ms | 133 ms | 85 ms | 109 ms | 1.77 s | 916 ms |
+| de Bruijn graph (`graph_9_15`) | 50.3M | 99.4M | 244 ms | 293 ms | 208 ms | 281 ms | 4.38 s | 1.99 s |
 
 ## Python
 
