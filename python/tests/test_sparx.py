@@ -938,3 +938,24 @@ def test_degree_assortativity_gpu(nx_graph, digraph):
             assert g.degree_assortativity(method=method, gpu=True) == g.degree_assortativity(method=method)
     with sparx.DiGraph(directed(digraph)) as d:
         assert d.degree_assortativity(x="in", y="out", gpu=True) == d.degree_assortativity(x="in", y="out")
+
+
+def communities_connected(G, labels):
+    for c in set(labels):
+        nodes = [u for u in G if labels[u] == c]
+        sub = G.subgraph(nodes)
+        if not (nx.is_weakly_connected(sub) if G.is_directed() else nx.is_connected(sub)):
+            return False
+    return True
+
+
+@pytest.mark.parametrize("method", ["louvain", "leiden"])
+def test_communities_are_connected(nx_graph, digraph, method):
+    for G, cls, write in [(nx_graph, sparx.Graph, undirected), (digraph, sparx.DiGraph, directed)]:
+        n = G.number_of_nodes()
+        with cls(write(G)) as g:
+            result = getattr(g, method)()
+            labels = result["communities"].tolist()
+            assert communities_connected(G, labels)
+            groups = [{u for u in range(n) if labels[u] == c} for c in range(result["count"])]
+            assert result["modularity"] == pytest.approx(nx.community.modularity(G, groups, weight=None), abs=1e-9)

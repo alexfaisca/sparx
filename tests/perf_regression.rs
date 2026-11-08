@@ -8,9 +8,13 @@
 //! ```sh
 //! cargo test --release --test perf_regression -- --ignored --nocapture --test-threads=1
 //! ```
+use sparx::assortativity::{Correlation, degree_assortativity};
 use sparx::centralities::exact::ExactClosenessCentrality;
 use sparx::centralities::hyper_log_log::{HyperLogLog, Precision, Precision4, Precision8};
-use sparx::graph::Graph;
+use sparx::communities::directed_louvain::DirectedLouvain;
+use sparx::components::biconnected::Biconnectivity;
+use sparx::components::weak::ConnectedComponents;
+use sparx::graph::{DiGraph, Graph};
 use sparx::k_truss::clustering_coefficient::ClusteringCoefficient;
 use sparx::k_truss::triangles::Triangles;
 use std::hint::black_box;
@@ -64,6 +68,57 @@ fn random_graph(name: &str, n: usize, m: usize, threads: u8) -> (Graph<(), (), u
         Graph::from_file(&path, Some(id), Some(threads)).unwrap(),
         dir,
     )
+}
+
+/// A random directed graph of `n` nodes and about `out_degree` arcs out of each, as a MatrixMarket
+/// file in a fresh directory, loaded with `threads` threads.
+fn random_digraph(
+    name: &str,
+    n: usize,
+    out_degree: usize,
+    threads: u8,
+) -> (DiGraph<(), (), u32>, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("sparx_perf_{name}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.mtx"));
+    let mut next = rng(n as u64 ^ out_degree as u64);
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    let m = n * out_degree;
+    writeln!(
+        f,
+        "%%MatrixMarket matrix coordinate pattern general\n{n} {n} {m}"
+    )
+    .unwrap();
+    for u in 0..n {
+        for _ in 0..out_degree {
+            writeln!(f, "{} {}", u + 1, next() as usize % n + 1).unwrap();
+        }
+    }
+    drop(f);
+    let id = format!("perf_{name}_{}", std::process::id());
+    (
+        DiGraph::from_file(&path, Some(id), Some(threads)).unwrap(),
+        dir,
+    )
+}
+
+/// The threads checks timing parallel algorithms run on: the machine's, up to `max`.
+fn threads(max: usize) -> u8 {
+    std::thread::available_parallelism()
+        .map_or(4, |t| t.get())
+        .min(max) as u8
+}
+
+/// The fastest of 3 runs of connected components on `g`: one union-find pass over its edges,
+/// the reference parallel algorithms on the same graph are timed against.
+fn connected_components<Dir: sparx::graph::Directedness>(
+    g: &sparx::graph::GraphMemoryMap<(), (), u32, Dir>,
+) -> Duration {
+    fastest(3, || {
+        let mut cc = ConnectedComponents::new(g).unwrap();
+        black_box(cc.count());
+        cc.drop_cache().unwrap();
+    })
 }
 
 /// How many times faster [`HyperLogLog::union`] merges neighbours' counters, in *HyperBall*'s
@@ -226,5 +281,101 @@ fn clustering_costs_little_more_than_triangles() {
     assert!(
         ratio <= 12.,
         "the clustering coefficients take {ratio:.1}x as long as counting triangles"
+    );
+}
+
+/// Directed Louvain stops on graphs without structure: asynchronous moves keep finding tiny
+/// gains there, and phases ending only once no node moves made it run for over 40 minutes on a
+/// random graph of 4 million nodes. Its stopping rules (sweeps capped, gain thresholds, refining
+/// passes ending once they gain little) keep it to about 100 sweeps over the nodes on this one,
+/// whatever the threads, where phases ending only once no node moves took 500 to 800: checked
+/// by counting the sweeps, which doesn't depend on the machine (timings, 4 times apart on a graph
+/// this small, would hardly tell the two apart). Its time is checked too, for larger
+/// regressions (about 90 to 150 connected components' time; the check fails past 600), and its
+/// modularity, as stopping too early would pass otherwise.
+#[test]
+#[ignore]
+fn directed_louvain_stops_on_graphs_without_structure() {
+    let threads = threads(8);
+    let (mut g, dir) = random_digraph("directed_louvain", 1 << 17, 8, threads);
+    g.transpose().unwrap();
+    let reference = connected_components(&g);
+    let (mut modularity, mut sweeps) = (0.0, 0);
+    let louvain = fastest(2, || {
+        let mut l = DirectedLouvain::new(&g).unwrap();
+        modularity = l.partition_modularity();
+        sweeps = sweeps.max(l.sweeps());
+        l.drop_cache().unwrap();
+    });
+    let ratio = louvain.as_secs_f64() / reference.as_secs_f64();
+    println!(
+        "directed louvain: {louvain:?} ({sweeps} sweeps, modularity {modularity:.4}), connected components: {reference:?} ({ratio:.0}x, {threads} threads)"
+    );
+    g.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        modularity > 0.15,
+        "directed louvain's modularity on a random graph is only {modularity:.4} (about 0.2 expected): does it stop too early?"
+    );
+    assert!(
+        sweeps <= 250,
+        "directed louvain took {sweeps} sweeps over the nodes (about 100 expected): do its phases still stop?"
+    );
+    assert!(
+        ratio <= 600.,
+        "directed louvain takes {ratio:.0}x as long as connected components"
+    );
+}
+
+/// Biconnectivity is parallel throughout (spanning forest, rooting the trees by their Euler
+/// tours, subtrees' edges going out by range queries, components by union-find): about 9 to 12
+/// times connected components' time on 4 to 8 threads. With its trees rooted, or its components
+/// numbered, sequentially, it took 20 to 30 times on 32 threads; the check fails past 30.
+#[test]
+#[ignore]
+fn biconnectivity_is_parallel() {
+    let threads = threads(8);
+    // sparse, for many biconnected components, articulation points and bridges
+    let (mut g, dir) = random_graph("biconnectivity", 1 << 21, 3 << 19, threads);
+    let reference = connected_components(&g);
+    let biconnectivity = fastest(3, || {
+        let mut b = Biconnectivity::new(&g).unwrap();
+        black_box(b.count());
+        b.drop_cache().unwrap();
+    });
+    let ratio = biconnectivity.as_secs_f64() / reference.as_secs_f64();
+    println!(
+        "biconnectivity: {biconnectivity:?}, connected components: {reference:?} ({ratio:.1}x, {threads} threads)"
+    );
+    g.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        ratio <= 30.,
+        "biconnectivity takes {ratio:.1}x as long as connected components: is it still parallel?"
+    );
+}
+
+/// Degree assortativity is a single parallel pass over the edges, reading each head's degree
+/// from an array of one byte per node: about a tenth to a fifth of connected components' time
+/// on 4 to 8 threads. It would take several times as long sequentially, or with a pass more
+/// over the edges; the check fails past connected components' time.
+#[test]
+#[ignore]
+fn degree_assortativity_is_one_parallel_pass() {
+    let threads = threads(8);
+    let (mut g, dir) = random_graph("assortativity", 1 << 21, 1 << 23, threads);
+    let reference = connected_components(&g);
+    let assortativity = fastest(5, || {
+        black_box(degree_assortativity(&g, Correlation::Pearson).unwrap());
+    });
+    let ratio = assortativity.as_secs_f64() / reference.as_secs_f64();
+    println!(
+        "degree assortativity: {assortativity:?}, connected components: {reference:?} ({ratio:.2}x, {threads} threads)"
+    );
+    g.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        ratio <= 1.,
+        "degree assortativity takes {ratio:.2}x as long as connected components: is it still one parallel pass?"
     );
 }

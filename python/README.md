@@ -25,6 +25,7 @@ with sparx.Graph("graph.mtx", index="u32") as g:  # undirected
 
     cc = g.clustering()                        # {"local", "average", "transitivity"}
     louvain = g.louvain()                      # {"communities", "count", "modularity"}
+    leiden = g.leiden()                        # the same, refined (GVE-Leiden)
     hb = g.hyperball(precision=8)              # {"closeness", "harmonic", "lin", ...} estimates
     closeness = g.closeness()                  # exact
     ranks = g.pagerank()                       # alpha=0.85, tol=1e-6 (in total, see below)
@@ -44,6 +45,7 @@ with sparx.DiGraph("web.mtx") as d:            # directed
     cores = d.k_core(degree="in")              # "in", "out" or "total" (in + out: networkx's core_number)
     cc = d.clustering()                        # Fagiolo's: {"local", "average"}
     communities = d.louvain()                  # by directed modularity
+    refined = d.leiden()                       # the same, with Leiden's refinement
     reach = d.bfs(0, direction="in")           # "out", "in" or "both" (ignoring directions)
     r = d.degree_assortativity(x="out", y="in")  # any of "out" and "in" at either end
     scc = d.components(kind="strong")          # {"components", "count", "sizes"}
@@ -81,6 +83,10 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   attribute coefficients are exact, and the same whatever the number of threads; a coefficient
   is `NaN` where it's undefined (for example, all degrees equal). `attribute_assortativity`
   takes integer labels: for others, pass `numpy.unique(labels, return_inverse=True)[1]`.
+* `louvain()` and `leiden()` communities are connected: any community Louvain leaves
+  internally disconnected is split into its parts, which only raises modularity. `leiden()`
+  refines each pass's communities into connected sub-communities before aggregating them
+  (GVE-Leiden), finding better communities on some graphs for some more time.
 * `pagerank`'s `tol` bounds the ranks' total change, while networkx's is multiplied by the
   number of nodes (which, ranks summing to 1, graphs of millions of nodes meet at once):
   networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`).

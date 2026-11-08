@@ -136,6 +136,24 @@ fn degree_assortativity_of_small_shapes() {
         ),
         ("loops", 4, vec![(0, 0), (0, 1), (1, 2), (2, 2), (2, 3)]),
         ("parallel", 4, vec![(0, 1), (0, 1), (1, 2), (2, 3), (1, 3)]),
+        // self-loops on linked nodes, doubled ones, and parallel edges between them
+        (
+            "linked_loops",
+            6,
+            vec![
+                (0, 0),
+                (1, 1),
+                (1, 1),
+                (0, 1),
+                (0, 1),
+                (1, 2),
+                (2, 2),
+                (2, 3),
+                (3, 4),
+                (4, 4),
+                (5, 5),
+            ],
+        ),
         // regular: every degree the same, undefined
         ("cycle", 5, vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)]),
         ("empty", 3, vec![]),

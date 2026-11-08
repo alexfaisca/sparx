@@ -14,6 +14,22 @@ use std::sync::Barrier;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
+/// `f(u)` for every `u` in `0..n`, on `threads` threads.
+fn par_for(
+    threads: usize,
+    n: usize,
+    f: &(dyn Fn(usize) + Sync),
+) -> Result<(), Box<dyn std::error::Error>> {
+    let load = n.div_ceil(threads.max(1));
+    thread::scope(|scope| {
+        for tid in 0..threads.max(1) {
+            let (begin, end) = ((tid * load).min(n), ((tid + 1) * load).min(n));
+            scope.spawn(move |_| (begin..end).for_each(f));
+        }
+    })
+    .map_err(|e| -> Box<dyn std::error::Error> { format!("{e:?}").into() })
+}
+
 type ProceduralMemoryGVELouvain<Ix, W> = (
     // K' --- renamed to k
     AbstractedProceduralMemoryMut<<W as Weight>::Atomic>,
@@ -62,6 +78,8 @@ pub struct AlgoGVELouvain<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W:
     modularity: f64,
     /// Number of threads to be used in parallel environments.
     threads: usize,
+    /// Whether communities are refined (Leiden's) before they're aggregated.
+    refinement: super::Refinement,
     #[cfg(feature = "bench")]
     /// If feature = "bench" is enabled: store number of iterations, number of nodes (communities),
     /// time for louvain_move() for each pass performed on the graph.
@@ -123,7 +141,34 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         g: &'a GraphMemoryMap<N, E, Ix>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_refinement(g, threads, super::Refinement::None)
+    }
+
+    /// Partitions the graph's nodes as [`new`](Self::new) does, with Leiden's refinement (see
+    /// [`Refinement::Leiden`](super::Refinement::Leiden)): GVE-Leiden.
+    pub fn new_leiden(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_refinement(g, g.thread_num(), super::Refinement::Leiden)
+    }
+
+    /// Partitions the graph's nodes on `threads` threads, its communities refined or not before
+    /// they're aggregated (see [`Refinement`](super::Refinement)).
+    ///
+    /// With [`Refinement::Leiden`](super::Refinement::Leiden), this is GVE-Leiden (Sahu's
+    /// ["GVE-Leiden: Fast Leiden Algorithm for Community Detection in Shared Memory
+    /// Setting"](https://doi.org/10.48550/arXiv.2312.13936)): after each pass's local moving,
+    /// each node still alone in its sub-community (from singletons) joins the neighbouring
+    /// sub-community, within its community, it gains most modularity joining (once, in
+    /// parallel, by a compare-and-swap of its sub-community's weight checking it's still alone),
+    /// sub-communities are aggregated, and each supernode starts the next pass in its community.
+    /// A pass whose refinement keeps more than the aggregation tolerance's fraction of nodes apart
+    /// aggregates its communities instead, as Louvain's.
+    pub fn new_with_refinement(
+        g: &'a GraphMemoryMap<N, E, Ix>,
+        threads: usize,
+        refinement: super::Refinement,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut gve_louvain = Self::new_no_compute(g, threads)?;
+        gve_louvain.refinement = refinement;
         let proc_mem = gve_louvain.init_cache_mem()?;
 
         gve_louvain.compute_with_proc_mem(proc_mem)?;
@@ -163,6 +208,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                         community_count: max,
                         modularity,
                         threads: g.thread_num().max(1),
+                        refinement: super::Refinement::None,
                         #[cfg(feature = "bench")]
                         iters: vec![],
                         _marker: std::marker::PhantomData,
@@ -299,6 +345,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             community_count: 0,
             modularity: 0.,
             threads,
+            refinement: super::Refinement::None,
             #[cfg(feature = "bench")]
             iters: Vec::new(),
             _marker: std::marker::PhantomData,
@@ -591,6 +638,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         m: W,
         tolerance: f64,
         threads: usize,
+        keep_communities: bool,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         // recalculate node load per thread
         let node_load = comm_count.div_ceil(threads);
@@ -628,8 +676,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                                     // unprune all nodes
                                     *helper.get_mut(u) = <Ix as graph::IndexType>::max();
                                     *next_index.get_mut(u * 2) = Ix::new(0);
-                                    // reassign node community to itself
-                                    *c.get_mut(u) = Ix::new(u);
+                                    // reassign node community to itself (unless supernodes start
+                                    // in their communities: Leiden's)
+                                    if !keep_communities {
+                                        *c.get_mut(u) = Ix::new(u);
+                                    }
                                 }
                             }
 
@@ -715,6 +766,85 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         }
 
         Ok(l_iter)
+    }
+
+    /// Leiden's refinement (GVE-Leiden's `leidenRefine`): each node `u` still alone in its
+    /// sub-community (`sub`, from singletons, weighing `sub_sigma`) joins the neighbouring
+    /// sub-community within its community (`bounds`) it gains most modularity joining, if any,
+    /// once, in parallel. It leaves its sub-community only if a compare-and-swap of the
+    /// sub-community's weight, from its own to `0`, finds it still alone: nodes join
+    /// sub-communities through an edge to one of their nodes, which stay, so sub-communities are
+    /// connected.
+    #[allow(clippy::too_many_arguments)]
+    fn leiden_refine(
+        comm_count: usize,
+        k: SharedSliceMut<W::Atomic>,
+        bounds: SharedSliceMut<Ix>,
+        sub: SharedSliceMut<Ix>,
+        sub_sigma: SharedSliceMut<W::Atomic>,
+        index: SharedSliceMut<Ix>,
+        edges: SharedSliceMut<Ix>,
+        weights: SharedSliceMut<W>,
+        m: W,
+        threads: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let load = comm_count.div_ceil(threads);
+        let m_f64 = m.to_f64();
+        thread::scope(|scope| {
+            for tid in 0..threads {
+                let (k, sub_sigma) = (k.clone(), sub_sigma.clone());
+                let mut sub = sub;
+                let begin = (tid * load).min(comm_count);
+                let end = (begin + load).min(comm_count);
+                scope.spawn(move |_| {
+                    let mut nmap: HashMap<usize, W> = HashMap::new();
+                    for u in begin..end {
+                        let c = sub.get(u).index();
+                        let k_u = k.get(u).load(Ordering::Relaxed);
+                        // alone in its sub-community (or without edges)
+                        if sub_sigma.get(c).load(Ordering::Relaxed) != k_u || k_u == W::zero() {
+                            continue;
+                        }
+                        let b = bounds.get(u).index();
+                        nmap.clear();
+                        for e in index.get(2 * u).index()..index.get(2 * u + 1).index() {
+                            let v = edges.get(e).index();
+                            if v != u && bounds.get(v).index() == b {
+                                *nmap.entry(sub.get(v).index()).or_insert(W::zero()) +=
+                                    *weights.get(e);
+                            }
+                        }
+                        let k_u_f64 = k_u.to_f64();
+                        let (mut best, mut best_gain) = (c, 0.0f64);
+                        for (&d, &k_u_d) in nmap.iter() {
+                            if d == c {
+                                continue;
+                            }
+                            let sig_d = sub_sigma.get(d).load(Ordering::Relaxed).to_f64();
+                            // from its own sub-community, alone (`Σ = K_u`, no edge to it)
+                            let dq =
+                                Self::delta_q(k_u_d.to_f64(), 0.0, k_u_f64, sig_d, k_u_f64, m_f64);
+                            if dq > best_gain || (dq == best_gain && best != c && d < best) {
+                                (best, best_gain) = (d, dq);
+                            }
+                        }
+                        if best != c
+                            && best_gain > 1e-12
+                            && sub_sigma
+                                .get(c)
+                                .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |s| {
+                                    (s == k_u).then_some(W::zero())
+                                })
+                                .is_ok()
+                        {
+                            sub_sigma.get(best).fetch_add(k_u, Ordering::Relaxed);
+                            *sub.get_mut(u) = Ix::new(best);
+                        }
+                    }
+                });
+            }
+        })
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("{e:?}").into() })
     }
 
     /// Performs the LouvainAggregate() function as described in ["GVE-Louvain: Fast Louvain Algorithm for Community Detection in Shared Memory Setting"](https://doi.org/10.48550/arXiv.2312.04876) p. 6.
@@ -958,6 +1088,29 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         let sigma = sigma.shared_slice();
         let processed = processed.shared_slice();
 
+        // Leiden's: each pass's communities (bounds), its nodes' sub-communities and their
+        // weights, the supernodes' starting communities, and their communities' first supernodes
+        let leiden_mem = match self.refinement {
+            super::Refinement::None => None,
+            super::Refinement::Leiden => {
+                let file = |seq| self.build_cache_filename(CacheFile::GVELouvain, Some(seq));
+                Some((
+                    SharedSliceMut::<Ix>::abst_mem_mut(&file(13)?, node_count.max(1), true)?,
+                    SharedSliceMut::<Ix>::abst_mem_mut(&file(14)?, node_count.max(1), true)?,
+                    SharedSliceMut::<W::Atomic>::abst_mem_mut(&file(15)?, node_count.max(1), true)?,
+                    SharedSliceMut::<Ix>::abst_mem_mut(&file(16)?, node_count.max(1), true)?,
+                    SharedSliceMut::<AtomicUsize>::abst_mem_mut(
+                        &file(17)?,
+                        node_count.max(1),
+                        true,
+                    )?,
+                ))
+            }
+        };
+        // whether `coms` holds the communities the current graph's (super)nodes start the pass in
+        // (Leiden's): the nodes' communities, if the algorithm ends before moving them
+        let mut pending = false;
+
         // outer loop: louvain passes
         for l_pass in 0..Self::MAX_PASSES {
             if prev_comm_count <= 1 {
@@ -986,6 +1139,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 m,
                 tolerance,
                 threads,
+                pending,
             )?;
 
             #[cfg(feature = "bench")]
@@ -998,7 +1152,58 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             }
 
             if count_iter == 0 {
+                // (Leiden's supernodes are in their communities, moved or not)
+                pending = leiden_mem.is_some();
                 break;
+            }
+            pending = false;
+
+            // Leiden's refinement: the communities local moving found become the bounds, their
+            // nodes' sub-communities (refined, connected) what's aggregated, unless refining
+            // keeps too many nodes apart
+            let mut leiden_level = false;
+            if let Some((bounds, sub, sub_sigma, _, marks)) = &leiden_mem {
+                let (bounds, sub, sub_sigma, marks) = (
+                    bounds.shared_slice(),
+                    sub.shared_slice(),
+                    sub_sigma.shared_slice(),
+                    marks.shared_slice(),
+                );
+                par_for(threads, prev_comm_count, &|u| {
+                    let (mut bounds, mut sub) = (bounds, sub);
+                    *bounds.get_mut(u) = *coms.get(u);
+                    *sub.get_mut(u) = Ix::new(u);
+                    sub_sigma
+                        .get(u)
+                        .store(k.get(u).load(Ordering::Relaxed), Ordering::Relaxed);
+                    marks.get(u).store(0, Ordering::Relaxed);
+                })?;
+                Self::leiden_refine(
+                    prev_comm_count,
+                    k.clone(),
+                    bounds,
+                    sub,
+                    sub_sigma,
+                    index,
+                    edges,
+                    weights,
+                    m,
+                    threads,
+                )?;
+                let pieces = AtomicUsize::new(0);
+                par_for(threads, prev_comm_count, &|u| {
+                    if marks.get(sub.get(u).index()).swap(1, Ordering::Relaxed) == 0 {
+                        pieces.fetch_add(1, Ordering::Relaxed);
+                    }
+                })?;
+                let pieces = pieces.load(Ordering::Relaxed);
+                if pieces as f64 <= Self::AGGREGATION_TOLERANCE * prev_comm_count as f64 {
+                    par_for(threads, prev_comm_count, &|u| {
+                        let mut coms = coms;
+                        *coms.get_mut(u) = *sub.get(u);
+                    })?;
+                    leiden_level = true;
+                }
             }
 
             for u in 0..prev_comm_count {
@@ -1031,8 +1236,46 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 }
             }
 
+            // Leiden's: each supernode's community, labelled by its first supernode
+            if leiden_level && let Some((bounds, _, _, init, firsts)) = &leiden_mem {
+                let (bounds, init, firsts) = (
+                    bounds.shared_slice(),
+                    init.shared_slice(),
+                    firsts.shared_slice(),
+                );
+                par_for(threads, prev_comm_count, &|u| {
+                    firsts
+                        .get(bounds.get(u).index())
+                        .store(usize::MAX, Ordering::Relaxed);
+                })?;
+                par_for(threads, prev_comm_count, &|u| {
+                    firsts
+                        .get(bounds.get(u).index())
+                        .fetch_min(coms.get(u).index(), Ordering::Relaxed);
+                })?;
+                par_for(threads, prev_comm_count, &|u| {
+                    let mut init = init;
+                    let first = firsts.get(bounds.get(u).index()).load(Ordering::Relaxed);
+                    *init.get_mut(coms.get(u).index()) = Ix::new(first);
+                })?;
+            }
+            // the supernodes' starting communities, in `coms` (no longer needed once aggregated)
+            let start_in_communities = |coms: &mut SharedSliceMut<Ix>| {
+                if let Some((_, _, _, init, _)) = &leiden_mem {
+                    let (init, coms) = (init.shared_slice(), *coms);
+                    let _ = par_for(threads, new_comm_count, &|s| {
+                        let mut coms = coms;
+                        *coms.get_mut(s) = *init.get(s);
+                    });
+                }
+            };
+
             // if |Γ|/|Γ𝑜𝑙𝑑 | > 𝜏_𝑎𝑔𝑔 then break
             if new_comm_count as f64 / prev_comm_count as f64 > Self::AGGREGATION_TOLERANCE {
+                if leiden_level {
+                    start_in_communities(&mut coms);
+                    pending = true;
+                }
                 prev_comm_count = new_comm_count;
                 break;
             }
@@ -1065,6 +1308,20 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 println!("{l_pass} aggregation took {_elapsed} micros");
             }
 
+            // Leiden's supernodes start the next pass in their communities
+            if leiden_level {
+                start_in_communities(&mut coms);
+                par_for(threads, new_comm_count, &|s| {
+                    sigma.get(s).store(W::zero(), Ordering::Relaxed);
+                })?;
+                par_for(threads, new_comm_count, &|s| {
+                    sigma
+                        .get(coms.get(s).index())
+                        .fetch_add(k.get(s).load(Ordering::Relaxed), Ordering::Relaxed);
+                })?;
+                pending = true;
+            }
+
             // check aggregation tolerance: if communities did not reduce sufficiently, break cycle
             if new_comm_count as f64 >= (prev_comm_count as f64 * Self::AGGREGATION_TOLERANCE) {
                 prev_comm_count = new_comm_count;
@@ -1084,6 +1341,28 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             new_comm_count = 0;
         }
 
+        // Leiden's last supernodes' communities: the nodes'
+        if pending {
+            par_for(threads, node_count, &|orig| {
+                let mut communities = communities;
+                let s = communities.get(orig).index();
+                *communities.get_mut(orig) = *coms.get(s);
+            })?;
+        }
+
+        // communities split into their connected parts (numbered by smallest node): Louvain may
+        // leave some disconnected (a node holding one together may move out of it), and
+        // splitting them only raises modularity
+        if node_count > 0 {
+            let offsets = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+            let neighbours = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
+            prev_comm_count = super::split_disconnected(
+                threads,
+                offsets.as_slice(),
+                neighbours.as_slice(),
+                &mut self.community.as_mut_slice()[..node_count],
+            )?;
+        }
         self.community_count = prev_comm_count;
 
         // compute partition modularity
@@ -1359,5 +1638,138 @@ mod test {
         assert!(comm_b >= 1 && mod_b.is_finite());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An undirected graph of `n` nodes and `edges` (each once), loaded with `threads` threads.
+    fn undirected(
+        name: &str,
+        n: usize,
+        edges: &[(usize, usize)],
+        threads: u8,
+    ) -> crate::graph::test_utils::TestGraph<(), (), usize> {
+        let dir = unique_test_dir("gve_leiden");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.mtx"));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "{n} {n} {}", edges.len()).unwrap();
+        for &(u, v) in edges {
+            writeln!(f, "{} {}", u.max(v) + 1, u.min(v) + 1).unwrap();
+        }
+        drop(f);
+        let id = format!("gve_leiden_{name}_{}", unique_run_tag());
+        crate::graph::test_utils::TestGraph::new(
+            GraphMemoryMap::from_file(&path, Some(id), Some(threads)).unwrap(),
+            Some(dir),
+        )
+    }
+
+    /// Whether every community's nodes are linked by edges between them.
+    fn connected(n: usize, edges: &[(usize, usize)], comm: &[usize]) -> bool {
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                x = p[x];
+            }
+            x
+        }
+        for &(u, v) in edges {
+            if comm[u] == comm[v] {
+                let (a, b) = (find(&mut parent, u), find(&mut parent, v));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+        let mut root_of = std::collections::HashMap::new();
+        (0..n).all(|u| {
+            let r = find(&mut parent, u);
+            *root_of.entry(comm[u]).or_insert(r) == r
+        })
+    }
+
+    /// `groups` cliques of `size` nodes, each linked to the next by an edge, plus random edges.
+    fn planted_with_noise(
+        groups: usize,
+        size: usize,
+        noise: usize,
+        seed: u64,
+    ) -> Vec<(usize, usize)> {
+        let mut edges = vec![];
+        for k in 0..groups {
+            for i in 0..size {
+                for j in i + 1..size {
+                    edges.push((k * size + i, k * size + j));
+                }
+            }
+            edges.push((k * size, ((k + 1) % groups) * size + 1));
+        }
+        let n = groups * size;
+        edges.extend(
+            crate::components::test_utils::random_arcs(n, noise, seed)
+                .into_iter()
+                .filter(|(u, v)| u != v),
+        );
+        edges
+    }
+
+    #[test]
+    fn gve_communities_are_connected_and_leiden_is_as_good() {
+        use crate::communities::Refinement;
+        for (seed, threads) in (0..16u64).zip([1u8, 2, 4, 8].into_iter().cycle()) {
+            let edges = if seed % 2 == 0 {
+                planted_with_noise(12, 8, 60, 300 + seed)
+            } else {
+                crate::components::test_utils::random_arcs(150, 450, 300 + seed)
+                    .into_iter()
+                    .filter(|(u, v)| u != v)
+                    .collect()
+            };
+            let n = edges.iter().map(|&(u, v)| u.max(v) + 1).max().unwrap();
+            let g = undirected(&format!("conn_{seed}"), n, &edges, threads);
+            let mut q = vec![];
+            for refinement in [Refinement::None, Refinement::Leiden] {
+                let mut l = AlgoGVELouvain::<_, _, _, f64>::new_with_refinement(
+                    &g,
+                    threads as usize,
+                    refinement,
+                )
+                .unwrap();
+                let comm: Vec<usize> = l.communities().iter().map(|c| c.index()).collect();
+                assert!(
+                    connected(n, &edges, &comm),
+                    "seed {seed}, {refinement:?}: disconnected"
+                );
+                assert_eq!(l.community_count(), comm.iter().max().unwrap() + 1);
+                let expected = g.modularity(l.communities(), l.community_count()).unwrap();
+                assert!(
+                    (l.partition_modularity() - expected).abs() < 1e-9,
+                    "seed {seed}, {refinement:?}: {} vs {expected}",
+                    l.partition_modularity()
+                );
+                q.push(l.partition_modularity());
+                l.drop_cache().unwrap();
+            }
+            assert!(
+                q[1] >= q[0] - 0.03,
+                "seed {seed}: leiden {} vs louvain {}",
+                q[1],
+                q[0]
+            );
+        }
+    }
+
+    #[test]
+    fn gve_leiden_recovers_planted_cliques() {
+        let edges = planted_with_noise(20, 10, 0, 0);
+        let g = undirected("planted", 200, &edges, 4);
+        let mut l = AlgoGVELouvain::<_, _, _, f64>::new_leiden(&g).unwrap();
+        let comm: Vec<usize> = l.communities().iter().map(|c| c.index()).collect();
+        for k in 0..20 {
+            assert!(
+                (k * 10..k * 10 + 10).all(|u| comm[u] == comm[k * 10]),
+                "clique {k} split: {comm:?}"
+            );
+        }
+        assert_eq!(l.community_count(), 20);
+        l.drop_cache().unwrap();
     }
 }

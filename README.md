@@ -4,7 +4,7 @@ High-performance **Rust** library for large-scale **static sparse graphs analyti
 
 - **k-core decomposition** (Batagelj–Zaversnik sequential; Liu et al. parallel)
 - **k-truss decomposition** (Burkhardt et al. sequential; PKT parallel)
-- **Louvain** (GVE-Louvain variant)
+- **Louvain and Leiden** (GVE-Louvain and GVE-Leiden variants, undirected and directed, communities always connected)
 - **HyperBall** (HyperLogLog distance/centrality estimation)
 - **PageRank** (partition-centric for graphs whose ranks don't fit in cache, pulling otherwise)
 - **Heat Kernel PageRank** (HK-relax --- SSPR/MSPR)
@@ -34,6 +34,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Directed graphs](#directed-graphs)
   - [Biconnectivity](#biconnectivity)
   - [Assortativity](#assortativity)
+  - [Louvain & Leiden](#louvain--leiden)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -589,8 +590,8 @@ parallel edges, which triangle based algorithms count separately. `Graph::into_d
 
 | Takes | Algorithms |
 |---|---|
-| `Graph` | Degree assortativity, biconnectivity (biconnected components, articulation points, bridges, 2-edge-connected components), triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
-| `DiGraph` | Directed degree assortativity (any of in- and out-degree at either end), `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs) |
+| `Graph` | Degree assortativity, biconnectivity (biconnected components, articulation points, bridges, 2-edge-connected components), triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain and GVE-Leiden, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
+| `DiGraph` | Directed degree assortativity (any of in- and out-degree at either end), `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs; parallel and asynchronous, as GVE-Louvain; with Leiden's refinement too) |
 | either | Numeric and attribute assortativity, BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall (CPU and GPU), exact closeness/harmonic/Lin centralities, `ConnectedComponents` (weak), `StronglyConnectedComponents`, `directed_modularity`, Hierholzer's Euler trails (on a directed graph, every node needs as many arcs in as out) |
 
 The algorithms that work on either follow arcs out of nodes (`Direction::Out`: distances *from*
@@ -698,6 +699,10 @@ edges.
 * The values are prefetched 16 arcs ahead (the `_mm_prefetch` SSE instruction, part of every
   x86-64 CPU). On a 50 million node graph, whose degrees outgrow the last-level cache, this is
   20% faster.
+* Undirected Pearson coefficients don't read the rows outside that pass: a node's degree is
+  its row's length (from the offsets alone) plus its self-loops, counted as its row is read,
+  and the self-loops of the heads are accounted for from their own rows, as arcs come in
+  reverse pairs.
 * Degree and attribute coefficients are computed exactly: their sums are integers (in 128 bits,
   and their products in 256), so they're the same whatever the number of threads. Numeric
   assortativity sums floats with compensation, in a fixed order, so it is the same whatever the
@@ -712,8 +717,39 @@ coefficient:
 
 | Graph | \|V\| | \|E\| | Pearson | Spearman | Attribute | Numeric | Sequential Pearson | Connected components |
 |---|---|---|---|---|---|---|---|---|
-| de Bruijn graph (`graph_8_15`) | 21.9M | 34.4M | 103 ms | 133 ms | 85 ms | 109 ms | 1.77 s | 916 ms |
-| de Bruijn graph (`graph_9_15`) | 50.3M | 99.4M | 244 ms | 293 ms | 208 ms | 281 ms | 4.38 s | 1.99 s |
+| de Bruijn graph (`graph_8_15`) | 21.9M | 34.4M | 74 ms | 119 ms | 86 ms | 101 ms | 1.77 s | 897 ms |
+| de Bruijn graph (`graph_9_15`) | 50.3M | 99.4M | 173 ms | 255 ms | 219 ms | 267 ms | 4.93 s | 2.05 s |
+
+## Louvain & Leiden
+
+Both community detection algorithms, `AlgoGVELouvain` for undirected graphs and `DirectedLouvain`
+for directed graphs (Leicht and Newman's directed modularity), run in parallel, as GVE-Louvain:
+threads move nodes asynchronously, revisiting only those whose neighbours moved, then aggregate
+communities into supergraphs, pass after pass.
+
+* **Connected communities.** Louvain may leave a community internally disconnected, when a node
+  holding it together moves out of it: 0.01% of graph_8_15's communities, for instance. Both split
+  their communities into their connected parts at the end, which costs about as much as connected
+  components, and never lowers modularity (no edge is lost, and the parts' expected edges add up to
+  less than the whole's).
+* **Leiden's refinement** (`Refinement::Leiden`, `new_leiden`; `g.leiden()` in Python), as
+  GVE-Leiden: after each pass's local moving, its communities are refined into connected
+  sub-communities (each node still alone joins the neighbouring sub-community of its community it
+  gains most joining, once, in parallel), which are aggregated, each starting the next pass in its
+  community. It finds better communities on some graphs, for some more time:
+
+| Graph | Louvain | Leiden |
+|---|---|---|
+| de Bruijn graph (`graph_8_15`, 21.9M nodes), undirected | 15.5–16.4 s, modularity 0.839 | 22.0–23.8 s, modularity 0.854 |
+| the same, as a `DiGraph` | 29.7 s, 0.879 | 49.1 s, 0.892 |
+| random graph (8.4M nodes), undirected | 26.3–27.1 s, 0.2190 | 30.2–30.9 s, 0.2190 |
+| planted directed communities (4M nodes) | 3.4 s, 0.850107 | 6.2 s, 0.850106 |
+
+`DirectedLouvain` moves the small supergraphs of large graphs, too dense to move asynchronously
+without nodes going back and forth, by color classes (Lu, Halappanavar and Kalyanaraman's
+Grappolo): colored so that no two linked nodes share a color, a color's nodes are moved at once.
+Its partitions are within a fraction of a percent of sequential Louvain's modularity, or above it,
+40 to 60 times faster on 32 cores (graph_8_15: 31 seconds, against 32 minutes).
 
 ## Python
 

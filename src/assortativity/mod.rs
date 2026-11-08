@@ -143,6 +143,7 @@ fn by_range<T: Send>(
 
 /// An unsigned integer type node values are stored in.
 trait Value: Copy + Default + Send + Sync + 'static {
+    const MAX: u64;
     fn widen(self) -> u64;
     fn narrow(v: u64) -> Self;
 }
@@ -150,6 +151,7 @@ trait Value: Copy + Default + Send + Sync + 'static {
 macro_rules! value {
     ($($t:ty),*) => {$(
         impl Value for $t {
+            const MAX: u64 = <$t>::MAX as u64;
             #[inline(always)]
             fn widen(self) -> u64 {
                 self as u64
@@ -256,15 +258,23 @@ fn prefetch<T>(p: &T) {
 /// `v`'s value `y(v)` is `y_map(y[v])` and `heads(v)` is the number of arcs into it.
 ///
 /// The arcs' only scattered reads are their heads' entries of `y`; the rest streams.
-fn sums<Ix: graph::IndexType, T: Value, M: Fn(u64) -> u64 + Sync>(
+#[allow(clippy::too_many_arguments)]
+fn sums<Ix, T, X, M>(
     a: &Arcs<Ix>,
-    x: &(dyn Fn(usize) -> u64 + Sync),
+    x: &X,
     y: &[T],
     y_map: &M,
     heads: &(dyn Fn(usize) -> u64 + Sync),
     y_max: u64,
+    symmetric: bool,
     over_arcs: bool,
-) -> Result<Sums, Box<dyn std::error::Error>> {
+) -> Result<Sums, Box<dyn std::error::Error>>
+where
+    Ix: graph::IndexType,
+    T: Value,
+    X: Fn(usize) -> u64 + Sync + ?Sized,
+    M: Fn(u64) -> u64 + Sync + ?Sized,
+{
     let (offsets, neighbours) = (a.offsets, a.neighbours);
     let parts = chunked(a.threads, a.n, &|begin, end| {
         let mut s = Sums::default();
@@ -272,13 +282,15 @@ fn sums<Ix: graph::IndexType, T: Value, M: Fn(u64) -> u64 + Sync>(
         for u in begin..end {
             let (b, e) = (offsets[u].index(), offsets[u + 1].index());
             let xu = x(u) as u128;
-            let tails = (e - b) as u128;
-            s.x += tails * xu;
-            s.xx += tails * xu * xu;
-            let yu = y_map(y[u].widen()) as u128;
-            let into = heads(u) as u128;
-            s.y += into * yu;
-            s.yy += into * yu * yu;
+            let tx = (e - b) as u128 * xu;
+            s.x += tx;
+            s.xx += tx * xu;
+            if !symmetric {
+                let yu = y_map(y[u].widen()) as u128;
+                let ty = heads(u) as u128 * yu;
+                s.y += ty;
+                s.yy += ty * yu;
+            }
             if !over_arcs {
                 continue;
             }
@@ -289,8 +301,17 @@ fn sums<Ix: graph::IndexType, T: Value, M: Fn(u64) -> u64 + Sync>(
                 let mut t = 0u64;
                 for i in b..e {
                     let ahead = (i + PREFETCH).min(last);
-                    prefetch(&y[neighbours[ahead].index()]);
-                    t += y_map(y[neighbours[i].index()].widen());
+                    // SAFETY: `b..e` and `ahead` index the chunk's arcs (`last`, its last), and
+                    // arcs' heads are nodes
+                    unsafe {
+                        let (h, v) = (
+                            neighbours.get_unchecked(ahead).index(),
+                            neighbours.get_unchecked(i).index(),
+                        );
+                        debug_assert!(h < y.len() && v < y.len());
+                        prefetch(y.get_unchecked(h));
+                        t += y_map(y.get_unchecked(v).widen());
+                    }
                 }
                 t as u128
             } else {
@@ -302,7 +323,39 @@ fn sums<Ix: graph::IndexType, T: Value, M: Fn(u64) -> u64 + Sync>(
         }
         s
     })?;
-    Ok(parts.into_iter().fold(Sums::default(), |s, p| s + p))
+    let mut s = parts.into_iter().fold(Sums::default(), |s, p| s + p);
+    if symmetric {
+        (s.y, s.yy) = (s.x, s.xx);
+    }
+    Ok(s)
+}
+
+/// [`sums`], the one over arcs here, or by `arc_products`.
+#[allow(clippy::too_many_arguments)]
+fn all_sums<Ix, T, X, M>(
+    a: &Arcs<Ix>,
+    x: &X,
+    y: &[T],
+    y_map: &M,
+    heads: &(dyn Fn(usize) -> u64 + Sync),
+    y_max: u64,
+    symmetric: bool,
+    arc_products: Option<ArcProducts>,
+) -> Result<Sums, Box<dyn std::error::Error>>
+where
+    Ix: graph::IndexType,
+    T: Value,
+    X: Fn(usize) -> u64 + Sync + ?Sized,
+    M: Fn(u64) -> u64 + Sync + ?Sized,
+{
+    match arc_products {
+        None => sums(a, x, y, y_map, heads, y_max, symmetric, true),
+        Some(products) => {
+            let mut s = sums(a, x, y, y_map, heads, y_max, symmetric, false)?;
+            s.xy = products(&|u| x(u), &|v| y_map(y[v].widen()))?;
+            Ok(s)
+        }
+    }
 }
 
 /// `counts[k]`: the sum of `weight(u)` over the nodes `u` of `key(u) == k` (keys `< len`).
@@ -370,10 +423,10 @@ enum Tails<'a> {
 
 /// Pearson's or Spearman's correlation of node degrees over the arcs `u -> v`: of `x(u)` and
 /// `y(v)`, with `heads(v)` arcs into `v` and `y` at most `y_bound`.
-fn degree_correlation<Ix: graph::IndexType, T: Value>(
+fn degree_correlation<Ix: graph::IndexType, T: Value, Y: Fn(usize) -> u64 + Sync + ?Sized>(
     a: &Arcs<Ix>,
     x: Tails,
-    y_of: &(dyn Fn(usize) -> u64 + Sync),
+    y_of: &Y,
     heads: &(dyn Fn(usize) -> u64 + Sync),
     y_bound: u64,
     correlation: Correlation,
@@ -391,42 +444,26 @@ fn degree_correlation<Ix: graph::IndexType, T: Value>(
         })?;
     }
     let y = &y_mem.as_slice()[..a.n];
-    let x_of = |u: usize| match x {
-        Tails::AsHeads => y[u].widen(),
-        Tails::Of(f, _) => f(u),
-    };
     let arcs = a.neighbours.len() as u128;
-    // the sums, the one over arcs here or by `arc_products`
-    let all_sums = |x: &(dyn Fn(usize) -> u64 + Sync),
-                    y_map: &(dyn Fn(u64) -> u64 + Sync),
-                    y_max: u64|
-     -> Result<Sums, Box<dyn std::error::Error>> {
-        match arc_products {
-            None => sums(a, x, y, &y_map, heads, y_max, true),
-            Some(products) => {
-                let mut s = sums(a, x, y, &y_map, heads, y_max, false)?;
-                s.xy = products(x, &|v| y_map(y[v].widen()))?;
-                Ok(s)
-            }
+    // each combination of maps compiled on its own: the arcs' loop calls none
+    let s = match (correlation, x) {
+        (Correlation::Pearson, Tails::AsHeads) => all_sums(
+            a,
+            &|u: usize| y[u].widen(),
+            y,
+            &|d: u64| d,
+            heads,
+            y_bound,
+            true,
+            arc_products,
+        )?,
+        (Correlation::Pearson, Tails::Of(f, _)) => {
+            all_sums(a, f, y, &|d: u64| d, heads, y_bound, false, arc_products)?
         }
-    };
-    let s = match correlation {
-        Correlation::Pearson => all_sums(&x_of, &|d| d, y_bound)?,
-        Correlation::Spearman => {
+        (Correlation::Spearman, x) => {
             let offsets = a.offsets;
             let tails = |u: usize| (offsets[u + 1].index() - offsets[u].index()) as u64;
             let max_y = max_of(a.threads, a.n, &|v| y[v].widen())?;
-            let max_x = match x {
-                Tails::AsHeads => max_y,
-                Tails::Of(_, max) => max,
-            };
-            let rank_x = doubled_ranks(&histogram(
-                a.threads,
-                a.n,
-                max_x as usize + 1,
-                &|u| x_of(u) as usize,
-                &tails,
-            )?);
             let rank_y = doubled_ranks(&histogram(
                 a.threads,
                 a.n,
@@ -435,43 +472,72 @@ fn degree_correlation<Ix: graph::IndexType, T: Value>(
                 heads,
             )?);
             let y_max = rank_y.iter().copied().max().unwrap_or(0);
-            let rank_x = &rank_x;
-            all_sums(
-                &|u| rank_x[x_of(u) as usize],
-                &|d| rank_y[d as usize],
-                y_max,
-            )?
+            let rank_y = &rank_y;
+            let y_rank = |d: u64| rank_y[d as usize];
+            match x {
+                // the tails' ranks the heads': the same values, as many times
+                Tails::AsHeads => all_sums(
+                    a,
+                    &|u: usize| rank_y[y[u].widen() as usize],
+                    y,
+                    &y_rank,
+                    heads,
+                    y_max,
+                    true,
+                    arc_products,
+                )?,
+                Tails::Of(f, max_x) => {
+                    let rank_x = doubled_ranks(&histogram(
+                        a.threads,
+                        a.n,
+                        max_x as usize + 1,
+                        &|u| f(u) as usize,
+                        &tails,
+                    )?);
+                    let rank_x = &rank_x;
+                    all_sums(
+                        a,
+                        &|u: usize| rank_x[f(u) as usize],
+                        y,
+                        &y_rank,
+                        heads,
+                        y_max,
+                        false,
+                        arc_products,
+                    )?
+                }
+            }
         }
     };
     Ok(pearson(arcs, s))
 }
 
 /// `degree_correlation` with `y` in the narrowest type holding `y_bound`.
-fn degree_correlation_narrowest<Ix: graph::IndexType>(
+fn degree_correlation_narrowest<Ix: graph::IndexType, Y: Fn(usize) -> u64 + Sync + ?Sized>(
     a: &Arcs<Ix>,
     x: Tails,
-    y_of: &(dyn Fn(usize) -> u64 + Sync),
+    y_of: &Y,
     heads: &(dyn Fn(usize) -> u64 + Sync),
     y_bound: u64,
     correlation: Correlation,
     arc_products: Option<ArcProducts>,
 ) -> Result<f64, Box<dyn std::error::Error>> {
     if y_bound <= u8::MAX as u64 {
-        degree_correlation::<Ix, u8>(a, x, y_of, heads, y_bound, correlation, arc_products)
+        degree_correlation::<Ix, u8, Y>(a, x, y_of, heads, y_bound, correlation, arc_products)
     } else if y_bound <= u16::MAX as u64 {
-        degree_correlation::<Ix, u16>(a, x, y_of, heads, y_bound, correlation, arc_products)
+        degree_correlation::<Ix, u16, Y>(a, x, y_of, heads, y_bound, correlation, arc_products)
     } else if y_bound <= u32::MAX as u64 {
-        degree_correlation::<Ix, u32>(a, x, y_of, heads, y_bound, correlation, arc_products)
+        degree_correlation::<Ix, u32, Y>(a, x, y_of, heads, y_bound, correlation, arc_products)
     } else {
-        degree_correlation::<Ix, u64>(a, x, y_of, heads, y_bound, correlation, arc_products)
+        degree_correlation::<Ix, u64, Y>(a, x, y_of, heads, y_bound, correlation, arc_products)
     }
 }
 
 /// The largest of `f(u)` over `0..n`.
-fn max_of(
+fn max_of<F: Fn(usize) -> u64 + Sync + ?Sized>(
     threads: usize,
     n: usize,
-    f: &(dyn Fn(usize) -> u64 + Sync),
+    f: &F,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     Ok(chunked(threads, n, &|begin, end| {
         (begin..end).map(f).max().unwrap_or(0)
@@ -517,19 +583,46 @@ fn degree_assortativity_impl<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     correlation: Correlation,
     arc_products: Option<ArcProducts>,
 ) -> Result<f64, Box<dyn std::error::Error>> {
+    if correlation == Correlation::Pearson && arc_products.is_none() {
+        return with_arcs(g, |a| {
+            // rows of up to a byte's length, typically: tried first, the narrowest
+            if let Some(r) = undirected_pearson::<Ix, u8>(a)? {
+                return Ok(r);
+            }
+            let offsets = a.offsets;
+            let max = max_of(a.threads, a.n, &|u: usize| {
+                (offsets[u + 1].index() - offsets[u].index()) as u64
+            })?;
+            Ok(if max <= u16::MAX as u64 {
+                undirected_pearson::<Ix, u16>(a)?
+            } else if max <= u32::MAX as u64 {
+                undirected_pearson::<Ix, u32>(a)?
+            } else {
+                undirected_pearson::<Ix, u64>(a)?
+            }
+            .expect("rows fit"))
+        });
+    }
     with_arcs(g, |a| {
         let (offsets, neighbours) = (a.offsets, a.neighbours);
-        // its row's length, plus its self-loops (sorted rows: by binary search)
+        // its row's length, plus its self-loops (sorted rows: none unless the node is within
+        // its neighbours' range, by binary search then)
         let degree = |u: usize| {
             let row = &neighbours[offsets[u].index()..offsets[u + 1].index()];
-            let loops =
-                row.partition_point(|v| v.index() <= u) - row.partition_point(|v| v.index() < u);
+            let loops = match (row.first(), row.last()) {
+                (Some(lo), Some(hi)) if lo.index() <= u && u <= hi.index() => {
+                    let first = row.partition_point(|v| v.index() < u);
+                    row[first..].iter().take_while(|v| v.index() == u).count()
+                }
+                _ => 0,
+            };
             (row.len() + loops) as u64
         };
         let arcs_of = |u: usize| (offsets[u + 1].index() - offsets[u].index()) as u64;
         // degrees are at most twice their rows' lengths (all self-loops): bounded without
         // reading the rows
         let bound = 2 * max_of(a.threads, a.n, &arcs_of)?;
+
         degree_correlation_narrowest(
             a,
             Tails::AsHeads,
@@ -540,6 +633,108 @@ fn degree_assortativity_impl<N: graph::N, E: graph::E, Ix: graph::IndexType>(
             arc_products,
         )
     })
+}
+
+/// Newman's degree assortativity of an undirected graph, without reading its rows but in the one
+/// pass over its arcs: `None` if a row's length doesn't fit a `T`.
+///
+/// A node's degree `d = r + l` is its row's length `r` plus its self-loops `l`. Heads' `r`s are
+/// read from an array of them (from the offsets alone, narrow), each node's `l` counted as its
+/// row is, and `Σ_u d_u Σ_{v ∈ N(u)} d_v` is `Σ_u (d_u + l_u) T_u + Σ_v l_v Λ_v`, with
+/// `T_u = Σ_{v ∈ N(u)} r_v` and `Λ_v = Σ_{u ∈ N(v)} l_u`: arcs come in reverse pairs (a self-loop
+/// its own reverse), so `Σ_u d_u Σ_{v ∈ N(u)} l_v = Σ_v l_v Σ_{u ∈ N(v)} d_u`. The `Λ`s, over the
+/// rows of nodes with self-loops only, are summed after.
+fn undirected_pearson<Ix: graph::IndexType, T: Value>(
+    a: &Arcs<Ix>,
+) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    let (n, offsets, neighbours) = (a.n, a.offsets, a.neighbours);
+    let row_len = |u: usize| offsets[u + 1].index() - offsets[u].index();
+    // rows' lengths, narrow (failing on one too long)
+    let r_mem = SharedSliceMut::<T>::abst_mem_mut(&(a.scratch)(0)?, n.max(1), true)?;
+    let fits = {
+        let r = r_mem.shared_slice();
+        by_range(a.threads, n, &|begin, end| {
+            let mut r = r;
+            let mut fits = true;
+            for u in begin..end {
+                let len = row_len(u) as u64;
+                fits &= len <= T::MAX;
+                *r.get_mut(u) = T::narrow(len);
+            }
+            fits
+        })?
+    };
+    if !fits.into_iter().all(|f| f) {
+        return Ok(None);
+    }
+    let r = &r_mem.as_slice()[..n];
+    let max_r = T::MAX;
+    let parts = chunked(a.threads, n, &|begin, end| {
+        let mut s = Sums::default();
+        let mut looped: Vec<(usize, u64)> = vec![];
+        let last = offsets[end].index().max(1) - 1;
+        for u in begin..end {
+            let (b, e) = (offsets[u].index(), offsets[u + 1].index());
+            let mut loops = 0u64;
+            // a head's row length, and whether it's a self-loop
+            let head = |i: usize| {
+                // SAFETY: `i` indexes the chunk's arcs (`last`, its last), and heads are nodes
+                unsafe {
+                    let ahead = neighbours.get_unchecked((i + PREFETCH).min(last)).index();
+                    let v = neighbours.get_unchecked(i).index();
+                    debug_assert!(ahead < n && v < n);
+                    prefetch(r.get_unchecked(ahead));
+                    (r.get_unchecked(v).widen(), (v == u) as u64)
+                }
+            };
+            let t = if (e - b) as u128 * max_r as u128 <= u64::MAX as u128 {
+                // in 64 bits, as it surely fits
+                let mut t = 0u64;
+                for i in b..e {
+                    let (rv, l) = head(i);
+                    t += rv;
+                    loops += l;
+                }
+                t as u128
+            } else {
+                let mut t = 0u128;
+                for i in b..e {
+                    let (rv, l) = head(i);
+                    t += rv as u128;
+                    loops += l;
+                }
+                t
+            };
+            let len = (e - b) as u128;
+            let d = len + loops as u128;
+            s.x += len * d;
+            s.xx += len * d * d;
+            s.xy += (d + loops as u128) * t;
+            if loops > 0 {
+                looped.push((u, loops));
+            }
+        }
+        (s, looped)
+    })?;
+    let mut s = Sums::default();
+    let mut looped = vec![];
+    for (p, l) in parts {
+        s = s + p;
+        looped.extend(l);
+    }
+    // Σ_v l_v Λ_v: arcs between nodes with self-loops
+    if !looped.is_empty() {
+        let loops: std::collections::HashMap<usize, u64> = looped.iter().copied().collect();
+        for &(v, l) in &looped {
+            let lambda: u64 = neighbours[offsets[v].index()..offsets[v + 1].index()]
+                .iter()
+                .filter_map(|u| loops.get(&u.index()))
+                .sum();
+            s.xy += l as u128 * lambda as u128;
+        }
+    }
+    (s.y, s.yy) = (s.x, s.xx);
+    Ok(Some(pearson(neighbours.len() as u128, s)))
 }
 
 /// Newman's degree assortativity coefficient of a directed graph ([`Correlation::Pearson`],

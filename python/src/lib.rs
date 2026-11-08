@@ -31,6 +31,7 @@ use sparx::centralities::exact::{
 use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::Precision;
 use sparx::centralities::pagerank::{PageRank, PageRankEngine};
+use sparx::communities::Refinement;
 use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
 use sparx::components::{
@@ -663,9 +664,10 @@ fn directed_clustering<I: Ix>(g: &G<I, Directed>) -> Res<Out> {
     })
 }
 
-fn louvain<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
+fn louvain<I: Ix>(g: &G<I, Undirected>, refinement: Refinement) -> Res<Out> {
     cleaning(g, || {
-        let mut l = AlgoGVELouvain::<_, _, _, f64>::new(g)?;
+        let mut l =
+            AlgoGVELouvain::<_, _, _, f64>::new_with_refinement(g, g.thread_num(), refinement)?;
         let communities = ix_array(l.communities());
         let (count, modularity) = (l.community_count(), l.partition_modularity());
         l.drop_cache()?;
@@ -677,9 +679,9 @@ fn louvain<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
     })
 }
 
-fn directed_louvain<I: Ix>(g: &G<I, Directed>) -> Res<Out> {
+fn directed_louvain<I: Ix>(g: &G<I, Directed>, refinement: Refinement) -> Res<Out> {
     cleaning(g, || {
-        let mut l = DirectedLouvain::new(g)?;
+        let mut l = DirectedLouvain::new_with_refinement(g, 256, 0.0, refinement)?;
         let communities = ix_array(l.communities());
         let (count, modularity) = (l.community_count(), l.partition_modularity());
         l.drop_cache()?;
@@ -1361,8 +1363,18 @@ graph_class!(UGraph, "Graph", {
     }
 
     /// GVE-Louvain communities: `{"communities": per node, "count": ..., "modularity": ...}`.
+    /// Communities are connected (any Louvain leaves disconnected is split into its parts).
     fn louvain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.inner.run(py, |g| with_graph!(g, g => louvain(g)))
+        self.inner
+            .run(py, |g| with_graph!(g, g => louvain(g, Refinement::None)))
+    }
+
+    /// GVE-Leiden communities: Louvain's, each pass's communities refined into connected
+    /// sub-communities before they're aggregated (typically higher modularity, for some more
+    /// time). The same dict as `louvain`.
+    fn leiden<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner
+            .run(py, |g| with_graph!(g, g => louvain(g, Refinement::Leiden)))
     }
 
     /// HyperBall estimates (per node): `distances` and `harmonic_distances` (sums of distances
@@ -1616,8 +1628,20 @@ graph_class!(DGraph, "DiGraph", {
     /// computes on directed graphs): `{"communities": per node, numbered by smallest node,
     /// "count": ..., "modularity": ...}`.
     fn louvain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.inner
-            .run(py, |g| with_graph!(g, g => directed_louvain(g)))
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => directed_louvain(g, Refinement::None)),
+        )
+    }
+
+    /// Leiden communities by directed modularity: Louvain's (see `louvain`), each pass's
+    /// communities refined into (weakly) connected sub-communities before they're aggregated.
+    /// The same dict as `louvain`.
+    fn leiden<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => directed_louvain(g, Refinement::Leiden)),
+        )
     }
 
     /// HyperBall estimates (see `Graph.hyperball`), with distances following arcs in
