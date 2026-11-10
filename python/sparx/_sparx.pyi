@@ -28,8 +28,17 @@ class Spectral(TypedDict, total=False):
     count: int
     modularity: float
     lambda_k: float
-    k_estimate: float  # only when k was estimated
+    k_estimate: float  # only when the compressive engine estimated k
     k_error: float
+    eigenvalues: npt.NDArray[np.float64]  # only with the exact engine
+    converged: bool
+
+class Embedding(TypedDict):
+    eigenvalues: npt.NDArray[np.float64]
+    vectors: npt.NDArray[np.floating]
+    residuals: npt.NDArray[np.float64]
+    iterations: int
+    converged: bool
 
 class LabelPropagation(TypedDict):
     communities: npt.NDArray[np.int64]
@@ -133,13 +142,19 @@ class Graph:
     def clustering(self) -> Clustering: ...
     def louvain(self) -> Louvain: ...
     def label_propagation(
-        self, *, max_iterations: int = 40, tolerance: float = 0.05, exploration: int = 20
+        self,
+        *,
+        max_iterations: int = 40,
+        tolerance: float = 0.05,
+        exploration: int = 20,
+        direction: Literal["both", "in", "out"] = "both",
     ) -> LabelPropagation: ...
     def spectral_clustering(
         self,
         k: Optional[int],
         *,
         matrix: Literal["laplacian", "bethe"] = "laplacian",
+        engine: Literal["compressive", "exact"] = "compressive",
         regularization: Optional[float] = None,
         filter_degree: int = 64,
         moments: int = 128,
@@ -150,8 +165,24 @@ class Graph:
         refine: int = 3,
         seed: int = 0x5EED,
         max_k: int = 4096,
+        subspace_degree: int = 16,
+        tolerance: float = 1e-5,
+        max_iterations: int = 500,
         precision: Literal["f32", "f64"] = "f32",
     ) -> Spectral: ...
+    def spectral_embedding(
+        self,
+        count: int,
+        *,
+        matrix: Literal["laplacian", "bethe"] = "laplacian",
+        regularization: Optional[float] = None,
+        degree: int = 16,
+        tolerance: float = 1e-5,
+        max_iterations: int = 500,
+        oversampling: Optional[int] = None,
+        seed: int = 0x5EED,
+        precision: Literal["f32", "f64"] = "f64",
+    ) -> Embedding: ...
     def leiden(self) -> Louvain: ...
     def hyperball(self, *, precision: int = 8, normalized: bool = True, gpu: bool = False) -> HyperBall: ...
     def closeness(self, *, normalized: bool = True) -> npt.NDArray[np.float64]: ...
@@ -269,6 +300,48 @@ class DiGraph:
     def k_core(self, *, degree: CoreDegree = "total", width: Width = "u8") -> npt.NDArray[np.unsignedinteger]: ...
     def clustering(self) -> DirectedClustering: ...
     def louvain(self) -> Louvain: ...
+    def label_propagation(
+        self,
+        *,
+        max_iterations: int = 40,
+        tolerance: float = 0.05,
+        exploration: int = 20,
+        direction: Literal["both", "in", "out"] = "both",
+    ) -> LabelPropagation: ...
+    def spectral_clustering(
+        self,
+        k: Optional[int],
+        *,
+        matrix: Literal["laplacian", "bethe"] = "laplacian",
+        engine: Literal["compressive", "exact"] = "compressive",
+        regularization: Optional[float] = None,
+        filter_degree: int = 64,
+        moments: int = 128,
+        probes: int = 16,
+        features: Optional[int] = None,
+        sample: Optional[int] = None,
+        restarts: int = 4,
+        refine: int = 3,
+        seed: int = 0x5EED,
+        max_k: int = 4096,
+        subspace_degree: int = 16,
+        tolerance: float = 1e-5,
+        max_iterations: int = 500,
+        precision: Literal["f32", "f64"] = "f32",
+    ) -> Spectral: ...
+    def spectral_embedding(
+        self,
+        count: int,
+        *,
+        matrix: Literal["laplacian", "bethe"] = "laplacian",
+        regularization: Optional[float] = None,
+        degree: int = 16,
+        tolerance: float = 1e-5,
+        max_iterations: int = 500,
+        oversampling: Optional[int] = None,
+        seed: int = 0x5EED,
+        precision: Literal["f32", "f64"] = "f64",
+    ) -> Embedding: ...
     def leiden(self) -> Louvain: ...
     def hyperball(
         self, *, precision: int = 8, normalized: bool = True, gpu: bool = False, direction: Direction = "out"

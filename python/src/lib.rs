@@ -32,10 +32,16 @@ use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::Precision;
 use sparx::centralities::pagerank::{PageRank, PageRankEngine};
 use sparx::communities::Refinement;
+use sparx::communities::approx_dirichlet_hkpr::ApproxDirHKPR;
 use sparx::communities::directed_louvain::DirectedLouvain;
+use sparx::communities::directed_louvain::directed_modularity;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
-use sparx::communities::label_propagation::{LabelPropagation, LpaOptions};
-use sparx::communities::spectral::{SpectralClustering, SpectralMatrix, SpectralOptions};
+use sparx::communities::hk_relax::HKRelax;
+use sparx::communities::label_propagation::{LabelPropagation, LpaDirection, LpaOptions};
+use sparx::communities::spectral::{
+    EmbeddingOptions, SpectralClustering, SpectralEmbedding, SpectralEngine, SpectralMatrix,
+    SpectralOptions,
+};
 use sparx::components::{
     biconnected::Biconnectivity, strong::StronglyConnectedComponents, weak::ConnectedComponents,
 };
@@ -64,6 +70,27 @@ use sparx::trails::dijkstra::{DijkstraDists, ShortestPathEngine};
 type G<Ix, Dir, L = ()> = GraphMemoryMap<(), L, Ix, Dir>;
 /// Weighted graphs' edge labels: `f64` weights.
 type W = Weighted<f64>;
+/// Weighted graphs' edge labels, narrow: `f32` weights (half the memory).
+type W32 = Weighted<f32>;
+
+/// The weights a graph's edges carry.
+#[derive(Clone, Copy, PartialEq)]
+enum Weights {
+    None,
+    F64,
+    F32,
+}
+
+fn weights_of(weighted: bool, weight_type: &str) -> PyResult<Weights> {
+    match (weighted, weight_type) {
+        (false, _) => Ok(Weights::None),
+        (true, "f64") => Ok(Weights::F64),
+        (true, "f32") => Ok(Weights::F32),
+        (true, _) => Err(PyValueError::new_err(format!(
+            "unknown weight type {weight_type:?}: expected 'f64' or 'f32'"
+        ))),
+    }
+}
 type Res<T> = Result<T, Box<dyn Error>>;
 
 /// A result, built into Python objects once the GIL is held again.
@@ -93,6 +120,15 @@ fn arrays(vs: Vec<Vec<i64>>) -> Out {
     Box::new(move |py| {
         let items: Vec<_> = vs.into_iter().map(|v| v.into_pyarray(py)).collect();
         Ok(pyo3::types::PyList::new(py, items)?.into_any())
+    })
+}
+
+/// A `rows × cols` array of `v` (row-major).
+fn matrix_out<T: Element + Send + 'static>(rows: usize, cols: usize, v: Vec<T>) -> Out {
+    Box::new(move |py| {
+        let a = numpy::ndarray::Array2::from_shape_vec((rows, cols), v)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(a.into_pyarray(py).into_any())
     })
 }
 
@@ -128,18 +164,29 @@ enum AnyG<Dir: Directedness> {
     U64(G<usize, Dir>),
     U32W(G<u32, Dir, W>),
     U64W(G<usize, Dir, W>),
+    U32W32(G<u32, Dir, W32>),
+    U64W32(G<usize, Dir, W32>),
 }
 
 impl<Dir: Directedness> AnyG<Dir> {
     fn index(&self) -> &'static str {
         match self {
-            AnyG::U32(_) | AnyG::U32W(_) => "u32",
-            AnyG::U64(_) | AnyG::U64W(_) => "u64",
+            AnyG::U32(_) | AnyG::U32W(_) | AnyG::U32W32(_) => "u32",
+            AnyG::U64(_) | AnyG::U64W(_) | AnyG::U64W32(_) => "u64",
         }
     }
 
     fn weighted(&self) -> bool {
-        matches!(self, AnyG::U32W(_) | AnyG::U64W(_))
+        !matches!(self, AnyG::U32(_) | AnyG::U64(_))
+    }
+
+    /// The weights' type, if weighted.
+    fn weight_type(&self) -> Option<&'static str> {
+        match self {
+            AnyG::U32(_) | AnyG::U64(_) => None,
+            AnyG::U32W(_) | AnyG::U64W(_) => Some("f64"),
+            AnyG::U32W32(_) | AnyG::U64W32(_) => Some("f32"),
+        }
     }
 }
 
@@ -151,6 +198,8 @@ macro_rules! with_graph {
             AnyG::U64($g) => $body,
             AnyG::U32W($g) => $body,
             AnyG::U64W($g) => $body,
+            AnyG::U32W32($g) => $body,
+            AnyG::U64W32($g) => $body,
         }
     };
 }
@@ -722,11 +771,66 @@ fn directed_clustering<I: Ix, L: E>(g: &G<I, Directed, L>) -> Res<Out> {
     })
 }
 
+/// A partition's modularity: Newman's on a `Graph`, Leicht and Newman's on a `DiGraph`.
+fn modularity_of<I: Ix, L: E, Dir: Symmetric>(
+    g: &G<I, Dir, L>,
+    labels: &[I],
+    count: usize,
+) -> Res<f64> {
+    if Dir::DIRECTED {
+        directed_modularity(g, labels)
+    } else {
+        Dir::symmetric(g)?.modularity(labels, count)
+    }
+}
+
+/// What spectral methods run on: a `Graph` itself, a `DiGraph`'s symmetrization (`A + A^T`,
+/// its underlying undirected multigraph, built once and cached with it).
+trait Symmetric: Reversible {
+    fn symmetric<I: Ix, L: E>(g: &G<I, Self, L>) -> Res<&G<I, Undirected, L>>;
+}
+
+impl Symmetric for Undirected {
+    fn symmetric<I: Ix, L: E>(g: &G<I, Self, L>) -> Res<&G<I, Undirected, L>> {
+        Ok(g)
+    }
+}
+
+impl Symmetric for Directed {
+    fn symmetric<I: Ix, L: E>(g: &G<I, Self, L>) -> Res<&G<I, Undirected, L>> {
+        g.to_undirected_with(UndirectedMode::Each)
+    }
+}
+
+/// The spectral embedding, with `W` blocks: `{"eigenvalues", "vectors" (n × count, as `W`s),
+/// "residuals", "iterations", "converged"}`.
+fn spectral_embedding<I: Ix, L: E, Dir: Symmetric, W: sparx::graph::Weight + Element>(
+    g: &G<I, Dir, L>,
+    options: EmbeddingOptions,
+) -> Res<Out> {
+    let u = Dir::symmetric(g)?;
+    cleaning(u, || {
+        let mut e = SpectralEmbedding::<_, _, _, W>::new(u, options)?;
+        let (n, count) = (u.size(), e.count());
+        let vectors = e.vectors().to_vec();
+        let entries = vec![
+            ("eigenvalues", array(e.eigenvalues().to_vec())),
+            ("vectors", matrix_out(n, count, vectors)),
+            ("residuals", array(e.residuals().to_vec())),
+            ("iterations", number(e.iterations())),
+            ("converged", number(e.converged())),
+        ];
+        e.drop_cache()?;
+        Ok(dict(entries))
+    })
+}
+
 /// Spectral clusters, with `W` blocks.
-fn spectral<I: Ix, L: E, W: sparx::graph::Weight>(
-    g: &G<I, Undirected, L>,
+fn spectral<I: Ix, L: E, Dir: Symmetric, W: sparx::graph::Weight>(
+    g: &G<I, Dir, L>,
     options: SpectralOptions,
 ) -> Res<Out> {
+    let g = Dir::symmetric(g)?;
     cleaning(g, || {
         let mut s = SpectralClustering::<_, _, _, W>::new(g, options)?;
         let communities = ix_array(s.communities());
@@ -740,12 +844,35 @@ fn spectral<I: Ix, L: E, W: sparx::graph::Weight>(
             entries.push(("k_estimate", number(estimate)));
             entries.push(("k_error", number(error)));
         }
+        if let Some((values, converged)) = s.eigenvalues() {
+            entries.push(("eigenvalues", array(values.to_vec())));
+            entries.push(("converged", number(converged)));
+        }
         s.drop_cache()?;
         Ok(dict(entries))
     })
 }
 
-fn label_propagation<I: Ix, L: E>(g: &G<I, Undirected, L>, options: LpaOptions) -> Res<Out> {
+fn spectral_matrix(name: &str) -> PyResult<SpectralMatrix> {
+    match name {
+        "laplacian" => Ok(SpectralMatrix::RegularizedLaplacian),
+        "bethe" => Ok(SpectralMatrix::BetheHessian),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown matrix {name:?}: expected 'laplacian' or 'bethe'"
+        ))),
+    }
+}
+
+fn precision_error(name: &str) -> PyErr {
+    PyValueError::new_err(format!(
+        "unknown precision {name:?}: expected 'f32' or 'f64'"
+    ))
+}
+
+fn label_propagation<I: Ix, L: E, Dir: Reversible>(
+    g: &G<I, Dir, L>,
+    options: LpaOptions,
+) -> Res<Out> {
     cleaning(g, || {
         let mut l = LabelPropagation::with_options(g, options)?;
         let communities = ix_array(l.communities());
@@ -760,6 +887,37 @@ fn label_propagation<I: Ix, L: E>(g: &G<I, Undirected, L>, options: LpaOptions) 
         l.drop_cache()?;
         Ok(dict(entries))
     })
+}
+
+/// A local community as a dictionary: its nodes (by descending diffusion), their diffusion
+/// values, and its size, volume (weighted), width (arcs) and conductance.
+fn community_out(c: sparx::graph::Community<usize>) -> Out {
+    let (nodes, heat): (Vec<i64>, Vec<f64>) = c.nodes.iter().map(|&(u, h)| (u as i64, h)).unzip();
+    dict(vec![
+        ("nodes", array(nodes)),
+        ("heat", array(heat)),
+        ("size", number(c.size)),
+        ("volume", number(c.volume)),
+        ("width", number(c.width)),
+        ("conductance", number(c.conductance)),
+    ])
+}
+
+/// Community labels as `Ix`s, checked against `n` nodes; and their count (the largest + 1).
+fn labels_as<I: Ix>(labels: &[usize], n: usize) -> PyResult<(Vec<I>, usize)> {
+    if labels.len() != n {
+        return Err(PyValueError::new_err(format!(
+            "{} labels for {n} nodes",
+            labels.len()
+        )));
+    }
+    if let Some(&l) = labels.iter().find(|&&l| l >= n) {
+        return Err(PyValueError::new_err(format!(
+            "label {l} out of range: labels must be below the node count, {n}"
+        )));
+    }
+    let count = labels.iter().max().map_or(0, |&l| l + 1);
+    Ok((labels.iter().map(|&l| I::new(l)).collect(), count))
 }
 
 fn louvain<I: Ix, L: E>(g: &G<I, Undirected, L>, refinement: Refinement) -> Res<Out> {
@@ -1099,7 +1257,7 @@ fn open_graph<Dir: Directedness>(
     threads: Option<u8>,
     id: Option<String>,
     reopen: bool,
-    weighted: bool,
+    weights: Weights,
     parsing: WeightParsing,
 ) -> Res<AnyG<Dir>> {
     macro_rules! open {
@@ -1112,11 +1270,13 @@ fn open_graph<Dir: Directedness>(
             }
         };
     }
-    Ok(match (index, weighted) {
-        ("u32", false) => AnyG::U32(open!(u32, ())),
-        ("u64", false) => AnyG::U64(open!(usize, ())),
-        ("u32", true) => AnyG::U32W(open!(u32, W)),
-        ("u64", true) => AnyG::U64W(open!(usize, W)),
+    Ok(match (index, weights) {
+        ("u32", Weights::None) => AnyG::U32(open!(u32, ())),
+        ("u64", Weights::None) => AnyG::U64(open!(usize, ())),
+        ("u32", Weights::F64) => AnyG::U32W(open!(u32, W)),
+        ("u64", Weights::F64) => AnyG::U64W(open!(usize, W)),
+        ("u32", Weights::F32) => AnyG::U32W32(open!(u32, W32)),
+        ("u64", Weights::F32) => AnyG::U64W32(open!(usize, W32)),
         _ => return Err(format!("unknown index type {index:?}: expected 'u32' or 'u64'").into()),
     })
 }
@@ -1133,6 +1293,8 @@ fn reopen_as<D2: Directedness, Dir: Directedness>(
         AnyG::U64(_) => AnyG::U64(G::<usize, D2>::open(file, None, threads)?),
         AnyG::U32W(_) => AnyG::U32W(G::<u32, D2, W>::open(file, None, threads)?),
         AnyG::U64W(_) => AnyG::U64W(G::<usize, D2, W>::open(file, None, threads)?),
+        AnyG::U32W32(_) => AnyG::U32W32(G::<u32, D2, W32>::open(file, None, threads)?),
+        AnyG::U64W32(_) => AnyG::U64W32(G::<usize, D2, W32>::open(file, None, threads)?),
     })
 }
 
@@ -1241,7 +1403,7 @@ impl<Dir: Directedness> Inner<Dir> {
         keep_cache: bool,
         id: Option<String>,
         reopen: bool,
-        weighted: bool,
+        weights: Weights,
         parsing: WeightParsing,
     ) -> PyResult<Self> {
         check_index(index)?;
@@ -1253,7 +1415,7 @@ impl<Dir: Directedness> Inner<Dir> {
         let threads = Some(threads.unwrap_or_else(default_threads));
         let g = py
             .detach(|| {
-                open_graph::<Dir>(&path, index, threads, id, reopen, weighted, parsing)
+                open_graph::<Dir>(&path, index, threads, id, reopen, weights, parsing)
                     .map_err(|e| e.to_string())
             })
             .map_err(PyRuntimeError::new_err)?;
@@ -1366,13 +1528,14 @@ macro_rules! graph_class {
             /// is closed (or garbage collected), unless `keep_cache` is true: then
             /// `open(graph.cache_file)` reopens it later without parsing the dataset again.
             ///
-            /// With `weighted=True`, edges carry `f64` weights, read from a MatrixMarket file's
+            /// With `weighted=True`, edges carry `weight_type` (`"f64"`, or `"f32"` for half the
+            /// memory) weights, read from a MatrixMarket file's
             /// values (`pattern` files' edges weigh one; other formats carry no weights, and
             /// fail), which every weight-aware algorithm then uses. `weight_parsing` is `"fast"`
             /// (no per-value validation: malformed values give unspecified weights) or
             /// `"checked"` (malformed, out of range or non-finite values fail).
             #[new]
-            #[pyo3(signature = (path, *, index = "u64", threads = None, keep_cache = false, id = None, weighted = false, weight_parsing = "fast"))]
+            #[pyo3(signature = (path, *, index = "u64", threads = None, keep_cache = false, id = None, weighted = false, weight_parsing = "fast", weight_type = "f64"))]
             #[allow(clippy::too_many_arguments)]
             fn new(
                 py: Python<'_>,
@@ -1383,28 +1546,33 @@ macro_rules! graph_class {
                 id: Option<String>,
                 weighted: bool,
                 weight_parsing: &str,
+                weight_type: &str,
             ) -> PyResult<Self> {
                 let parsing = weight_parsing_of(weight_parsing)?;
+                let weights = weights_of(weighted, weight_type)?;
                 let inner = Inner::load(
-                    py, &path, index, threads, keep_cache, id, false, weighted, parsing,
+                    py, &path, index, threads, keep_cache, id, false, weights, parsing,
                 )?;
                 Ok(Self { inner })
             }
 
             /// Reopens a graph kept in the cache (see `keep_cache`), from its `cache_file`. The
             /// reopened graph keeps its cache too.
-            /// A weighted graph reopens with `weighted=True` (and an unweighted one without).
+            /// A weighted graph reopens with `weighted=True` and its `weight_type` (and an
+            /// unweighted one without).
             #[staticmethod]
-            #[pyo3(signature = (cache_file, *, index = "u64", threads = None, weighted = false))]
+            #[pyo3(signature = (cache_file, *, index = "u64", threads = None, weighted = false, weight_type = "f64"))]
             fn open(
                 py: Python<'_>,
                 cache_file: std::path::PathBuf,
                 index: &str,
                 threads: Option<u8>,
                 weighted: bool,
+                weight_type: &str,
             ) -> PyResult<Self> {
+                let weights = weights_of(weighted, weight_type)?;
                 let inner = Inner::load(
-                    py, &cache_file, index, threads, true, None, true, weighted,
+                    py, &cache_file, index, threads, true, None, true, weights,
                     WeightParsing::Fast,
                 )?;
                 Ok(Self { inner })
@@ -1452,6 +1620,12 @@ macro_rules! graph_class {
             #[getter]
             fn index(&self) -> PyResult<&'static str> {
                 self.inner.with(|g| Ok(g.index()))
+            }
+
+            /// The weights' type, `"f64"` or `"f32"`, or `None` if edges carry none.
+            #[getter]
+            fn weight_type(&self) -> PyResult<Option<&'static str>> {
+                self.inner.with(|g| Ok(g.weight_type()))
             }
 
             /// Whether edges carry weights (see the constructor's `weighted`).
@@ -1673,6 +1847,200 @@ macro_rules! graph_class {
                 }))
             }
 
+            /// Label propagation communities, semi-synchronous (nodes colored so that no
+            /// neighbours share a color, the colors moving in turn, in parallel): the same
+            /// whatever the threads. `{"communities" (numbered by their least node, weakly
+            /// connected), "count", "modularity" (directed, on a `DiGraph`), "moves" (the nodes
+            /// each pass moved), "colors"}`. The first `exploration` passes break ties at random
+            /// (a hash), the node's own label included; then it's kept, until a pass moves at
+            /// most `tolerance` of the nodes, `max_iterations` passes at most. On a `DiGraph`,
+            /// `direction` is the arcs labels follow: `"both"` (directions ignored), `"in"` (a
+            /// node takes its in-neighbours' label: labels spread along arcs) or `"out"`. Fast,
+            /// and good on clear structure; `leiden` finds higher modularity on graphs without it.
+            #[pyo3(signature = (*, max_iterations = 40, tolerance = 0.05, exploration = 20, direction = "both"))]
+            fn label_propagation<'py>(
+                &self,
+                py: Python<'py>,
+                max_iterations: usize,
+                tolerance: f64,
+                exploration: usize,
+                direction: &str,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let direction = match direction {
+                    "both" => LpaDirection::Both,
+                    "in" | "out" if !<Self as GraphClass>::Dir::DIRECTED => {
+                        return Err(PyValueError::new_err(
+                            "direction is a DiGraph's: a Graph's edges have none",
+                        ));
+                    }
+                    "in" => LpaDirection::In,
+                    "out" => LpaDirection::Out,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown direction {direction:?}: expected 'both', 'in' or 'out'"
+                        )));
+                    }
+                };
+                let options = LpaOptions {
+                    max_iterations,
+                    tolerance,
+                    exploration,
+                    direction,
+                };
+                self.inner
+                    .run(py, |g| with_graph!(g, g => label_propagation(g, options)))
+            }
+
+            /// The modularity of a partition given as each node's community label (integers
+            /// below the node count): Newman's, or, on a `DiGraph`, Leicht and Newman's directed
+            /// modularity. Weighted graphs' by their weights.
+            fn modularity(
+                &self,
+                py: Python<'_>,
+                communities: PyArrayLike1<'_, i64, AllowTypeChange>,
+            ) -> PyResult<f64> {
+                let labels: Vec<usize> = communities
+                    .as_array()
+                    .iter()
+                    .map(|&l| if l < 0 { usize::MAX } else { l as usize })
+                    .collect();
+                let n = self.inner.with(|g| Ok(with_graph!(g, g => g.size())))?;
+                if labels.contains(&usize::MAX) {
+                    return Err(PyValueError::new_err("labels must be non-negative"));
+                }
+                // checked here, for a ValueError
+                labels_as::<usize>(&labels, n)?;
+                self.inner.with_detached(py, |g| {
+                    with_graph!(g, g => {
+                        let (labels, count) = labels_as(&labels, n).map_err(|e| e.to_string())?;
+                        modularity_of(g, &labels, count)
+                    })
+                })
+            }
+
+            /// Spectral clusters: `{"communities" (numbered by their least node), "count",
+            /// "modularity", "lambda_k" (the `k`-th least eigenvalue, or the filter's cut-off)}`.
+            /// A `DiGraph` is clustered by its symmetrization (`A + A^T`: each arc an edge,
+            /// weights summed), whose modularity is reported.
+            ///
+            /// `engine` is `"compressive"` (a low-pass graph filter on random signals, then
+            /// k-means: the fastest) or `"exact"` (the eigenvectors themselves, by
+            /// Chebyshev-filtered subspace iteration, to `tolerance`, `max_iterations` at most,
+            /// `subspace_degree` per iteration; the dict then has `"eigenvalues"` and
+            /// `"converged"`). `matrix` is `"laplacian"` (the regularized normalized Laplacian:
+            /// any graph; `regularization` is its `τ`, the mean degree by default) or `"bethe"`
+            /// (the Bethe Hessian: unweighted graphs; weaker clusters). `k=None` chooses `k`: the
+            /// exact engine by the Laplacian's largest eigengap, or the Bethe Hessian's negative
+            /// eigenvalues, among `max_k` (at most 512); the compressive one, with `"bethe"`
+            /// only, roughly (`"k_estimate"` ± `"k_error"`). `precision` is the blocks' (`"f32"`
+            /// halves their memory). The same whatever the threads.
+            #[pyo3(signature = (k, *, matrix = "laplacian", engine = "compressive", regularization = None, filter_degree = 64, moments = 128, probes = 16, features = None, sample = None, restarts = 4, refine = 3, seed = 0x5eed, max_k = 4096, subspace_degree = 16, tolerance = 1e-5, max_iterations = 500, precision = "f32"))]
+            #[allow(clippy::too_many_arguments)]
+            fn spectral_clustering<'py>(
+                &self,
+                py: Python<'py>,
+                k: Option<usize>,
+                matrix: &str,
+                engine: &str,
+                regularization: Option<f64>,
+                filter_degree: usize,
+                moments: usize,
+                probes: usize,
+                features: Option<usize>,
+                sample: Option<usize>,
+                restarts: usize,
+                refine: usize,
+                seed: u64,
+                max_k: usize,
+                subspace_degree: usize,
+                tolerance: f64,
+                max_iterations: usize,
+                precision: &str,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let matrix = spectral_matrix(matrix)?;
+                let engine = match engine {
+                    "compressive" => SpectralEngine::Compressive,
+                    "exact" => SpectralEngine::Exact,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown engine {engine:?}: expected 'compressive' or 'exact'"
+                        )));
+                    }
+                };
+                let options = SpectralOptions {
+                    k,
+                    matrix,
+                    max_k,
+                    regularization,
+                    filter_degree,
+                    moments,
+                    probes,
+                    features,
+                    sample,
+                    restarts,
+                    refine,
+                    seed,
+                    engine,
+                    subspace_degree,
+                    tolerance,
+                    max_iterations,
+                };
+                match precision {
+                    "f32" => self.inner.run(
+                        py,
+                        |g| with_graph!(g, g => spectral::<_, _, _, f32>(g, options)),
+                    ),
+                    "f64" => self.inner.run(
+                        py,
+                        |g| with_graph!(g, g => spectral::<_, _, _, f64>(g, options)),
+                    ),
+                    _ => Err(precision_error(precision)),
+                }
+            }
+
+            /// The `count` least eigenpairs of the graph's regularized Laplacian (`matrix=
+            /// "laplacian"`) or Bethe Hessian (`"bethe"`), by Chebyshev-filtered subspace
+            /// iteration: `{"eigenvalues" (ascending), "vectors" (n × count, each node's
+            /// embedding), "residuals", "iterations", "converged"}`. A `DiGraph`'s are its
+            /// symmetrization's (`A + A^T`). The same whatever the threads.
+            #[pyo3(signature = (count, *, matrix = "laplacian", regularization = None, degree = 16, tolerance = 1e-5, max_iterations = 500, oversampling = None, seed = 0x5eed, precision = "f64"))]
+            #[allow(clippy::too_many_arguments)]
+            fn spectral_embedding<'py>(
+                &self,
+                py: Python<'py>,
+                count: usize,
+                matrix: &str,
+                regularization: Option<f64>,
+                degree: usize,
+                tolerance: f64,
+                max_iterations: usize,
+                oversampling: Option<usize>,
+                seed: u64,
+                precision: &str,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let options = EmbeddingOptions {
+                    count,
+                    matrix: spectral_matrix(matrix)?,
+                    regularization,
+                    degree,
+                    tolerance,
+                    max_iterations,
+                    oversampling,
+                    seed,
+                };
+                match precision {
+                    "f32" => self.inner.run(
+                        py,
+                        |g| with_graph!(g, g => spectral_embedding::<_, _, _, f32>(g, options)),
+                    ),
+                    "f64" => self.inner.run(
+                        py,
+                        |g| with_graph!(g, g => spectral_embedding::<_, _, _, f64>(g, options)),
+                    ),
+                    _ => Err(precision_error(precision)),
+                }
+            }
+
             $($own)*
         }
     };
@@ -1790,98 +2158,6 @@ graph_class!(UGraph, "Graph", {
     fn leiden<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.inner
             .run(py, |g| with_graph!(g, g => louvain(g, Refinement::Leiden)))
-    }
-
-    /// Label propagation communities, semi-synchronous (nodes colored so that no neighbours
-    /// share a color, the colors moving in turn, in parallel): the same whatever the threads.
-    /// `{"communities" (numbered by their least node, connected), "count", "modularity",
-    /// "moves" (the nodes each pass moved), "colors"}`. The first `exploration` passes break ties
-    /// at random (a hash), the node's own label included; then it's kept, until a pass moves at
-    /// most `tolerance` of the nodes, `max_iterations` passes at most. Fast, and good on clear
-    /// structure; `leiden` finds higher modularity on graphs without it.
-    #[pyo3(signature = (*, max_iterations = 40, tolerance = 0.05, exploration = 20))]
-    fn label_propagation<'py>(
-        &self,
-        py: Python<'py>,
-        max_iterations: usize,
-        tolerance: f64,
-        exploration: usize,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let options = LpaOptions {
-            max_iterations,
-            tolerance,
-            exploration,
-        };
-        self.inner
-            .run(py, |g| with_graph!(g, g => label_propagation(g, options)))
-    }
-
-    /// Spectral clusters, by compressive spectral clustering (a low-pass graph filter on random
-    /// signals, then k-means): `{"communities" (numbered by their least node), "count",
-    /// "modularity", "lambda_k" (the filter's cut-off eigenvalue)}`.
-    ///
-    /// `matrix` is `"laplacian"` (the regularized normalized Laplacian: any graph, weighted or
-    /// not; `regularization` is its `τ`, the mean degree by default) or `"bethe"` (the Bethe
-    /// Hessian: unweighted graphs; it finds weaker clusters, with a higher `filter_degree` and
-    /// more `moments`). With `"bethe"`, `k=None` estimates the number of clusters, roughly (the
-    /// dict then has `"k_estimate"` and its standard error, `"k_error"`). `precision` is the
-    /// blocks' (`"f32"` halves their memory). The rest are `SpectralOptions`' (see the crate's
-    /// docs). The same whatever the threads.
-    #[pyo3(signature = (k, *, matrix = "laplacian", regularization = None, filter_degree = 64, moments = 128, probes = 16, features = None, sample = None, restarts = 4, refine = 3, seed = 0x5eed, max_k = 4096, precision = "f32"))]
-    #[allow(clippy::too_many_arguments)]
-    fn spectral_clustering<'py>(
-        &self,
-        py: Python<'py>,
-        k: Option<usize>,
-        matrix: &str,
-        regularization: Option<f64>,
-        filter_degree: usize,
-        moments: usize,
-        probes: usize,
-        features: Option<usize>,
-        sample: Option<usize>,
-        restarts: usize,
-        refine: usize,
-        seed: u64,
-        max_k: usize,
-        precision: &str,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let matrix = match matrix {
-            "laplacian" => SpectralMatrix::RegularizedLaplacian,
-            "bethe" => SpectralMatrix::BetheHessian,
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown matrix {matrix:?}: expected 'laplacian' or 'bethe'"
-                )));
-            }
-        };
-        let options = SpectralOptions {
-            k,
-            matrix,
-            max_k,
-            regularization,
-            filter_degree,
-            moments,
-            probes,
-            features,
-            sample,
-            restarts,
-            refine,
-            seed,
-        };
-        match precision {
-            "f32" => self.inner.run(
-                py,
-                |g| with_graph!(g, g => spectral::<_, _, f32>(g, options)),
-            ),
-            "f64" => self.inner.run(
-                py,
-                |g| with_graph!(g, g => spectral::<_, _, f64>(g, options)),
-            ),
-            _ => Err(PyValueError::new_err(format!(
-                "unknown precision {precision:?}: expected 'f32' or 'f64'"
-            ))),
-        }
     }
 
     /// HyperBall estimates (per node): `distances` and `harmonic_distances` (sums of distances
@@ -2062,6 +2338,102 @@ graph_class!(UGraph, "Graph", {
             py,
             |g| with_graph!(g, g => dijkstra(g, source, engine, predecessors)),
         )
+    }
+
+    /// A local community around `seeds`, by HK-Relax (Kloster and Gleich's heat kernel
+    /// diffusion, at temperature `t` and to error `eps`, then a sweep cut by conductance, up to
+    /// `target_size` nodes and `target_volume` volume, when given): `{"nodes" (by descending
+    /// diffusion), "heat", "size", "volume", "width", "conductance"}`. Weighted graphs diffuse by
+    /// their weights.
+    #[pyo3(signature = (seeds, *, t = 10.0, eps = 1e-4, target_size = None, target_volume = None))]
+    fn hk_relax<'py>(
+        &self,
+        py: Python<'py>,
+        seeds: Vec<usize>,
+        t: f64,
+        eps: f64,
+        target_size: Option<usize>,
+        target_volume: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        for &s in &seeds {
+            self.inner.check_node(s)?;
+        }
+        self.inner.run(py, |g| {
+            with_graph!(g, g => {
+                let hk = HKRelax::new(g, t, eps, seeds, target_size, target_volume)?;
+                Ok(community_out(hk.compute()?))
+            })
+        })
+    }
+
+    /// A local community around `seed`, by Chung and Simpson's approximate Dirichlet heat
+    /// kernel PageRank (random walks, to error `eps`, their temperature set by the targets),
+    /// then a sweep cut by conductance: the same dict as `hk_relax`. `random_seed` seeds the
+    /// walks (the same seed, the same community).
+    #[pyo3(signature = (seed, *, eps = 0.1, target_size = None, target_volume = None, target_conductance = 0.1, random_seed = 0x5eed))]
+    #[allow(clippy::too_many_arguments)]
+    fn hkpr<'py>(
+        &self,
+        py: Python<'py>,
+        seed: usize,
+        eps: f64,
+        target_size: Option<usize>,
+        target_volume: Option<usize>,
+        target_conductance: f64,
+        random_seed: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.check_node(seed)?;
+        self.inner.run(py, |g| {
+            with_graph!(g, g => {
+                let size = target_size.unwrap_or(g.size().div_ceil(2));
+                let volume = target_volume.unwrap_or(g.width().div_ceil(4));
+                let hkpr = ApproxDirHKPR::new(g, eps, seed, size, volume, target_conductance)?
+                    .with_random_seed(random_seed);
+                Ok(community_out(hkpr.compute()?))
+            })
+        })
+    }
+
+    /// The best community by conductance among the prefixes of `nodes` sorted by descending
+    /// `heat` (any diffusion's values), up to `target_size` nodes and `target_volume` volume,
+    /// when given: the same dict as `hk_relax`.
+    #[pyo3(signature = (nodes, heat, *, target_size = None, target_volume = None))]
+    fn sweep_cut<'py>(
+        &self,
+        py: Python<'py>,
+        nodes: PyArrayLike1<'py, i64, AllowTypeChange>,
+        heat: PyArrayLike1<'py, f64, AllowTypeChange>,
+        target_size: Option<usize>,
+        target_volume: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (nodes, heat) = (nodes.as_array(), heat.as_array());
+        if nodes.len() != heat.len() {
+            return Err(PyValueError::new_err(format!(
+                "nodes and heat must be as many: {} and {}",
+                nodes.len(),
+                heat.len()
+            )));
+        }
+        let n = self.inner.with(|g| Ok(with_graph!(g, g => g.size())))?;
+        let mut diffusion = Vec::with_capacity(nodes.len());
+        for (&u, &h) in nodes.iter().zip(heat.iter()) {
+            if u < 0 || u as u64 >= n as u64 {
+                return Err(PyValueError::new_err(format!(
+                    "node {u} out of range: the graph has {n} nodes"
+                )));
+            }
+            if !h.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "heat must be finite, not {h}"
+                )));
+            }
+            diffusion.push((u as usize, h));
+        }
+        // by descending heat (ties by node), as sweep cuts need
+        diffusion.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        self.inner.run(py, |g| {
+            with_graph!(g, g => Ok(community_out(g.sweep_cut(&mut diffusion, target_size, target_volume)?)))
+        })
     }
 
     /// The graph as a `DiGraph`, each edge an arc each way: for directed algorithms. It maps

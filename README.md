@@ -470,7 +470,9 @@ non-negative:
 | `DirectedLouvain`, `directed_modularity` | weighted directed modularity, still exact: weights must be integers (`3.0` is one), totalling at most `2^60` |
 | `ClusteringCoefficient`, `DirectedClusteringCoefficient` | Onnela's and Fagiolo's weighted local coefficients (transitivity stays unweighted, as networkx's) |
 | `degree_assortativity`, `directed_degree_assortativity` | correlation of strengths (weighted degrees), Pearson's or Spearman's |
-| `HKRelax`, `ApproxDirHKPR`, `sweep_cut` | weighted diffusion, walks and conductance (`Community::volume` is the weighted volume, `width` the arc count) |
+| `HKRelax`, `ApproxDirHKPR`, `sweep_cut` | weighted diffusion, walks and conductance (`Community::volume` is the weighted volume, `width` the arc count); sweeps break ties in diffusion by node, and `ApproxDirHKPR`'s walks are seeded (`with_random_seed`), so communities repeat exactly |
+| `LabelPropagation` | labels weigh their arcs' weights |
+| `SpectralClustering`, `SpectralEmbedding` | the weighted adjacency's regularized Laplacian (the Bethe Hessian is unweighted only) |
 | `ExactClosenessCentrality`, `ExactHarmonicCentrality`, `ExactLinCentrality` | weighted distances (networkx's `distance="weight"`), by Dijkstra's algorithm from every node; nodes at distance zero count as reached but add nothing to harmonic sums |
 | `DijkstraDists` (`trails::dijkstra`) | single-source weighted distances (`f64::INFINITY` where unreachable), `BFSDists`' weighted counterpart: Dijkstra's algorithm, or Δ-stepping on many threads (see below) |
 | `astar`, `astar_many`, `Landmarks` (`trails::astar`) | point-to-point shortest paths (see below) |
@@ -478,6 +480,12 @@ non-negative:
 Unweighted graphs keep the batched multi-source BFSs: the choice is made at compile time, from
 the edge label type. `BFSDists` and the other traversals, HyperBall (whose counters count hops),
 k-cores, k-trusses, triangles and components ignore weights.
+
+Two gaps are left on purpose. GGCAT and nodes/edges inputs carry no edge weights (GGCAT's
+abundances are unitigs', not edges'; the nodes/edges text format, BCALM's, has none), so they
+refuse weighted labels: weighted graphs come from MatrixMarket files. And `degree_assortativity_gpu`
+on weighted graphs sums on the CPU: the GPU variants are exact, summing integer products, which
+strengths (floats) aren't, and WGSL has no portable `f64`.
 
 ### Shortest Paths & A*
 
@@ -887,6 +895,23 @@ communities into supergraphs, pass after pass.
 | random graph (8.4M nodes), undirected | 26.3–27.1 s, 0.2190 | 30.2–30.9 s, 0.2190 |
 | planted directed communities (4M nodes) | 3.4 s, 0.850107 | 6.2 s, 0.850106 |
 
+* **Local moving runs (nearly) to convergence.** GVE-Louvain stops a pass's local moving once an
+  iteration's gains add up to less than 0.01; on sparse graphs, whose nodes gain about `1 / m`
+  each, that stopped it while its communities were still pairs, a fifth of them across the true
+  ones, which aggregating made permanent. The initial tolerance is `1e-6` instead: on a planted
+  partition of 10 thousand nodes, modularity rose from 0.587 to 0.657 (Louvain) and 0.584 to 0.660
+  (Leiden), networkx's Louvain finding 0.65 to 0.68, at no measurable cost on graphs of millions
+  of edges (which it changed by 0.005 at most). Gains tied between communities are broken in the
+  same order every run, so single-threaded runs repeat exactly (parallel ones still depend on the
+  threads' timing).
+* **Locally tree-like graphs.** On sparse graphs whose communities are large (a node's few
+  neighbours in its community rarely linked to each other), any Louvain stalls: once nodes pair
+  up, a node has at most one edge to most communities, and no move gains. On a planted partition
+  of a million nodes of mean degree 16, modularity 0.47 for blocks of 15,625 nodes (the planted
+  partition's is 0.79), against 0.68 for blocks of 1,250; on 100 thousand nodes in blocks of 25
+  thousand, 0.42, as networkx's Louvain's. Label propagation and spectral clustering, which pool
+  what many nodes see, find such communities (see below).
+
 `DirectedLouvain` moves the small supergraphs of large graphs, too dense to move asynchronously
 without nodes going back and forth, by color classes (Lu, Halappanavar and Kalyanaraman's
 Grappolo): colored so that no two linked nodes share a color, a color's nodes are moved at once.
@@ -924,8 +949,30 @@ threads):
 | 50% | NMI 0.95, 22 s | NMI 0.01, 3.4 s |
 | 60% | NMI 0.83 (Bethe Hessian, degree 384), 194 s | NMI 0.00 |
 
-It needs `k`, and clusters must be what the low eigenvectors show: on a compacted de Bruijn
-graph (half a million nodes), Leiden's communities had modularity 0.69 to its 0.47.
+Clusters must be what the low eigenvectors show: on a compacted de Bruijn graph (half a million
+nodes), Leiden's communities had modularity 0.69 to spectral clustering's 0.47.
+
+**The exact engine** (`SpectralEngine::Exact`) clusters the `k` least eigenvectors themselves,
+found by Chebyshev-filtered subspace iteration (Zhou, Saad, Tiago and Chelikowsky) with locking:
+each iteration filters the active vectors by a Chebyshev polynomial damping the spectrum above
+them (products of the graph with the block, in parallel), orthonormalizes them off the converged,
+locked ones (by their Gram matrix's eigendecomposition: no dense library), and takes their
+Rayleigh-Ritz pairs. Locking matters: a filter amplifies isolated eigenvalues' vectors by orders
+of magnitude more than the rest, which then can't be told apart (the Bethe Hessian below didn't
+converge at all without it). Without `k`, it chooses it: the Laplacian's largest eigengap among
+`max_k`, or the Bethe Hessian's clearly negative eigenvalues, stopping once the gap after them is
+resolved beyond doubt. On the same partitions (k = 64):
+
+| arcs across blocks | compressive | exact, k given | exact, k chosen |
+|---|---|---|---|
+| 40% (Laplacian) | NMI 0.972, 20 s | NMI 0.991, 30 s | 64 chosen (gap 0.664 → 0.758), 45 s |
+| 50% (Laplacian) | NMI 0.946, 21 s | NMI 0.969, 37 s | 64 chosen |
+| 60% (Bethe Hessian) | NMI 0.826, 194 s (degree 384) | NMI 0.907, 42 s | 64 chosen, 65 s |
+
+`SpectralEmbedding` returns the eigenpairs themselves (each node's row of the eigenvectors, the
+eigenvalues, residuals), matching a dense eigendecomposition's to `1e-7`. A directed graph is
+clustered or embedded by its symmetrization, `A + A^T` (`new_directed`: its underlying undirected
+multigraph, built once and cached).
 
 ```rust
 use sparx::communities::spectral::{SpectralClustering, SpectralOptions};
@@ -947,7 +994,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 color (Jones and Plassmann's coloring, in parallel), and the colors take turns, each's nodes
 moving at once. No neighbour of a node moves while it does, so the communities are the same
 whatever the threads, unlike asynchronous LPA's, and they don't oscillate, unlike synchronous
-LPA's. From GVE-LPA (Sahu) it takes pruning (only nodes with a neighbour that moved are looked
+LPA's. Directed graphs' labels follow their arcs as `LpaDirection` says: `Both` (directions
+ignored: the underlying undirected multigraph's communities, exactly), `In` (a node takes its
+in-neighbours' label: labels spread along the arcs) or `Out`; nodes are colored so that no node
+moves at once with a neighbour either way, and modularity is directed (Leicht and Newman's).
+From GVE-LPA (Sahu) it takes pruning (only nodes with a neighbour that moved are looked
 at again) and its tolerance (it stops once a pass moves 5% of the nodes or fewer). For the first
 20 passes, ties are broken by a hash, the node's own label included (Raghavan et al.'s rule):
 keeping the own label on ties, as the semi-synchronous rule does to converge, freezes sparse

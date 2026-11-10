@@ -158,7 +158,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                         }
                         let isolated_comm = comm_count - sum;
                         isolated_nodes_comm.store(isolated_comm, Ordering::Relaxed);
-                        println!("new max comm {isolated_comm}");
                     }
                     synchronize.wait();
 
@@ -171,9 +170,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                             let comm_u = communities.get(u).index();
                             let new_comm_u = comm_u - *counter.get(comm_u);
                             *communities.get_mut(u) = Ix::new(new_comm_u);
-                            if new_comm_u > 1000000000 {
-                                println!("{u}");
-                            }
                         }
                     }
                 }));
@@ -214,7 +210,9 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         target_size: Option<usize>,
         target_volume: Option<usize>,
     ) -> Result<Community<usize>, Box<dyn std::error::Error>> {
-        diffusion.sort_unstable_by_key(|(_, mass)| std::cmp::Reverse(OrderedFloat(*mass)));
+        // by descending mass, ties by node: the same sweep whatever order the diffusion came in
+        // (hash maps', say)
+        diffusion.sort_unstable_by_key(|&(u, mass)| (std::cmp::Reverse(OrderedFloat(mass)), u));
         let target_size = target_size.unwrap_or(self.size());
         let target_volume = target_volume.unwrap_or(self.width());
         let weighted = E::is_weighted();
@@ -299,11 +297,6 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
 
             // truncate sweep if vol or size go over double the target value
             if community.len() > target_size * 2 || vol_s > target_volume * 2 {
-                println!(
-                    "Sweep cut truncated with size: {} and volume {}\n\tTarget size: {target_size}\n\tTarget volume: {target_volume}",
-                    community.len(),
-                    vol_s
-                );
                 break;
             }
         }

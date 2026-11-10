@@ -6,7 +6,33 @@ use crate::shared_slice::*;
 use crossbeam::thread;
 #[allow(unused_imports)]
 use portable_atomic::{AtomicBool, AtomicF64, AtomicUsize, Ordering};
-use std::collections::HashMap;
+use std::collections::HashMap as StdHashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// Hashes community ids by a multiplication, folded: unlike `std`'s default (randomly seeded
+/// per map), the same ids hash alike every run, so the maps list them in the same order, and
+/// gains tied between communities are broken alike (single-threaded runs repeat exactly).
+#[derive(Clone, Copy, Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    #[inline(always)]
+    fn write_usize(&mut self, n: usize) {
+        let x = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = x ^ (x >> 32);
+    }
+}
+
+type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<IdHasher>>;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::Arc;
@@ -95,8 +121,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
     const MAX_ITERATIONS: usize = 20;
     /// Described in 4.1.3 Adjusting tolerance drop rate (threshold scaling).
     const TOLERANCE_DROP: f64 = 10.;
-    /// Described in 4.1.4 Adjusting initial tolerance.
-    const INITIAL_TOLERANCE: f64 = 0.01;
+    /// Described in 4.1.4 Adjusting initial tolerance (where it's 0.01: the local-moving phase
+    /// stops once an iteration's modularity gains add up to less). On a sparse graph's first
+    /// pass, though, nodes gain about `1 / m` each, and 0.01 stops it while its communities are
+    /// still pairs, about a fifth of them across communities, which aggregating then makes
+    /// permanent: on a planted partition of 10 thousand nodes, modularity 0.587 (Louvain) and
+    /// 0.584 (Leiden), where networkx's Louvain finds 0.65 to 0.68. This runs local moving
+    /// (nearly) to convergence instead, for 0.657 and 0.660, at no measurable cost on graphs of
+    /// millions of edges (which it changed by 0.005 at most).
+    const INITIAL_TOLERANCE: f64 = 1e-6;
     /// Described in 4.1.4 Adjusting aggregation tolerance.
     const AGGREGATION_TOLERANCE: f64 = 0.8;
     /// Maximum number of passes to be performed (a pass is an iteration of the Louvain() function described in "GVE-Louvain: Fast Louvain Algorithm for
@@ -672,11 +705,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         tolerance: f64,
         threads: usize,
         keep_communities: bool,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
+    ) -> Result<(usize, bool), Box<dyn std::error::Error>> {
         // recalculate node load per thread
         let node_load = comm_count.div_ceil(threads);
 
         let mut l_iter = 0;
+        // whether any node moved (an iteration gaining less than the tolerance may have)
+        let mut moved = false;
         let synchronize = Arc::new(Barrier::new(threads));
 
         for i in 0..Self::MAX_ITERATIONS {
@@ -688,7 +723,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 let mut thread_res = Vec::with_capacity(threads);
                 for tid in 0..threads {
                     let mut local_delta_q_sum = 0.0;
-                    let mut nmap: HashMap<usize, W> = HashMap::new();
+                    let mut nmap: HashMap<usize, W> = HashMap::default();
 
                     let k = k.clone();
                     let s = sigma.clone();
@@ -799,6 +834,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             })
             .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
+            moved |= global_delta_q.load(Ordering::Relaxed) > 0.;
             // check convergence criteria for the local-moving phase
             if global_delta_q.load(Ordering::Relaxed).abs() < tolerance {
                 break;
@@ -806,7 +842,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             l_iter += 1;
         }
 
-        Ok(l_iter)
+        Ok((l_iter, moved))
     }
 
     /// Leiden's refinement (GVE-Leiden's `leidenRefine`): each node `u` still alone in its
@@ -838,7 +874,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 let begin = (tid * load).min(comm_count);
                 let end = (begin + load).min(comm_count);
                 scope.spawn(move |_| {
-                    let mut nmap: HashMap<usize, W> = HashMap::new();
+                    let mut nmap: HashMap<usize, W> = HashMap::default();
                     for u in begin..end {
                         let c = sub.get(u).index();
                         let k_u = k.get(u).load(Ordering::Relaxed);
@@ -936,7 +972,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             for tid in 0..threads {
 
                 // hashmap to store edges for each community
-                let mut nm: HashMap<usize, W> = HashMap::new();
+                let mut nm: HashMap<usize, W> = HashMap::default();
 
                 let counter = counter.clone();
                 let k = k.clone();
@@ -1185,7 +1221,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             // li <- louvain_move(G', C', K', Σ′)
             // if 𝑙𝑖 ≤ 1 then break --- adjusted to 𝑙𝑖 ≤ 0 as we don't increment before loop ends
             // as is teh case with the algorithm author
-            let count_iter = Self::louvain_move(
+            let (_count_iter, moved) = Self::louvain_move(
                 l_pass,
                 prev_comm_count,
                 k.clone(),
@@ -1207,12 +1243,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             {
                 let elapsed = before.elapsed().as_micros();
                 println!(
-                    "{l_pass} did {count_iter} iterations on {prev_comm_count} nodes, in {elapsed} micros"
+                    "{l_pass} did {_count_iter} iterations on {prev_comm_count} nodes, in {elapsed} micros"
                 );
-                self.iters.push((count_iter, prev_comm_count, elapsed));
+                self.iters.push((_count_iter, prev_comm_count, elapsed));
             }
 
-            if count_iter == 0 {
+            // nothing moved: done (if some nodes moved, though less than the tolerance, their
+            // moves are kept, and the aggregation tolerance ends it below)
+            if !moved {
                 // (Leiden's supernodes are in their communities, moved or not)
                 pending = leiden_mem.is_some();
                 break;
@@ -2088,6 +2126,54 @@ mod test {
                     (q - reference_modularity(&g, &com)).abs() < 1e-5,
                     "seed {seed}"
                 );
+            }
+        }
+    }
+
+    /// Louvain's (or Leiden's) communities and modularity.
+    fn run(g: &GraphMemoryMap<(), (), usize>, leiden: bool) -> (Vec<usize>, f64) {
+        let l = if leiden {
+            AlgoGVELouvain::<_, _, _, f64>::new_leiden(g)
+        } else {
+            AlgoGVELouvain::<_, _, _, f64>::new(g)
+        }
+        .unwrap();
+        let com: Vec<usize> = l.communities().iter().map(|c| c.index()).collect();
+        (com, l.partition_modularity())
+    }
+
+    /// On a sparse planted partition (modularity 0.674), Louvain and Leiden find as much as
+    /// networkx's Louvain does (0.60 to 0.63, by its seed): 0.597 and 0.616 here, single-threaded.
+    /// With GVE-Louvain's initial tolerance of 0.01, local moving stopped while communities were
+    /// still pairs (a fifth of them across blocks), which aggregating made permanent: 0.503.
+    #[test]
+    fn sparse_planted_partitions_are_found() {
+        let (weighted, truth) =
+            crate::communities::spectral::test::planted(8, 1250, 0.0102, 0.000366, 21);
+        let edges: Vec<(usize, usize)> = weighted.iter().map(|e| (e.0, e.1)).collect();
+        let g = undirected("sparse_planted", 10_000, &edges, 1);
+        let truth_ix: Vec<usize> = truth.clone();
+        let planted_q = g.modularity(&truth_ix, 8).unwrap();
+        for leiden in [false, true] {
+            let (_, q) = run(&g, leiden);
+            assert!(
+                q > planted_q - 0.12,
+                "leiden {leiden}: {q} vs planted {planted_q}"
+            );
+        }
+    }
+
+    /// Single-threaded runs repeat exactly: communities tied in gain are listed (and the tie
+    /// broken) in the same order every run.
+    #[test]
+    fn single_threaded_runs_repeat() {
+        let (weighted, _) = crate::communities::spectral::test::planted(6, 300, 0.04, 0.002, 22);
+        let edges: Vec<(usize, usize)> = weighted.iter().map(|e| (e.0, e.1)).collect();
+        let g = undirected("repeat", 1800, &edges, 1);
+        for leiden in [false, true] {
+            let first = run(&g, leiden);
+            for _ in 0..3 {
+                assert_eq!(run(&g, leiden), first, "leiden {leiden}");
             }
         }
     }

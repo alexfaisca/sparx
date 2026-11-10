@@ -1363,7 +1363,9 @@ def test_spectral_clustering_of_weighted_graphs_and_errors():
             g.spectral_clustering(3, precision="f16")
         with pytest.raises(RuntimeError, match="k must be"):
             g.spectral_clustering(301)
-    assert not hasattr(sparx.DiGraph, "spectral_clustering")
+    with sparx.Graph(undirected(G, "rejects.mtx")) as g:
+        with pytest.raises(ValueError, match="engine"):
+            g.spectral_clustering(3, engine="lanczos")
 
 
 def test_label_propagation():
@@ -1384,4 +1386,128 @@ def test_label_propagation():
     with sparx.Graph(undirected(G, "lpa_bad.mtx")) as g:
         with pytest.raises(RuntimeError, match="tolerance"):
             g.label_propagation(tolerance=2.0)
-    assert not hasattr(sparx.DiGraph, "label_propagation")
+    with sparx.Graph(undirected(G, "lpa_direction.mtx")) as g:
+        with pytest.raises(ValueError, match="DiGraph"):
+            g.label_propagation(direction="in")
+
+
+def directed_planted(seed=8):
+    G = nx.planted_partition_graph(4, 120, 0.15, 0.004, seed=seed)
+    rng = np.random.default_rng(seed)
+    D = nx.DiGraph()
+    D.add_nodes_from(G)
+    D.add_edges_from((u, v) if rng.random() < 0.5 else (v, u) for u, v in G.edges())
+    return D, [u // 120 for u in range(len(D))]
+
+
+def test_directed_label_propagation():
+    D, truth = directed_planted()
+    with sparx.DiGraph(directed(D)) as d:
+        both = d.label_propagation()
+        with d.to_undirected(mode="each") as u:
+            assert np.array_equal(both["communities"], u.label_propagation()["communities"])
+        for direction in ["both", "in", "out"]:
+            lp = d.label_propagation(direction=direction)
+            assert nmi(lp["communities"], truth) > 0.95, direction
+            parts = [set(np.flatnonzero(lp["communities"] == c).tolist()) for c in range(lp["count"])]
+            assert lp["modularity"] == pytest.approx(nx.community.modularity(D, parts), abs=1e-9)
+        with pytest.raises(ValueError, match="direction"):
+            d.label_propagation(direction="sideways")
+
+
+def regularized_laplacian(G):
+    A = nx.to_numpy_array(G, nodelist=range(len(G)))
+    d = A.sum(1)
+    s = 1 / np.sqrt(d + d.mean())
+    return np.eye(len(G)) - s[:, None] * A * s[None, :]
+
+
+def test_spectral_embedding_and_exact_engine():
+    G = nx.planted_partition_graph(5, 60, 0.25, 0.01, seed=9)
+    truth = [u // 60 for u in range(len(G))]
+    want = np.linalg.eigvalsh(regularized_laplacian(G))
+    with sparx.Graph(undirected(G)) as g:
+        e = g.spectral_embedding(8, tolerance=1e-9)
+        assert e["converged"] and e["vectors"].shape == (len(G), 8) and e["vectors"].dtype == np.float64
+        np.testing.assert_allclose(e["eigenvalues"], want[:8], atol=1e-7)
+        np.testing.assert_allclose(e["vectors"].T @ e["vectors"], np.eye(8), atol=1e-8)
+        assert g.spectral_embedding(8, precision="f32")["vectors"].dtype == np.float32
+        given = g.spectral_clustering(5, engine="exact")
+        assert given["converged"] and nmi(given["communities"], truth) > 0.95
+        np.testing.assert_allclose(given["eigenvalues"], want[:5], atol=1e-4)
+        chosen = g.spectral_clustering(None, engine="exact", max_k=12)
+        assert chosen["count"] == 5 and len(chosen["eigenvalues"]) == 13
+        with pytest.raises(RuntimeError, match="max_k"):
+            g.spectral_clustering(None, engine="exact")
+    D, dtruth = directed_planted(10)
+    with sparx.DiGraph(directed(D)) as d:
+        for engine in ["compressive", "exact"]:
+            s = d.spectral_clustering(4, engine=engine)
+            with d.to_undirected(mode="each") as u:
+                assert np.array_equal(s["communities"], u.spectral_clustering(4, engine=engine)["communities"])
+            assert nmi(s["communities"], dtruth) > 0.95
+        assert d.spectral_embedding(4)["converged"]
+
+
+def test_f32_weights_and_to_directed_keep_weights(cache_dir):
+    G = with_random_weights(nx.gnp_random_graph(80, 0.08, seed=12), 3)
+    path = weighted_undirected(G)
+    with sparx.Graph(path, weighted=True) as g64, sparx.Graph(path, weighted=True, weight_type="f32", keep_cache=True) as g32:
+        assert (g64.weight_type, g32.weight_type) == ("f64", "f32")
+        np.testing.assert_allclose(g32.edge_weights(), g64.edge_weights(), rtol=1e-6)
+        np.testing.assert_allclose(g32.pagerank(tol=1e-10), g64.pagerank(tol=1e-10), rtol=1e-5)
+        cache_file = g32.cache_file
+        # weights survive to_directed
+        d = g64.to_directed()
+        assert d.is_weighted and d.weight_type == "f64"
+        assert np.array_equal(d.edge_weights(), g64.edge_weights())
+    with sparx.Graph.open(cache_file, weighted=True, weight_type="f32") as g:
+        assert g.weight_type == "f32"
+    with pytest.raises(ValueError, match="weight type"):
+        sparx.Graph(path, weighted=True, weight_type="f16")
+    for f in cache_dir.iterdir():
+        f.unlink()
+
+
+def test_modularity_of_given_partitions():
+    G = with_random_weights(nx.planted_partition_graph(3, 30, 0.3, 0.02, seed=4), 5)
+    labels = np.array([u // 30 for u in range(len(G))])
+    parts = [set(range(c * 30, (c + 1) * 30)) for c in range(3)]
+    with sparx.Graph(undirected(G)) as g:
+        assert g.modularity(labels) == pytest.approx(nx.community.modularity(G, parts, weight=None), abs=1e-12)
+    with sparx.Graph(weighted_undirected(G), weighted=True) as g:
+        assert g.modularity(labels) == pytest.approx(nx.community.modularity(G, parts), abs=1e-12)
+        with pytest.raises(ValueError, match="labels for"):
+            g.modularity(labels[:-1])
+        with pytest.raises(ValueError, match="out of range"):
+            g.modularity(np.full(len(G), len(G)))
+    D, truth = directed_planted()
+    dparts = [set(np.flatnonzero(np.array(truth) == c).tolist()) for c in range(4)]
+    with sparx.DiGraph(directed(D)) as d:
+        assert d.modularity(np.array(truth)) == pytest.approx(nx.community.modularity(D, dparts), abs=1e-12)
+
+
+def test_local_communities():
+    G = nx.planted_partition_graph(4, 50, 0.3, 0.005, seed=13)
+    with sparx.Graph(undirected(G)) as g:
+        for c in [g.hk_relax([3], t=10.0, eps=1e-4), g.hkpr(3, eps=0.1, target_size=60, target_volume=800)]:
+            nodes = set(c["nodes"].tolist())
+            assert 3 in nodes and c["size"] == len(nodes)
+            assert c["conductance"] == pytest.approx(nx.conductance(G, nodes), abs=1e-12)
+            assert c["volume"] == pytest.approx(nx.volume(G, nodes))
+        # seeded: the same walks, the same community
+        a, b = g.hkpr(3, random_seed=1), g.hkpr(3, random_seed=1)
+        assert np.array_equal(a["nodes"], b["nodes"]) and np.array_equal(a["heat"], b["heat"])
+        # the sweep's community is the best prefix by conductance (up to twice the target
+        # size), whatever order the diffusion comes in
+        heat = np.array([2.0 if u < 50 else 1.0 / (u + 1) for u in range(200)])
+        order = np.argsort(-heat, kind="stable")
+        best = min((nx.conductance(G, set(order[:i].tolist())), i) for i in range(1, 101))
+        cut = g.sweep_cut(np.arange(200)[::-1], heat[::-1], target_size=50)
+        assert cut["conductance"] == pytest.approx(best[0], abs=1e-12)
+        assert set(cut["nodes"].tolist()) == set(order[: best[1]].tolist())
+        with pytest.raises(ValueError, match="as many"):
+            g.sweep_cut([0, 1], [1.0])
+        with pytest.raises(ValueError, match="out of range"):
+            g.sweep_cut([0, 500], [1.0, 0.5])
+    assert not hasattr(sparx.DiGraph, "hk_relax")

@@ -67,12 +67,19 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   which the parent owns: they're usable while it's open, and raise `RuntimeError` after.
 * Inputs: Matrix Market (`.mtx`), [ggcat](https://github.com/algbio/ggcat) graphs (`.lz4`) and
   nodes/edges files.
-* `weighted=True` reads a Matrix Market file's values as `f64` edge weights (`pattern` files'
-  edges weigh one; ggcat and nodes/edges files carry no weights, and fail). `weight_parsing` is
+* `weighted=True` reads a Matrix Market file's values as edge weights, `weight_type="f64"` (the
+  default) or `"f32"` (half the memory; `weight_type` reads it back) (`pattern` files' edges weigh
+  one; ggcat and nodes/edges files carry no weights, and fail). `weight_parsing` is
   `"fast"` (the default: no per-value validation, malformed values give unspecified weights) or
   `"checked"` (malformed, out of range or non-finite values raise). `is_weighted`, `weights(u)`
   and `edge_weights()` (in `csr()` order) read them back; unweighted graphs' weigh one. A kept
-  weighted graph reopens with `open(cache_file, weighted=True)`.
+  weighted graph reopens with `open(cache_file, weighted=True)` (and its `weight_type`).
+* `modularity(communities)` is a given partition's (each node's label): Newman's, or on a `DiGraph`
+  Leicht and Newman's directed modularity; weighted on weighted graphs. On a `Graph`,
+  `hk_relax(seeds)` (Kloster and Gleich's heat kernel diffusion) and `hkpr(seed)` (Chung and
+  Simpson's approximate Dirichlet heat kernel PageRank, seeded by `random_seed`) find a local
+  community by a sweep cut, `sweep_cut(nodes, heat)` sweeps any diffusion: `{"nodes", "heat",
+  "size", "volume", "width", "conductance"}`.
 * On weighted graphs, algorithms follow networkx's `weight="weight"`: PageRank (transitions in
   proportion to weight), Louvain and Leiden (weighted modularity), clustering (Onnela's and
   Fagiolo's weighted coefficients; transitivity stays unweighted, as networkx's) and degree
@@ -113,19 +120,23 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   attribute coefficients are exact, and the same whatever the number of threads; a coefficient
   is `NaN` where it's undefined (for example, all degrees equal). `attribute_assortativity`
   takes integer labels: for others, pass `numpy.unique(labels, return_inverse=True)[1]`.
-* `Graph.label_propagation()` finds communities by semi-synchronous label propagation (colors
-  of non-adjacent nodes moving in turn): `{"communities", "count", "modularity", "moves",
-  "colors"}`, the same whatever the threads, connected and numbered by their least node.
-  Faster than `leiden()`, and as good or better on clear structure; `leiden()`'s modularity is
-  higher on graphs without it.
-* `Graph.spectral_clustering(k)` clusters by compressive spectral clustering (a low-pass graph
-  filter on random signals, then k-means), into `{"communities", "count", "modularity",
-  "lambda_k"}`, the same whatever the threads. `matrix="laplacian"` (the default, regularized
-  by the mean degree; any graph) or `"bethe"` (the Bethe Hessian: unweighted graphs, weaker
-  clusters, with a higher `filter_degree` and more `moments`; with `k=None` it estimates `k`,
-  roughly, as `"k_estimate"` ± `"k_error"`). On planted partitions it finds clusters Leiden
-  misses; on graphs without a few clear clusters (de Bruijn graphs), Leiden's modularity is
-  higher. For a `DiGraph`, cluster its `to_undirected()`.
+* `label_propagation()` finds communities by semi-synchronous label propagation (colors of
+  non-adjacent nodes moving in turn): `{"communities", "count", "modularity", "moves",
+  "colors"}`, the same whatever the threads, connected and numbered by their least node. On a
+  `DiGraph`, `direction="in"` has labels spread along arcs (`"out"` against them, `"both"`, the
+  default, ignores directions) and the modularity is directed. Faster than `leiden()`, and as
+  good or better on clear structure; `leiden()`'s modularity is higher on graphs without it.
+* `spectral_clustering(k)` clusters by spectral clustering, into `{"communities", "count",
+  "modularity", "lambda_k"}`, the same whatever the threads. `engine="compressive"` (the default)
+  filters random signals by a low-pass graph filter; `engine="exact"` finds the eigenvectors
+  themselves (Chebyshev-filtered subspace iteration, with locking; `"eigenvalues"` and
+  `"converged"` in the dict), and with `k=None` chooses `k` by the largest eigengap among
+  `max_k`. `matrix="laplacian"` (the default, regularized by the mean degree; any graph) or
+  `"bethe"` (the Bethe Hessian: unweighted graphs, weaker clusters). A `DiGraph` is clustered by
+  its symmetrization (`A + A^T`). `spectral_embedding(count)` returns the eigenpairs themselves:
+  `{"eigenvalues", "vectors" (n × count), "residuals", "iterations", "converged"}`. On planted
+  partitions it finds clusters Leiden misses; on graphs without a few clear clusters (de Bruijn
+  graphs), Leiden's modularity is higher.
 * `louvain()` and `leiden()` communities are connected: any community Louvain leaves
   internally disconnected is split into its parts, which only raises modularity. `leiden()`
   refines each pass's communities into connected sub-communities before aggregating them

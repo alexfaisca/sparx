@@ -1170,4 +1170,44 @@ pub(crate) mod test {
             }
         }
     }
+
+    /// Converting a weighted graph's cache to another index type keeps every arc's weight, so
+    /// weighted algorithms find the same results on the converted graph.
+    #[test]
+    fn index_conversion_keeps_weights() {
+        let arcs = weighted_arcs(200, 900, 61, true);
+        fn check<Dir: Directedness, NewIx: graph::IndexType>(g: &WGraph<Dir>) {
+            let mut c = g.convert_index_type::<NewIx>().unwrap();
+            assert_eq!((c.size(), c.width()), (g.size(), g.width()));
+            for u in 0..g.size() {
+                let a: Vec<(usize, u64)> = g
+                    .weighted_neighbours(u)
+                    .unwrap()
+                    .map(|(v, l)| (v, l.weight::<f64>().to_bits()))
+                    .collect();
+                let b: Vec<(usize, u64)> = c
+                    .weighted_neighbours(u)
+                    .unwrap()
+                    .map(|(v, l)| (v, l.weight::<f64>().to_bits()))
+                    .collect();
+                assert_eq!(a, b, "node {u}");
+            }
+            assert_eq!(
+                c.total_weight().unwrap().to_bits(),
+                g.total_weight().unwrap().to_bits()
+            );
+            let mut d0 = DijkstraDists::new(&**g, 0).unwrap();
+            let mut d1 = DijkstraDists::new(&c, 0).unwrap();
+            assert_eq!(d0.get_distances(), d1.get_distances());
+            d0.drop_cache().unwrap();
+            d1.drop_cache().unwrap();
+            c.drop_cache().unwrap();
+        }
+        let g = weighted::<Undirected>("convert_u", 200, &arcs);
+        check::<Undirected, u32>(&g);
+        check::<Undirected, u16>(&g);
+        let d = weighted::<Directed>("convert_d", 200, &arcs);
+        check::<Directed, u32>(&d);
+        check::<Directed, u16>(&d);
+    }
 }

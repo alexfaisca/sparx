@@ -2,7 +2,8 @@ use crate::graph::{self, *};
 use crate::utils::{f64_is_nomal, f64_to_usize_safe};
 
 use ordered_float::OrderedFloat;
-use rand::{Rng, rng};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Poisson};
 use std::collections::HashMap;
 
@@ -25,6 +26,9 @@ pub struct ApproxDirHKPR<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
     pub target_size: usize,
     /// Partition's target edge number --- defaults to quarter of the graph (tolerance up to half graph).
     pub target_vol: usize,
+    /// The random walks' and step counts' seed (see [`with_random_seed`](Self::with_random_seed)):
+    /// the same seed, the same community.
+    pub random_seed: u64,
 }
 
 /// Type of limiter to be used for the number of steps to take for each random walk.
@@ -125,6 +129,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             t_formula,
         )?;
         Ok(ApproxDirHKPR {
+            random_seed: 0x5eed,
             g,
             t,
             eps,
@@ -135,11 +140,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
         })
     }
 
+    /// The same, sampling random walks and their lengths from `seed` (by default a fixed one:
+    /// a computation's community is the same every run).
+    pub fn with_random_seed(mut self, seed: u64) -> Self {
+        self.random_seed = seed;
+        self
+    }
+
     fn random_sample_poisson(
         lambda: f64,
         n: usize,
+        rng: &mut StdRng,
     ) -> Result<Vec<OrderedFloat<f64>>, Box<dyn std::error::Error>> {
-        let mut rng = rng();
         let poisson = match Poisson::new(lambda) {
             Ok(dist) => dist,
             Err(e) => {
@@ -150,7 +162,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             }
         };
         Ok(poisson
-            .sample_iter(&mut rng)
+            .sample_iter(&mut *rng)
             .take(n)
             .map(OrderedFloat)
             .collect())
@@ -198,8 +210,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
         &self,
         k: usize,
         seed_node: usize,
+        rng: &mut StdRng,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let mut rng = rand::rng();
         let mut curr_node = seed_node;
         for _ in 0..k {
             match self.pick_neighbour(curr_node, rng.random())? {
@@ -250,9 +262,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             }
         };
         let k = OrderedFloat(k);
-        println!(
-            "k (ceil on sample value) computed to be {k}\nr (number of samples) computed to be {r}",
-        );
 
         let num_samples: usize = match f64_to_usize_safe(r) {
             Some(s) => s,
@@ -262,7 +271,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
                 );
             }
         };
-        let steps: Vec<OrderedFloat<f64>> = Self::random_sample_poisson(self.t, num_samples)?;
+        let mut rng = StdRng::seed_from_u64(self.random_seed);
+        let steps: Vec<OrderedFloat<f64>> =
+            Self::random_sample_poisson(self.t, num_samples, &mut rng)?;
         let mut aprox_hkpr_samples: HashMap<usize, f64> = HashMap::new();
 
         for little_k in steps {
@@ -276,7 +287,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
                     .into());
                 }
             };
-            let v = self.random_walk_seed(little_k_usize, self.seed)?;
+            let v = self.random_walk_seed(little_k_usize, self.seed, &mut rng)?;
             match aprox_hkpr_samples.get_mut(&v) {
                 Some(v) => *v += one_over_r,
                 None => {
@@ -300,13 +311,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             .g
             .sweep_cut(p.as_mut(), Some(self.target_size), Some(self.target_vol))
         {
-            Ok(c) => {
-                println!(
-                    "best community approxdirichlethkpr {{\n\tsize: {}\n\tvolume/width: {}\n\tconductance: {}\n}}",
-                    c.size, c.width, c.conductance
-                );
-                Ok(c)
-            }
+            Ok(c) => Ok(c),
             Err(e) => Err(format!("error approx-dirichlet-hkpr performing sweepcut: {e}").into()),
         }
     }
@@ -329,10 +334,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
 
         let k = f64_is_nomal(2. * self.t, "2. * t")?;
         let k = OrderedFloat(k);
-        println!(
-            "k (ceil on sample value) computed to be {}\nr (number of samples) computed to be {}",
-            k, r
-        );
 
         let num_samples: usize = match f64_to_usize_safe(r) {
             Some(s) => s,
@@ -342,7 +343,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
                 );
             }
         };
-        let steps: Vec<OrderedFloat<f64>> = Self::random_sample_poisson(self.t, num_samples)?;
+        let mut rng = StdRng::seed_from_u64(self.random_seed);
+        let steps: Vec<OrderedFloat<f64>> =
+            Self::random_sample_poisson(self.t, num_samples, &mut rng)?;
         let mut aprox_hkpr_samples: HashMap<usize, f64> = HashMap::new();
 
         for little_k in steps {
@@ -356,7 +359,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
                     .into());
                 }
             };
-            let v = self.random_walk_seed(little_k_usize, self.seed)?;
+            let v = self.random_walk_seed(little_k_usize, self.seed, &mut rng)?;
             match aprox_hkpr_samples.get_mut(&v) {
                 Some(v) => *v += one_over_r,
                 None => {
@@ -380,13 +383,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             .g
             .sweep_cut(p.as_mut(), Some(self.target_size), Some(self.target_vol))
         {
-            Ok(c) => {
-                println!(
-                    "best community approxdirichlethkpr {{\n\tsize: {}\n\tvolume/width: {}\n\tconductance: {}\n}}",
-                    c.size, c.width, c.conductance
-                );
-                Ok(c)
-            }
+            Ok(c) => Ok(c),
             Err(e) => Err(format!("error approx-dirichlet-hkpr performing sweep cut: {e}").into()),
         }
     }

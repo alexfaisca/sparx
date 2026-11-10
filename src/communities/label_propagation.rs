@@ -36,6 +36,7 @@
 use crate::graph;
 use crate::graph::*;
 use crate::shared_slice::*;
+use crate::trails::astar::Reversible;
 use crate::utils::SpinBarrier;
 
 use std::mem::ManuallyDrop;
@@ -60,6 +61,21 @@ pub struct LpaOptions {
     /// degree 16, 20% of arcs across), 5 passes left 86 thousand communities, 10 left 37
     /// thousand, and 20 found the blocks (an NMI of 0.955); more changed nothing.
     pub exploration: usize,
+    /// On directed graphs, the arcs a node's label follows (on undirected ones, every edge).
+    pub direction: LpaDirection,
+}
+
+/// Which neighbours' labels a node of a directed graph counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LpaDirection {
+    /// Its in- and out-neighbours' (directions ignored): as on the underlying undirected
+    /// multigraph.
+    #[default]
+    Both,
+    /// Its in-neighbours': labels spread along the arcs (as information flows).
+    In,
+    /// Its out-neighbours': labels spread against the arcs.
+    Out,
 }
 
 impl Default for LpaOptions {
@@ -70,6 +86,7 @@ impl Default for LpaOptions {
             max_iterations: 40,
             tolerance: 0.05,
             exploration: 20,
+            direction: LpaDirection::Both,
         }
     }
 }
@@ -81,8 +98,14 @@ impl Default for LpaOptions {
 /// Memory: each node's label, color class position and pending flag, besides the result.
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
-pub struct LabelPropagation<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> {
-    g: &'a Graph<N, E, Ix>,
+pub struct LabelPropagation<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     communities: AbstractedProceduralMemoryMut<Ix>,
     count: usize,
     modularity: f64,
@@ -142,22 +165,58 @@ fn chunked<T: Send, S>(
     parts.into_iter().map(|p| p.1).collect()
 }
 
-/// `g`'s nodes by color (Jones and Plassmann's, see the [module docs](self)): the nodes,
-/// color after color (by node, within one), and each color's first position, with an end.
-fn color_classes<N: graph::N, E: graph::E, Ix: graph::IndexType>(
-    g: &Graph<N, E, Ix>,
+/// A graph's arcs, compressed by row (a graph's own, or its transpose's).
+#[derive(Clone, Copy)]
+struct Csr<'g, Ix, E> {
+    offsets: &'g [Ix],
+    targets: &'g [Ix],
+    weights: &'g [E],
+}
+
+impl<'g, Ix: graph::IndexType, E: graph::E> Csr<'g, Ix, E> {
+    fn of<N: graph::N, Dir: Directedness>(g: &'g GraphMemoryMap<N, E, Ix, Dir>) -> Self {
+        let offsets = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
+        let targets = SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width());
+        let weights = SharedSlice::<E>::new(g.edge_labels_ptr(), g.width());
+        // the slices live as long as `g`'s maps
+        unsafe {
+            Self {
+                offsets: std::slice::from_raw_parts(
+                    offsets.as_slice().as_ptr(),
+                    offsets.as_slice().len(),
+                ),
+                targets: std::slice::from_raw_parts(
+                    targets.as_slice().as_ptr(),
+                    targets.as_slice().len(),
+                ),
+                weights: std::slice::from_raw_parts(
+                    weights.as_slice().as_ptr(),
+                    weights.as_slice().len(),
+                ),
+            }
+        }
+    }
+
+    /// `u`'s arcs' range.
+    #[inline(always)]
+    fn range(&self, u: usize) -> std::ops::Range<usize> {
+        self.offsets[u].index()..self.offsets[u + 1].index()
+    }
+}
+
+/// The nodes by color (Jones and Plassmann's, see the [module docs](self)), no two nodes linked
+/// by an arc of any of `csrs` of the same color: the nodes, color after color (by node, within
+/// one), and each color's first position, with an end.
+fn color_classes<Ix: graph::IndexType, E: graph::E>(
+    csrs: &[Csr<Ix, E>],
+    n: usize,
     color_file: &str,
     threads: usize,
 ) -> Result<(Vec<usize>, Vec<usize>), Error> {
     const NONE: u32 = u32::MAX;
-    let n = g.size();
-    let offsets = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
-    let targets = SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width());
-    let (offsets, targets) = (offsets.as_slice(), targets.as_slice());
     let neighbours = |u: usize| {
-        targets[offsets[u].index()..offsets[u + 1].index()]
-            .iter()
-            .map(|v| v.index())
+        csrs.iter()
+            .flat_map(move |c| c.targets[c.range(u)].iter().map(|v| v.index()))
     };
     // u before v if u's priority is higher
     let priority = |u: usize| (mix(u as u64), u);
@@ -234,14 +293,20 @@ fn color_classes<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     Ok((order, starts))
 }
 
-impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N, E, Ix> {
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
+    LabelPropagation<'a, N, E, Ix, Dir>
+{
     /// Finds `g`'s communities with [`LpaOptions::default`].
-    pub fn new(g: &'a Graph<N, E, Ix>) -> Result<Self, Error> {
+    pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Error> {
         Self::with_options(g, LpaOptions::default())
     }
 
-    /// Finds `g`'s communities as `options` say.
-    pub fn with_options(g: &'a Graph<N, E, Ix>, options: LpaOptions) -> Result<Self, Error> {
+    /// Finds `g`'s communities as `options` say. On directed graphs, the transpose is built if
+    /// it isn't yet.
+    pub fn with_options(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        options: LpaOptions,
+    ) -> Result<Self, Error> {
         if !(options.tolerance.is_finite() && (0. ..=1.).contains(&options.tolerance)) {
             return Err(format!(
                 "error the tolerance must be in [0, 1], not {}",
@@ -252,9 +317,25 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
         // checks the weights finite and non-negative
         g.total_weight()?;
         let (n, threads) = (g.size(), g.thread_num().max(1));
+        // the arcs out of nodes, and (directed) into them
+        let out = Csr::of(g);
+        let into = if Dir::DIRECTED {
+            Some(Csr::of(Dir::reverse(g)?))
+        } else {
+            None
+        };
+        // whose labels a node counts, and whom it wakes when it moves (those counting its)
+        type Csrs<'g, Ix, E> = Vec<Csr<'g, Ix, E>>;
+        let (reads, wakes): (Csrs<Ix, E>, Csrs<Ix, E>) = match (into, options.direction) {
+            (None, _) => (vec![out], vec![out]),
+            (Some(into), LpaDirection::Both) => (vec![out, into], vec![out, into]),
+            (Some(into), LpaDirection::In) => (vec![into], vec![out]),
+            (Some(into), LpaDirection::Out) => (vec![out], vec![into]),
+        };
+        let both: Vec<Csr<Ix, E>> = into.map_or(vec![out], |into| vec![out, into]);
         let out_fn = g.build_cache_filename(CacheFile::LabelPropagation, None)?;
         let color_fn = g.build_cache_filename(CacheFile::LabelPropagation, Some(0))?;
-        let classes = color_classes(g, &color_fn, threads);
+        let classes = color_classes(&both, n, &color_fn, threads);
         g.cleanup_cache(CacheFile::LabelPropagation)?;
         let (order, starts) = classes?;
         let colors = starts.len() - 1;
@@ -263,11 +344,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
         for (u, l) in labels.as_mut_slice().iter_mut().enumerate().take(n) {
             *l = Ix::new(u);
         }
-        let offsets = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
-        let targets = SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width());
-        let weights = SharedSlice::<E>::new(g.edge_labels_ptr(), g.width());
-        let (offsets, targets, weights) =
-            (offsets.as_slice(), targets.as_slice(), weights.as_slice());
         let pending: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(true)).collect();
         let cursors: Vec<AtomicUsize> = (0..colors).map(|_| AtomicUsize::new(0)).collect();
         // the nodes each pass moves, by its parity (see `shortest_path_tree`'s counts)
@@ -282,6 +358,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
                 let (order, starts, pending, cursors, moved, moves, barrier) = (
                     &order, &starts, &pending, &cursors, &moved, &moves, &barrier,
                 );
+                let (reads, wakes) = (&reads, &wakes);
                 s.spawn(move || {
                     let mut labels = shared;
                     let mut seen: Vec<(usize, f64)> = Vec::new();
@@ -304,17 +381,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
                                         if !pending[u].swap(false, Ordering::Relaxed) {
                                             continue;
                                         }
-                                        let (b, e) = (offsets[u].index(), offsets[u + 1].index());
                                         seen.clear();
-                                        for a in b..e {
-                                            let v = targets[a].index();
-                                            if v != u {
-                                                let w = if E::is_weighted() {
-                                                    weights[a].weight::<f64>()
-                                                } else {
-                                                    1.
-                                                };
-                                                seen.push((labels.get(v).index(), w));
+                                        for csr in reads.iter() {
+                                            for a in csr.range(u) {
+                                                let v = csr.targets[a].index();
+                                                if v != u {
+                                                    let w = if E::is_weighted() {
+                                                        csr.weights[a].weight::<f64>()
+                                                    } else {
+                                                        1.
+                                                    };
+                                                    seen.push((labels.get(v).index(), w));
+                                                }
                                             }
                                         }
                                         if seen.is_empty() {
@@ -352,8 +430,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
                                         }
                                         *labels.get_mut(u) = Ix::new(best);
                                         mine += 1;
-                                        for &v in &targets[b..e] {
-                                            pending[v.index()].store(true, Ordering::Relaxed);
+                                        for csr in wakes.iter() {
+                                            for &v in &csr.targets[csr.range(u)] {
+                                                pending[v.index()].store(true, Ordering::Relaxed);
+                                            }
                                         }
                                     }
                                 }
@@ -382,10 +462,23 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
         });
         let moves = moves.into_inner().unwrap();
 
-        let count =
-            super::split_disconnected(threads, offsets, targets, &mut labels.as_mut_slice()[..n])?;
+        // (weakly) connected parts: arcs' ends are joined either way
+        let count = super::split_disconnected(
+            threads,
+            out.offsets,
+            out.targets,
+            &mut labels.as_mut_slice()[..n],
+        )?;
         labels.flush()?;
-        let modularity = g.modularity(&labels.as_slice()[..n], count)?;
+        let communities = &labels.as_slice()[..n];
+        let modularity = if Dir::DIRECTED {
+            super::directed_louvain::directed_modularity(g, communities)?
+        } else {
+            // `Dir` is `Undirected`: `g` is a `Graph`
+            let g =
+                unsafe { &*(g as *const GraphMemoryMap<N, E, Ix, Dir> as *const Graph<N, E, Ix>) };
+            g.modularity(communities, count)?
+        };
         Ok(Self {
             g,
             communities: labels,
@@ -406,7 +499,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> LabelPropagation<'a, N,
         self.count
     }
 
-    /// The communities' modularity.
+    /// The communities' modularity: directed (Leicht and Newman's), on directed graphs.
     pub fn partition_modularity(&self) -> f64 {
         self.modularity
     }
@@ -534,7 +627,7 @@ mod test {
         let file = g
             .build_cache_filename(CacheFile::LabelPropagation, Some(0))
             .unwrap();
-        let (order, starts) = color_classes(&g, &file, 5).unwrap();
+        let (order, starts) = color_classes(&[Csr::of(&*g)], 900, &file, 5).unwrap();
         g.cleanup_cache(CacheFile::LabelPropagation).unwrap();
         let mut color = vec![usize::MAX; 900];
         for c in 0..starts.len() - 1 {
@@ -630,5 +723,110 @@ mod test {
         }
         let g = graph::<Weighted<f64>>("negative", 3, &[(0, 1, -1.)], 2);
         assert!(LabelPropagation::new(&g).is_err());
+    }
+
+    fn digraph(
+        name: &str,
+        n: usize,
+        arcs: &[(usize, usize)],
+        threads: u8,
+    ) -> TestGraph<VoidLabel, (), usize, Directed> {
+        let dir = unique_test_dir("lpa_directed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.mtx"));
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate pattern general\n{n} {n} {}\n",
+            arcs.len()
+        );
+        for &(u, v) in arcs {
+            text += &format!("{} {}\n", u + 1, v + 1);
+        }
+        std::fs::write(&path, text).unwrap();
+        let id = format!("lpa_directed_{name}_{}", unique_run_tag());
+        TestGraph::new(
+            GraphMemoryMap::from_file(&path, Some(id), Some(threads)).unwrap(),
+            Some(dir),
+        )
+    }
+
+    /// Planted blocks, each edge an arc one way or the other (by a hash).
+    fn directed_planted() -> (Vec<(usize, usize)>, Vec<usize>) {
+        let (edges, truth) = planted(5, 150, 0.15, 0.004, 41);
+        let arcs = edges
+            .iter()
+            .map(|&(u, v, _)| {
+                if mix((u * 1000 + v) as u64) & 1 == 0 {
+                    (u, v)
+                } else {
+                    (v, u)
+                }
+            })
+            .collect();
+        (arcs, truth)
+    }
+
+    /// Directed graphs' communities, by any direction: planted blocks found, the same whatever
+    /// the threads, with their directed modularity.
+    #[test]
+    fn directed_graphs_by_every_direction() {
+        let (arcs, truth) = directed_planted();
+        for direction in [LpaDirection::Both, LpaDirection::In, LpaDirection::Out] {
+            let mut found = vec![];
+            for threads in [1u8, 5] {
+                let g = digraph(&format!("dir_{direction:?}_{threads}"), 750, &arcs, threads);
+                let options = LpaOptions {
+                    direction,
+                    ..LpaOptions::default()
+                };
+                let mut lpa = LabelPropagation::with_options(&*g, options).unwrap();
+                assert!(
+                    nmi(&labels(lpa.communities()), &truth) > 0.95,
+                    "{direction:?}"
+                );
+                let q = crate::communities::directed_louvain::directed_modularity(
+                    &*g,
+                    lpa.communities(),
+                )
+                .unwrap();
+                assert_eq!(lpa.partition_modularity(), q);
+                found.push(labels(lpa.communities()));
+                lpa.drop_cache().unwrap();
+            }
+            assert_eq!(found[0], found[1], "{direction:?}");
+        }
+    }
+
+    /// Both directions are the underlying undirected multigraph's (each arc an edge); out-arcs
+    /// are the transpose's in-arcs: the same communities, exactly.
+    #[test]
+    fn directions_are_the_graphs_they_follow() {
+        let (arcs, _) = directed_planted();
+        let g = digraph("equivalences", 750, &arcs, 4);
+        let both = LabelPropagation::with_options(&*g, LpaOptions::default()).unwrap();
+        let undirected = g
+            .to_undirected_with(crate::graph::UndirectedMode::Each)
+            .unwrap();
+        let mut u = LabelPropagation::new(undirected).unwrap();
+        assert_eq!(labels(both.communities()), labels(u.communities()));
+        u.drop_cache().unwrap();
+        let out = LabelPropagation::with_options(
+            &*g,
+            LpaOptions {
+                direction: LpaDirection::Out,
+                ..LpaOptions::default()
+            },
+        )
+        .unwrap();
+        let transpose = g.transpose().unwrap();
+        let mut into = LabelPropagation::with_options(
+            transpose,
+            LpaOptions {
+                direction: LpaDirection::In,
+                ..LpaOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(labels(out.communities()), labels(into.communities()));
+        into.drop_cache().unwrap();
     }
 }
