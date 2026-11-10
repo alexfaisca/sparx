@@ -192,28 +192,28 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let l_fn = g.build_cache_filename(CacheFile::GVELouvain, None)?;
-        if Path::new(&l_fn).exists() {
-            if let Ok(comms) = AbstractedProceduralMemoryMut::<Ix>::from_file_name(&l_fn) {
-                let mut max = 0;
-                comms.as_slice().iter().for_each(|&c| {
-                    let c = c.index();
-                    if c > max {
-                        max = c;
-                    }
-                });
-                if let Ok(modularity) = g.modularity(comms.as_slice(), max) {
-                    return Ok(Self {
-                        g,
-                        community: comms,
-                        community_count: max,
-                        modularity,
-                        threads: g.thread_num().max(1),
-                        refinement: super::Refinement::None,
-                        #[cfg(feature = "bench")]
-                        iters: vec![],
-                        _marker: std::marker::PhantomData,
-                    });
+        if Path::new(&l_fn).exists()
+            && let Ok(comms) = AbstractedProceduralMemoryMut::<Ix>::from_file_name(&l_fn)
+        {
+            let mut max = 0;
+            comms.as_slice().iter().for_each(|&c| {
+                let c = c.index();
+                if c > max {
+                    max = c;
                 }
+            });
+            if let Ok(modularity) = g.modularity(comms.as_slice(), max) {
+                return Ok(Self {
+                    g,
+                    community: comms,
+                    community_count: max,
+                    modularity,
+                    threads: g.thread_num().max(1),
+                    refinement: super::Refinement::None,
+                    #[cfg(feature = "bench")]
+                    iters: vec![],
+                    _marker: std::marker::PhantomData,
+                });
             }
         }
         Self::new(g)

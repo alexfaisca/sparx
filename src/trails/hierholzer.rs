@@ -88,19 +88,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         g: &'a GraphMemoryMap<N, E, Ix, Dir>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let t_fn = g.build_cache_filename(CacheFile::EulerTrail, None)?;
-        if Path::new(&t_fn).exists() {
-            if let Ok(euler_trails) = AbstractedProceduralMemoryMut::from_file_name(&t_fn) {
-                let i_fn = g.build_cache_filename(CacheFile::EulerIndex, None)?;
-                if Path::new(&i_fn).exists() {
-                    if let Ok(euler_indices) = AbstractedProceduralMemoryMut::from_file_name(&i_fn)
-                    {
-                        return Ok(Self {
-                            g,
-                            euler_trails,
-                            euler_indices,
-                        });
-                    }
-                }
+        if Path::new(&t_fn).exists()
+            && let Ok(euler_trails) = AbstractedProceduralMemoryMut::from_file_name(&t_fn)
+        {
+            let i_fn = g.build_cache_filename(CacheFile::EulerIndex, None)?;
+            if Path::new(&i_fn).exists()
+                && let Ok(euler_indices) = AbstractedProceduralMemoryMut::from_file_name(&i_fn)
+            {
+                return Ok(Self {
+                    g,
+                    euler_trails,
+                    euler_indices,
+                });
             }
         }
         Self::new(g)

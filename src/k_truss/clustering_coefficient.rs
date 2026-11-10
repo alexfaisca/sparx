@@ -208,7 +208,7 @@ fn weighted_directed_local_clustering<N: graph::N, E: graph::E, Ix: graph::Index
 
 /// For the computation of a [`GraphMemoryMap`] instance's local clustering coefficient, transitivity and average local clustering coefficient.
 ///
-/// With weighted edges (see [`E::is_weighted`](graph::E::is_weighted)), local coefficients (and
+/// With weighted edges (see [`E::is_weighted`]), local coefficients (and
 /// their average) are networkx's weighted ones (Onnela et al.'s geometric means of triangles'
 /// normalized weights, see `weighted_local_clustering`); transitivity, as networkx's, ignores
 /// weights.
@@ -529,9 +529,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
         let t = local.as_mut_slice();
         let counts = triangles.all_triangles();
         for u in 0..node_count {
-            for e in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
+            let (begin, end) = (index_ptr.get(u).index(), index_ptr.get(u + 1).index());
+            for (e, count) in (begin..end).zip(&counts[begin..end]) {
                 let v = neighbours_ptr.get(e).index();
-                let c = counts[e].count() as f64;
+                let c = count.count() as f64;
                 t[u] += c;
                 t[v] += c;
             }

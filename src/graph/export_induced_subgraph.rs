@@ -94,7 +94,10 @@ mod test {
         .unwrap();
 
         for (name, keep) in [
-            ("thirds", (|u: usize| u % 3 != 0) as fn(usize) -> bool),
+            (
+                "thirds",
+                (|u: usize| !u.is_multiple_of(3)) as fn(usize) -> bool,
+            ),
             ("all", |_| true),
             ("none", |_| false),
             ("one", |u| u == 7),
@@ -160,7 +163,7 @@ mod test {
             Some(2),
         )
         .unwrap();
-        let keep = |u: usize| u % 2 == 0;
+        let keep = |u: usize| u.is_multiple_of(2);
         let sub = g
             .induced_subgraph(
                 keep,

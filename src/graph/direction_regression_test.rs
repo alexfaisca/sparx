@@ -469,10 +469,12 @@ fn same_instance_concurrent_views() {
                             g.transpose().unwrap(),
                         )
                     } else {
+                        // the other order: the transpose first
+                        let b = g.transpose().unwrap();
                         (
                             g.to_undirected_with(crate::graph::UndirectedMode::Each)
                                 .unwrap(),
-                            g.transpose().unwrap(),
+                            b,
                         )
                     };
                     (a as *const _ as usize, b as *const _ as usize)

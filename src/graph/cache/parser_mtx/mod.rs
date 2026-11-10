@@ -967,7 +967,7 @@ mod test {
         }
         // hermitian (complex) and skew-symmetric files are mirrored: undirected graphs
         let symmetric = DiGraph::<VoidLabel, VoidLabel, usize>::from_file(
-            &write(&dir, "pattern_sym", &file("pattern", "symmetric", &none)),
+            write(&dir, "pattern_sym", &file("pattern", "symmetric", &none)),
             Some(format!("mtx_fields_sym_{tag}")),
             Some(2),
         )

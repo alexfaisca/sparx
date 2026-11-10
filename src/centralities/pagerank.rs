@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// ranked by each node summing its neighbours' contributions instead, which needs no bins and is
 /// faster there, for the same ranks, bit for bit: see [`PageRankEngine`] to choose either.
 ///
-/// Weighted arcs (see [`E::is_weighted`](graph::E::is_weighted)) are followed in proportion to
+/// Weighted arcs (see [`E::is_weighted`]) are followed in proportion to
 /// their weight, as networkx's `pagerank` does with `weight`: node `u`'s rank goes to `v` in
 /// proportion to `w(u, v) / Σ_x w(u, x)`, and nodes whose arcs out all weigh `0` are dangling.
 /// Weights must be finite and non-negative. Weighted graphs are always ranked partition-centric:
@@ -206,7 +206,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
                 format!("error PageRank's damping factor must be in [0, 1], not {alpha}").into(),
             );
         }
-        if !(tolerance > 0.) {
+        if tolerance.is_nan() || tolerance <= 0. {
             return Err(
                 format!("error PageRank's tolerance must be positive, not {tolerance}").into(),
             );

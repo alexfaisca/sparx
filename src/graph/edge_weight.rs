@@ -200,8 +200,8 @@ macro_rules! impl_edge_weight_float {
             }
             #[inline(always)]
             fn as_exact_u64(self) -> Option<u64> {
-                // (`NaN` fails the comparisons; 2^64 is exact in both widths)
-                (self >= 0.0 && self < 18446744073709551616.0 && self.fract() == 0.0)
+                // (`NaN` is in no range; 2^64 is exact in both widths)
+                ((0.0..18446744073709551616.0).contains(&self) && self.fract() == 0.0)
                     .then_some(self as u64)
             }
             /// Malformed tokens give `NaN`.
@@ -245,7 +245,8 @@ impl_edge_weight_unsigned!(u8, u16, u32, u64, usize);
 impl_edge_weight_signed!(i8, i16, i32, i64, isize);
 impl_edge_weight_float!(f32, f64);
 
-/// An edge label holding a weight of type `T` (see the [module docs](self)).
+/// An edge label holding a weight of type `T` (see [`EdgeWeight`] for the types it may hold, and
+/// [`WeightParsing`] for how they are read).
 ///
 /// ```
 /// use sparx::graph::{DiGraph, Weighted, label::VoidLabel};

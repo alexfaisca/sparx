@@ -470,7 +470,7 @@ impl GpuBackend for WgpuBackend {
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let nodes = graph.nodes;
         let registers = params.registers;
-        if registers < 4 || registers % 4 != 0 {
+        if registers < 4 || !registers.is_multiple_of(4) {
             return Err(format!("error {registers} registers aren't a multiple of 4").into());
         }
         if counters.len() != nodes * registers || accumulators.len() != nodes {

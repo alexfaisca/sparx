@@ -5,6 +5,9 @@ use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
 use crate::graph::{Directed, Undirected};
 use std::io::Write;
 
+/// A named graph: its number of nodes and its edges.
+type Shape = (&'static str, usize, Vec<(usize, usize)>);
+
 /// An undirected graph of `n` nodes and `edges` (parallel edges and self-loops kept).
 fn undirected(
     name: &str,
@@ -127,7 +130,7 @@ fn undirected_degree_pairs(n: usize, edges: &[(usize, usize)]) -> Vec<(f64, f64)
 
 #[test]
 fn degree_assortativity_of_small_shapes() {
-    let cases: Vec<(&str, usize, Vec<(usize, usize)>)> = vec![
+    let cases: Vec<Shape> = vec![
         ("path", 4, vec![(0, 1), (1, 2), (2, 3)]),
         ("star", 5, vec![(0, 1), (0, 2), (0, 3), (0, 4)]),
         (
@@ -399,9 +402,9 @@ mod gpu {
             .map(|u| u32::MAX - (u as u32 * 40_503) % 777)
             .collect();
         let mut expected = 0u128;
-        for u in 0..n {
+        for (u, &x_u) in x.iter().enumerate() {
             for v in g.neighbours(u).unwrap() {
-                expected += x[u] as u128 * y[v] as u128;
+                expected += x_u as u128 * y[v] as u128;
             }
         }
         assert_eq!(backend.arc_products(&device, &x, &y).unwrap(), expected);

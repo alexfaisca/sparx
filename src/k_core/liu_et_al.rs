@@ -408,16 +408,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
                                             index_ptr.get(u).index()..index_ptr.get(u + 1).index()
                                         {
                                             let v = neighbour_ptr.get(idx).index();
-                                            if let Some(old) = degree.get(v).decrement_above(k) {
-                                                if old == k + 1 {
-                                                    let life =
-                                                        alive.get(v).swap(false, Ordering::Relaxed);
-                                                    if life {
-                                                        if local_stack.len() < max_len {
-                                                            local_stack.push(Ix::new(v));
-                                                        } else {
-                                                            let _ = swap.push(Ix::new(v));
-                                                        }
+                                            if let Some(old) = degree.get(v).decrement_above(k)
+                                                && old == k + 1
+                                            {
+                                                let life =
+                                                    alive.get(v).swap(false, Ordering::Relaxed);
+                                                if life {
+                                                    if local_stack.len() < max_len {
+                                                        local_stack.push(Ix::new(v));
+                                                    } else {
+                                                        let _ = swap.push(Ix::new(v));
                                                     }
                                                 }
                                             }
@@ -436,17 +436,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
                                             {
                                                 let v = neighbour_ptr.get(idx).index();
                                                 if let Some(old) = degree.get(v).decrement_above(k)
+                                                    && old == k + 1
                                                 {
-                                                    if old == k + 1 {
-                                                        let life = alive
-                                                            .get(v)
-                                                            .swap(false, Ordering::Relaxed);
-                                                        if life {
-                                                            if local_stack.len() < max_len {
-                                                                local_stack.push(Ix::new(v));
-                                                            } else {
-                                                                let _ = swap.push(Ix::new(v));
-                                                            }
+                                                    let life =
+                                                        alive.get(v).swap(false, Ordering::Relaxed);
+                                                    if life {
+                                                        if local_stack.len() < max_len {
+                                                            local_stack.push(Ix::new(v));
+                                                        } else {
+                                                            let _ = swap.push(Ix::new(v));
                                                         }
                                                     }
                                                 }

@@ -212,8 +212,8 @@ fn directed_k_cores_of_every_width_agree() {
             assert_eq!(as_usize(c32.k_cores()), want, "{name}, {degree:?}, u32");
             drop(c32);
             let c64 = DirectedKCores::<_, _, _, u64>::new_cx(&g, degree).unwrap();
-            for v in 0..n {
-                assert_eq!(c64.coreness(v) as usize, want[v]);
+            for (v, &w) in want.iter().enumerate() {
+                assert_eq!(c64.coreness(v) as usize, w);
             }
         }
     }

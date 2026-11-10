@@ -215,8 +215,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         target_volume: Option<usize>,
     ) -> Result<Community<usize>, Box<dyn std::error::Error>> {
         diffusion.sort_unstable_by_key(|(_, mass)| std::cmp::Reverse(OrderedFloat(*mass)));
-        let target_size = target_size.map_or(self.size(), |s| s);
-        let target_volume = target_volume.map_or(self.width(), |s| s);
+        let target_size = target_size.unwrap_or(self.size());
+        let target_volume = target_volume.unwrap_or(self.width());
         let weighted = E::is_weighted();
         // (checks the weights, for weighted edges)
         let total_weight = self.total_weight()?;

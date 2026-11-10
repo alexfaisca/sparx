@@ -421,7 +421,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         let regular = arcs.div_ceil(SAMPLE);
         let samples = regular + roots.len();
         let sample_of = |j: usize| {
-            if j % SAMPLE == 0 {
+            if j.is_multiple_of(SAMPLE) {
                 j / SAMPLE
             } else {
                 // a tour's first, leaving its root
@@ -482,7 +482,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             SharedSliceMut::<usize>::abst_mem_mut(&scratch(11)?, samples.max(1), true)?;
         in_parallel(threads, roots.len(), &|begin, end| {
             let mut offsets = offset_mem.shared_slice();
-            for t in begin..end {
+            for (t, total) in (begin..end).zip(&totals[begin..end]) {
                 let Some(mut s) = tours(t) else { continue };
                 let mut at = 0;
                 loop {
@@ -494,7 +494,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                     }
                     s = following;
                 }
-                totals[t].store(at, Ordering::Relaxed);
+                total.store(at, Ordering::Relaxed);
             }
         })?;
         // each arc's rank in its tour: its walk's sample's, plus its rank in the walk
@@ -857,8 +857,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             let (keys, heads) = (&keys, heads.shared_slice());
             in_parallel(threads, count, &|begin, end| {
                 let (mut number, mut heads) = (number, heads);
-                for id in begin..end {
-                    let r = keys[id].1;
+                for (id, key) in (begin..end).zip(&keys[begin..end]) {
+                    let r = key.1;
                     *number.get_mut(r) = Ix::new(id);
                     *heads.get_mut(id) = *heads_by_root.get(r);
                 }
@@ -1060,6 +1060,7 @@ mod test {
         let mut time = 0;
         let mut edge_stack: Vec<(usize, usize, usize)> = vec![];
         let mut out = BTreeSet::new();
+        #[allow(clippy::too_many_arguments)]
         fn dfs(
             u: usize,
             parent_edge: Option<usize>,

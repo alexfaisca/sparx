@@ -984,11 +984,11 @@ mod test {
             let g = graph_with_threads(name, header, n, &arcs, threads);
             let (got, want) = (batched(&g), one_by_one(&g));
             assert_eq!(got, want, "{name}");
-            for u in 0..n {
+            for (u, got) in got.iter().enumerate() {
                 let bfs = BFSDists::new(&g, u).unwrap();
-                assert_eq!(got[u].reached, bfs.recheable(), "{name}: node {u} reaches");
+                assert_eq!(got.reached, bfs.recheable(), "{name}: node {u} reaches");
                 assert_eq!(
-                    got[u].distances as f64,
+                    got.distances as f64,
                     bfs.total_distances(),
                     "{name}: node {u}'s distances"
                 );
@@ -1000,7 +1000,7 @@ mod test {
                     .map(|&d| 1. / d as f64)
                     .sum();
                 assert!(
-                    (got[u].inverse_distances - inverse).abs() <= 1e-12 * inverse.max(1.),
+                    (got.inverse_distances - inverse).abs() <= 1e-12 * inverse.max(1.),
                     "{name}: node {u}"
                 );
             }

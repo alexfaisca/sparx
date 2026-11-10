@@ -320,10 +320,10 @@ impl<'a, G: Graph> DFSVisit<'a, G> {
                     continue 'outer;
                 } else if !finished.get(v.index()) {
                     // back edge (except, in undirected graphs, the tree edge reversed)
-                    if !(skip_parent_edge && u != v && *par.get(u.index()) == v) {
-                        if let ControlFlow::Break(()) = self.visit.back_edge(u, v) {
-                            return Ok(());
-                        }
+                    if !(skip_parent_edge && u != v && *par.get(u.index()) == v)
+                        && let ControlFlow::Break(()) = self.visit.back_edge(u, v)
+                    {
+                        return Ok(());
                     }
                 } else if let ControlFlow::Break(()) = self.visit.forward_or_cross_edge(u, v) {
                     return Ok(());

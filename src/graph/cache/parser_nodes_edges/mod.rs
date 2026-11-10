@@ -65,7 +65,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
         // parse optional inputs && fallback to defaults for the Nones found
         let id = id.unwrap_or(nodes_path_str.to_string());
-        let batching = Some(batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b));
+        let batching = Some(batch.unwrap_or(Self::DEFAULT_BATCHING_SIZE));
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { false });
 
         let (input_nodes, nodes_tmp_path) = Self::read_input_file(nodes_path_str, &id, 0)?;

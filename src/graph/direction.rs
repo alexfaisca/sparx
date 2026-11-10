@@ -662,8 +662,7 @@ mod tests {
             Some(refused_id.clone()),
             Some(2),
         )
-        .err()
-        .expect("a directed graph isn't a Graph");
+        .expect_err("a directed graph isn't a Graph");
         assert!(
             err.to_string().contains("arc 0 -> 1 has no reverse"),
             "{err}"
@@ -716,14 +715,14 @@ mod tests {
             AnyGraph::Undirected(_) => panic!("a directed graph is a DiGraph"),
         };
         // a directed graph doesn't become a Graph, a Graph always becomes a DiGraph and back
-        let d = d.try_into_undirected().err().expect("directed");
+        let d = d.try_into_undirected().expect_err("directed");
         let d = TestGraph::new(d, None);
         let g =
             Graph::<VoidLabel, VoidLabel, usize>::from_file(&symmetric, Some(id("any_g")), Some(2))
                 .unwrap();
         let as_directed = g.into_directed();
         assert!(as_directed.is_directed());
-        let g = as_directed.try_into_undirected().ok().expect("symmetric");
+        let g = as_directed.try_into_undirected().expect("symmetric");
         drop(TestGraph::new(g, None));
         drop(d);
         for path in [symmetric, directed] {
@@ -771,12 +770,9 @@ mod tests {
         assert_eq!(lists(transpose), expected_in);
         assert!(!transpose.is_symmetric().unwrap());
         assert_eq!(transpose.width(), g.width());
-        for v in 0..n {
-            assert_eq!(g.in_degree(v).unwrap(), expected_in[v].len());
-            assert_eq!(
-                g.in_neighbours(v).unwrap().collect::<Vec<_>>(),
-                expected_in[v]
-            );
+        for (v, want) in expected_in.iter().enumerate() {
+            assert_eq!(g.in_degree(v).unwrap(), want.len());
+            assert_eq!(g.in_neighbours(v).unwrap().collect::<Vec<_>>(), *want);
         }
 
         for mode in [

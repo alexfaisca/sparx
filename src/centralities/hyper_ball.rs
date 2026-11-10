@@ -207,30 +207,30 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             if let Some(counters) = Self::load_cached(&h_fn, node_count) {
                 let d_fn = g.build_cache_filename(CacheFile::HyperBallDistances, None)?;
                 let id_fn = g.build_cache_filename(CacheFile::HyperBallInvDistances, None)?;
-                if let Some(distances) = Self::load_cached(&d_fn, node_count) {
-                    if let Some(inverse_distances) = Self::load_cached(&id_fn, node_count) {
-                        let mut hb = Self {
-                            g,
-                            counters,
-                            distances,
-                            inverse_distances,
-                            max_t: Self::DEAFULT_MAX_DEPTH,
-                            threads: g.thread_num().max(1),
-                            closeness: [None, None],
-                            harmonic: [None, None],
-                            lin: None,
-                            #[cfg(any(test, feature = "bench"))]
-                            iters: 0,
-                            #[cfg(feature = "bench")]
-                            iter_times: vec![],
-                        };
-                        let _ = hb.search_cache_closeness_centrality(false);
-                        let _ = hb.search_cache_harmonic_centrality(false);
-                        let _ = hb.search_cache_closeness_centrality(true);
-                        let _ = hb.search_cache_harmonic_centrality(true);
-                        let _ = hb.search_cache_lins_centrality();
-                        return Ok(hb);
-                    }
+                if let Some(distances) = Self::load_cached(&d_fn, node_count)
+                    && let Some(inverse_distances) = Self::load_cached(&id_fn, node_count)
+                {
+                    let mut hb = Self {
+                        g,
+                        counters,
+                        distances,
+                        inverse_distances,
+                        max_t: Self::DEAFULT_MAX_DEPTH,
+                        threads: g.thread_num().max(1),
+                        closeness: [None, None],
+                        harmonic: [None, None],
+                        lin: None,
+                        #[cfg(any(test, feature = "bench"))]
+                        iters: 0,
+                        #[cfg(feature = "bench")]
+                        iter_times: vec![],
+                    };
+                    let _ = hb.search_cache_closeness_centrality(false);
+                    let _ = hb.search_cache_harmonic_centrality(false);
+                    let _ = hb.search_cache_closeness_centrality(true);
+                    let _ = hb.search_cache_harmonic_centrality(true);
+                    let _ = hb.search_cache_lins_centrality();
+                    return Ok(hb);
                 }
             }
         }
@@ -1530,36 +1530,26 @@ mod test {
         // computing harmonic first used to make `get_or_compute_closeness_centrality` look up
         // the harmonic cache, and fail
         close(
-            &hb.compute_harmonic_centrality(true).unwrap().to_vec(),
+            hb.compute_harmonic_centrality(true).unwrap(),
             1.,
             "harmonic",
         );
         close(
-            &hb.get_or_compute_closeness_centrality(true)
-                .unwrap()
-                .to_vec(),
+            hb.get_or_compute_closeness_centrality(true).unwrap(),
             1.,
             "closeness",
         );
         close(
-            &hb.get_or_compute_closeness_centrality(false)
-                .unwrap()
-                .to_vec(),
+            hb.get_or_compute_closeness_centrality(false).unwrap(),
             1.,
             "closeness",
         );
         close(
-            &hb.get_or_compute_harmonic_centrality(false)
-                .unwrap()
-                .to_vec(),
+            hb.get_or_compute_harmonic_centrality(false).unwrap(),
             1.,
             "harmonic",
         );
-        close(
-            &hb.compute_lins_centrality().unwrap().to_vec(),
-            16. / 3.,
-            "lin",
-        );
+        close(hb.compute_lins_centrality().unwrap(), 16. / 3., "lin");
 
         // every centrality file must be removed, normalized closeness (`NCCloseness`) and
         // harmonic files included
@@ -1895,8 +1885,7 @@ mod test {
                 &device_graph,
                 None,
             )
-            .err()
-            .expect("too many segments should fail")
+            .expect_err("too many segments should fail")
             .to_string()
         };
         assert!(

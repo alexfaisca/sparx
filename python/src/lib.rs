@@ -831,7 +831,7 @@ fn pagerank_params(alpha: f64, tol: f64, max_iter: usize) -> PyResult<()> {
             "alpha must be in [0, 1], not {alpha}"
         )));
     }
-    if !(tol > 0.) {
+    if tol.is_nan() || tol <= 0. {
         return Err(PyValueError::new_err(format!(
             "tol must be positive, not {tol}"
         )));

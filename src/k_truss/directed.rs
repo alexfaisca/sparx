@@ -192,6 +192,12 @@ impl Run {
 
 /// Every node's in and out neighbours (other than itself), merged and sorted: the undirected
 /// view of a directed graph, keeping track of each pair's edges in both directions.
+/// A graph's [`DirectedAdjacency`], with its arcs' in-triangle flags, if they're computed.
+pub(crate) type FlaggedAdjacency<'r, 'a, N, E, Ix> = (
+    &'r DirectedAdjacency<'a, N, E, Ix>,
+    Option<SharedSliceMut<AtomicBool>>,
+);
+
 pub(crate) struct DirectedAdjacency<'a, N: graph::N, E: graph::E, Ix: IndexType> {
     g: &'a DiGraph<N, E, Ix>,
     index_ptr: SharedSlice<Ix>,

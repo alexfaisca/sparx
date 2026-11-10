@@ -85,9 +85,9 @@ pub(crate) mod test_utils {
         let mut count = 0;
         for u in 0..n {
             if labels[u] == usize::MAX {
-                for v in u..n {
-                    if labels[v] == usize::MAX && same(u, v) {
-                        labels[v] = count;
+                for (v, label) in labels.iter_mut().enumerate().skip(u) {
+                    if *label == usize::MAX && same(u, v) {
+                        *label = count;
                     }
                 }
                 count += 1;
@@ -106,10 +106,12 @@ pub(crate) mod test_utils {
             reach[u][v] = true;
         }
         for k in 0..n {
-            for i in 0..n {
-                if reach[i][k] {
-                    for j in 0..n {
-                        reach[i][j] |= reach[k][j];
+            // row k doesn't change while going through k
+            let via_k = reach[k].clone();
+            for row in reach.iter_mut() {
+                if row[k] {
+                    for (r, &v) in row.iter_mut().zip(&via_k) {
+                        *r |= v;
                     }
                 }
             }

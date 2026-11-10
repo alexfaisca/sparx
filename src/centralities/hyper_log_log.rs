@@ -76,7 +76,7 @@ fn union_portable(a: &mut [u8], b: &[u8]) -> bool {
 fn union_sse2(a: &mut [u8], b: &[u8]) -> bool {
     use std::arch::x86_64::*;
     // registers come in multiples of 16 (precisions start at 4)
-    assert!(a.len() == b.len() && a.len() % 16 == 0);
+    assert!(a.len() == b.len() && a.len().is_multiple_of(16));
     // SAFETY: SSE2 is always available on x86_64, and every access is within `a` or `b`
     // (16 bytes at offsets below their common length, a multiple of 16), unaligned ones allowed
     unsafe {
@@ -224,7 +224,7 @@ impl<P: Precision> HyperLogLog<P> {
         let mut sum = [0f64; LANES];
         let mut zeros = [0u32; LANES];
         let mut saturated = [0u32; LANES];
-        for chunk in self.registers.as_ref().chunks_exact(LANES) {
+        for chunk in self.registers.as_ref().as_chunks::<LANES>().0 {
             for l in 0..LANES {
                 let r = chunk[l];
                 sum[l] += Self::weight(r);
@@ -246,7 +246,7 @@ impl<P: Precision> HyperLogLog<P> {
         let max = (Self::Q + 1) as u8;
 
         let mut sum = [0f64; LANES];
-        for chunk in registers.chunks_exact(LANES) {
+        for chunk in registers.as_chunks::<LANES>().0 {
             for l in 0..LANES {
                 sum[l] += Self::weight(chunk[l]);
             }
@@ -257,8 +257,7 @@ impl<P: Precision> HyperLogLog<P> {
         for block in registers.chunks(u8::MAX as usize * BYTE_LANES) {
             let mut z = [0u8; BYTE_LANES];
             let mut s = [0u8; BYTE_LANES];
-            let chunks = block.chunks_exact(BYTE_LANES);
-            let rest = chunks.remainder();
+            let (chunks, rest) = block.as_chunks::<BYTE_LANES>();
             for chunk in chunks {
                 for l in 0..BYTE_LANES {
                     z[l] += (chunk[l] == 0) as u8;

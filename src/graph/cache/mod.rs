@@ -650,7 +650,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                     .into()
                 })?;
 
-        let batch = Some(batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b));
+        let batch = Some(batch.unwrap_or(Self::DEFAULT_BATCHING_SIZE));
         let metadata_filename =
             Self::build_toml_graph_filename(filename, GraphFile::Metadata, None)?;
         let neighbors_filename = Self::build_graph_filename(filename, GraphFile::Neighbors, None)?;
@@ -1919,10 +1919,10 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             sum += deg_u;
         }
 
-        if let Some(expected) = expected_edges {
-            if sum != expected {
-                return Err(AccumulatorOverflow.into());
-            }
+        if let Some(expected) = expected_edges
+            && sum != expected
+        {
+            return Err(AccumulatorOverflow.into());
         }
 
         Self::ensure_fits_in_ix(offset_size.saturating_sub(1), sum)?;

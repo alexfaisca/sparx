@@ -8,7 +8,9 @@ use std::mem::ManuallyDrop;
 use std::path::Path;
 
 use super::count::{TriangleCount, TriangleCounter};
-use super::directed::{DirectedAdjacency, DirectedTriangleType, DirectedTriangles};
+use super::directed::{
+    DirectedAdjacency, DirectedTriangleType, DirectedTriangles, FlaggedAdjacency,
+};
 use super::triangles::Triangles;
 use super::{TriangleIndex, check_support_range};
 
@@ -546,10 +548,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         &self,
         proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
         mut triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
-        adjacency: Option<(
-            &DirectedAdjacency<'a, N, E, Ix>,
-            Option<SharedSliceMut<portable_atomic::AtomicBool>>,
-        )>,
+        adjacency: Option<FlaggedAdjacency<'_, 'a, N, E, Ix>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.check_triangles_len(triangles.all_triangles().len())?;
         // the caller's merged adjacency, or one built (and removed) here

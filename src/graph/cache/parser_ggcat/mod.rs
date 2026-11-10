@@ -50,7 +50,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 format!("error getting path str from {:?}", path.as_ref()).into()
             })?;
         // parse optional inputs && fallback to defaults for the Nones found
-        let id = id.map_or(path_str.to_string(), |id| id);
+        let id = id.unwrap_or(path_str.to_string());
         let batching = Some(Self::DEFAULT_BATCHING_SIZE);
         let (input, tmp_path) = Self::read_input_file(path, &id, 0)?;
 
@@ -102,8 +102,8 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                 format!("error getting path str from {:?}", path.as_ref()).into()
             })?;
         // parse optional inputs && fallback to defaults for the Nones found
-        let id = id.map_or(path_str.to_string(), |id| id);
-        let batching = Some(batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b));
+        let id = id.unwrap_or(path_str.to_string());
+        let batching = Some(batch.unwrap_or(Self::DEFAULT_BATCHING_SIZE));
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { false });
         let (input, tmp_path) = Self::read_input_file(path, &id, 0)?;
 
@@ -142,7 +142,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         batch: Option<usize>,
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let batching = batch.map_or(Self::DEFAULT_BATCHING_SIZE, |b| b);
+        let batching = batch.unwrap_or(Self::DEFAULT_BATCHING_SIZE);
         let in_fst = in_fst.unwrap_or(|_id: usize| -> bool { true });
 
         // self.parallel_fst_from_ggcat_with_reader(path, batching, in_fst, get_physical())?;
@@ -445,7 +445,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
             AbstractedProceduralMemoryMut::<N>::from_file(&self.nodelabel_file, offsets_size)?;
 
         let batch_num = Arc::new(AtomicUsize::new(0));
-        let batch_size = self.batch.map_or(Self::DEFAULT_BATCHING_SIZE, |s| s);
+        let batch_size = self.batch.unwrap_or(Self::DEFAULT_BATCHING_SIZE);
         let max_batches = node_count.div_ceil(threads) + threads;
         let h_fn = Self::init_cache_file_from_id_or_random(
             &self.cache_id()?,

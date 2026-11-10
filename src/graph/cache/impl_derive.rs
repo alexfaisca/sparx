@@ -145,8 +145,9 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             // t_offsets[v] (the start of v's in-neighbours) doubles as v's insertion cursor...
             let mut labels = self.edge_label_copier(transpose, edge_count)?;
             for u in 0..node_count {
-                for e in offsets[u].index()..offsets[u + 1].index() {
-                    let v = neighbors[e].index();
+                let (begin, end) = (offsets[u].index(), offsets[u + 1].index());
+                for (e, v) in (begin..end).zip(&neighbors[begin..end]) {
+                    let v = v.index();
                     let position = t_offsets[v].index();
                     t_neighbors[position] = Ix::new(u);
                     labels.copy(e, position);
@@ -266,8 +267,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             let mut position = 0usize;
             // a merge overflowing the weight type: (edge, its ends)
             let mut overflow = None;
-            for w in 0..node_count {
-                u_offsets[w] = Ix::new(position);
+            for (w, offset) in u_offsets[..node_count].iter_mut().enumerate() {
+                *offset = Ix::new(position);
                 edges_of(w, &mut |v, arc| {
                     u_neighbors[position] = v;
                     match arc {

@@ -477,56 +477,53 @@ pub fn derive_generic_edge(input: proc_macro::TokenStream) -> proc_macro::TokenS
     let mut already_derived = Vec::new();
     for attr in &input.attrs {
         // collect already derived macros
-        if attr.path().is_ident("derive") {
-            if let Meta::List(meta) = &attr.meta {
-                let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
-                    match meta.parse_args_with(syn::punctuated::Punctuated::parse_terminated) {
-                        Ok(i) => i,
-                        Err(e) => panic!("error parsinf token metadata: {}", e),
-                    };
-                for nested in parsed {
-                    if let Meta::Path(path) = nested {
-                        if let Some(ident) = path.get_ident() {
-                            already_derived.push(ident.to_string());
-                        }
-                    }
+        if attr.path().is_ident("derive")
+            && let Meta::List(meta) = &attr.meta
+        {
+            let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
+                match meta.parse_args_with(syn::punctuated::Punctuated::parse_terminated) {
+                    Ok(i) => i,
+                    Err(e) => panic!("error parsinf token metadata: {}", e),
+                };
+            for nested in parsed {
+                if let Meta::Path(path) = nested
+                    && let Some(ident) = path.get_ident()
+                {
+                    already_derived.push(ident.to_string());
                 }
             }
         }
-        if attr.path().is_ident("generic_edge") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> = match meta_list
-                    .parse_args_with(syn::punctuated::Punctuated::parse_terminated)
-                {
+        if attr.path().is_ident("generic_edge")
+            && let Meta::List(meta_list) = &attr.meta
+        {
+            let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
+                match meta_list.parse_args_with(syn::punctuated::Punctuated::parse_terminated) {
                     Ok(i) => i,
                     Err(e) => panic!("error parsinf token metadata: {}", e),
                 };
 
-                for meta in parsed {
-                    if let Meta::NameValue(nv) = meta {
-                        if nv.path.is_ident("build")
-                            || nv.path.is_ident("builder")
-                            || nv.path.is_ident("constructor")
-                            || nv.path.is_ident("new")
+            for meta in parsed {
+                if let Meta::NameValue(nv) = meta {
+                    if nv.path.is_ident("build")
+                        || nv.path.is_ident("builder")
+                        || nv.path.is_ident("constructor")
+                        || nv.path.is_ident("new")
+                    {
+                        if let syn::Expr::Lit(expr_lit) = nv.value
+                            && let syn::Lit::Str(lit_str) = expr_lit.lit
                         {
-                            if let syn::Expr::Lit(expr_lit) = nv.value {
-                                if let syn::Lit::Str(lit_str) = expr_lit.lit {
-                                    let constructor =
-                                        syn::Ident::new(&lit_str.value(), lit_str.span());
-                                    // override any previous implementation
-                                    impl_new_for_self =
-                                        Some(quote! {#name::#constructor(edge_dest, edge_type) });
-                                }
-                            }
-                        } else if nv.path.is_ident("default") || nv.path.is_ident("from_void") {
-                            if let syn::Expr::Lit(expr_lit) = nv.value {
-                                if let syn::Lit::Str(lit_str) = expr_lit.lit {
-                                    let default = syn::Ident::new(&lit_str.value(), lit_str.span());
-                                    // override any previous implementation
-                                    impl_default_for_self = Some(quote! {#name::#default() });
-                                }
-                            }
+                            let constructor = syn::Ident::new(&lit_str.value(), lit_str.span());
+                            // override any previous implementation
+                            impl_new_for_self =
+                                Some(quote! {#name::#constructor(edge_dest, edge_type) });
                         }
+                    } else if (nv.path.is_ident("default") || nv.path.is_ident("from_void"))
+                        && let syn::Expr::Lit(expr_lit) = nv.value
+                        && let syn::Lit::Str(lit_str) = expr_lit.lit
+                    {
+                        let default = syn::Ident::new(&lit_str.value(), lit_str.span());
+                        // override any previous implementation
+                        impl_default_for_self = Some(quote! {#name::#default() });
                     }
                 }
             }
@@ -695,23 +692,22 @@ fn parse_generic_edge_attr(
         for meta in parsed {
             if let Meta::NameValue(nv) = meta {
                 if nv.path.is_ident("getter") || nv.path.is_ident("get") {
-                    if let syn::Expr::Lit(expr_lit) = nv.value {
-                        if let syn::Lit::Str(lit_str) = expr_lit.lit {
-                            getter = Some(syn::Ident::new(&lit_str.value(), lit_str.span()));
-                        }
+                    if let syn::Expr::Lit(expr_lit) = nv.value
+                        && let syn::Lit::Str(lit_str) = expr_lit.lit
+                    {
+                        getter = Some(syn::Ident::new(&lit_str.value(), lit_str.span()));
                     }
                 } else if nv.path.is_ident("ty") || nv.path.is_ident("real_type") {
-                    if let syn::Expr::Lit(expr_lit) = nv.value {
-                        if let syn::Lit::Str(lit_str) = expr_lit.lit {
-                            ty = syn::parse_str::<Type>(&lit_str.value()).ok();
-                        }
+                    if let syn::Expr::Lit(expr_lit) = nv.value
+                        && let syn::Lit::Str(lit_str) = expr_lit.lit
+                    {
+                        ty = syn::parse_str::<Type>(&lit_str.value()).ok();
                     }
-                } else if nv.path.is_ident("setter") || nv.path.is_ident("set") {
-                    if let syn::Expr::Lit(expr_lit) = nv.value {
-                        if let syn::Lit::Str(lit_str) = expr_lit.lit {
-                            setter = Some(syn::Ident::new(&lit_str.value(), lit_str.span()));
-                        }
-                    }
+                } else if (nv.path.is_ident("setter") || nv.path.is_ident("set"))
+                    && let syn::Expr::Lit(expr_lit) = nv.value
+                    && let syn::Lit::Str(lit_str) = expr_lit.lit
+                {
+                    setter = Some(syn::Ident::new(&lit_str.value(), lit_str.span()));
                 }
             }
         }
@@ -754,28 +750,24 @@ pub fn derive_generic_edge_type(input: proc_macro::TokenStream) -> proc_macro::T
     // methods if given
     // parse #[generic_edge_type(is_directed = "false")]
     for attr in &input.attrs {
-        if attr.path().is_ident("generic_edge_type") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> = match meta_list
-                    .parse_args_with(syn::punctuated::Punctuated::parse_terminated)
-                {
+        if attr.path().is_ident("generic_edge_type")
+            && let Meta::List(meta_list) = &attr.meta
+        {
+            let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
+                match meta_list.parse_args_with(syn::punctuated::Punctuated::parse_terminated) {
                     Ok(i) => i,
                     Err(e) => panic!("error parsinf token metadata: {}", e),
                 };
 
-                for meta in parsed {
-                    if let Meta::NameValue(nv) = meta {
-                        if nv.path.is_ident("is_directed") {
-                            if let syn::Expr::Lit(expr_lit) = nv.value {
-                                if let syn::Lit::Str(lit_str) = expr_lit.lit {
-                                    let user_input =
-                                        syn::Ident::new(&lit_str.value(), lit_str.span());
-                                    // override any previous implementation
-                                    is_directed = quote! { #user_input };
-                                }
-                            }
-                        }
-                    }
+            for meta in parsed {
+                if let Meta::NameValue(nv) = meta
+                    && nv.path.is_ident("is_directed")
+                    && let syn::Expr::Lit(expr_lit) = nv.value
+                    && let syn::Lit::Str(lit_str) = expr_lit.lit
+                {
+                    let user_input = syn::Ident::new(&lit_str.value(), lit_str.span());
+                    // override any previous implementation
+                    is_directed = quote! { #user_input };
                 }
             }
         }
@@ -886,19 +878,19 @@ pub fn derive_n(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut already_derived = Vec::new();
     for attr in &input.attrs {
         // collect already derived macros
-        if attr.path().is_ident("derive") {
-            if let Meta::List(meta) = &attr.meta {
-                let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
-                    match meta.parse_args_with(syn::punctuated::Punctuated::parse_terminated) {
-                        Ok(i) => i,
-                        Err(e) => panic!("error parsinf token metadata: {}", e),
-                    };
-                for nested in parsed {
-                    if let Meta::Path(path) = nested {
-                        if let Some(ident) = path.get_ident() {
-                            already_derived.push(ident.to_string());
-                        }
-                    }
+        if attr.path().is_ident("derive")
+            && let Meta::List(meta) = &attr.meta
+        {
+            let parsed: syn::punctuated::Punctuated<Meta, syn::Token![,]> =
+                match meta.parse_args_with(syn::punctuated::Punctuated::parse_terminated) {
+                    Ok(i) => i,
+                    Err(e) => panic!("error parsinf token metadata: {}", e),
+                };
+            for nested in parsed {
+                if let Meta::Path(path) = nested
+                    && let Some(ident) = path.get_ident()
+                {
+                    already_derived.push(ident.to_string());
                 }
             }
         }

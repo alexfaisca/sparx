@@ -202,8 +202,7 @@ fn k_truss_support_range() {
     // 300 triangles can't even be counted
     let g = book(300);
     let error = Triangles::new(&g)
-        .err()
-        .expect("300 triangles should fail")
+        .expect_err("300 triangles should fail")
         .to_string();
     assert!(
         error.contains("more than can be counted"),
@@ -214,8 +213,7 @@ fn k_truss_support_range() {
         use crate::gpu::GpuBackend;
         let device_graph = backend.upload_graph(&g).unwrap();
         let error = Triangles::new_gpu(&g, &backend, &device_graph)
-            .err()
-            .expect("300 triangles should fail on the GPU")
+            .expect_err("300 triangles should fail on the GPU")
             .to_string();
         assert!(
             error.contains("more than can be counted"),
@@ -428,8 +426,7 @@ fn wide_triangle_counts() {
     let g = undirected_graph("parallel20", 3, &edges);
 
     let error = Triangles::new(&g)
-        .err()
-        .expect("u8 counts should overflow")
+        .expect_err("u8 counts should overflow")
         .to_string();
     assert!(
         error.contains("more than can be counted (u8)"),

@@ -68,8 +68,11 @@ fn widen<Tx: TriangleCount>(values: &[Tx]) -> Vec<usize> {
     values.iter().map(|v| v.to_usize()).collect()
 }
 
+/// A named graph: its number of nodes and its edges.
+type Case = (&'static str, usize, Vec<(usize, usize)>);
+
 /// Undirected graphs: shapes without triangles, sparse and dense ones, multigraphs.
-fn undirected_graphs() -> Vec<(&'static str, usize, Vec<(usize, usize)>)> {
+fn undirected_graphs() -> Vec<Case> {
     let star: Vec<_> = (1..20).map(|v| (0, v)).collect();
     let tree: Vec<_> = (1..31).map(|v| ((v - 1) / 2, v)).collect();
     // two disjoint cliques of different sizes, joined by a path
@@ -92,7 +95,7 @@ fn undirected_graphs() -> Vec<(&'static str, usize, Vec<(usize, usize)>)> {
 
 /// Directed graphs: a DAG (no cycles), a complete digraph (every reciprocal pair), a ring with
 /// chords both ways, a star, and multigraphs with reciprocal and parallel edges and self-loops.
-fn directed_graphs() -> Vec<(&'static str, usize, Vec<(usize, usize)>)> {
+fn directed_graphs() -> Vec<Case> {
     let dag: Vec<_> = random_edges(20, 0.35, 21).into_iter().collect();
     let complete: Vec<_> = (0..7)
         .flat_map(|u| (0..7).filter(move |&v| v != u).map(move |v| (u, v)))
@@ -305,8 +308,7 @@ fn directed_wide_counts() {
     let g = open_directed::<usize>(&path);
     let t = DirectedTriangleType::CycleFeedForward;
     let error = DirectedTriangles::new(&g, t)
-        .err()
-        .expect("u8 counts should overflow")
+        .expect_err("u8 counts should overflow")
         .to_string();
     assert!(
         error.contains("more than can be counted (u8)"),
@@ -323,8 +325,7 @@ fn directed_wide_counts() {
     assert_eq!(widen(pkt.k_trusses()), expected);
     pkt.drop_cache().unwrap();
     let error = AlgoPKT::new_directed(&g, t)
-        .err()
-        .expect("u8 trussness should overflow")
+        .expect_err("u8 trussness should overflow")
         .to_string();
     assert!(error.contains("(u8)"), "unexpected error: {error}");
 }
@@ -394,8 +395,7 @@ fn gpu_triangles_at_every_count_width() {
     let g = open::<u32>(&path);
     let device_graph = backend.upload_graph(&g).unwrap();
     let error = Triangles::new_gpu(&g, &backend, &device_graph)
-        .err()
-        .expect("u8 should overflow")
+        .expect_err("u8 should overflow")
         .to_string();
     assert!(
         error.contains("more than can be counted (u8)"),

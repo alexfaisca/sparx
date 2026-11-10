@@ -81,7 +81,7 @@ impl<'a> Scratch<'a> {
 /// they count as one arc here, where undirected modularity counts them twice (networkx's
 /// `modularity` of a `Graph` with self-loops differs from this, that of `G.to_directed()` doesn't).
 ///
-/// With weighted arcs (see [`E::is_weighted`](graph::E::is_weighted)), `m` is their total weight,
+/// With weighted arcs (see [`E::is_weighted`]), `m` is their total weight,
 /// `A_ij` that of the arcs `i -> j`, and `k_i^out`, `k_i^in` that of `i`'s out- and in-arcs.
 /// Weights must be non-negative integers (`3.0` is one; see
 /// [`integer_weight`](graph::E::integer_weight)), totalling at most `2^60`: the sums are exact.
@@ -217,7 +217,7 @@ pub use super::Refinement;
 /// Setting"](https://doi.org/10.48550/arXiv.2312.04876); on a symmetric `DiGraph` (e.g. a
 /// `Graph`'s [`into_directed`](crate::graph::GraphMemoryMap::into_directed)) it is ordinary
 /// Louvain. Parallel arcs add up. Unweighted arcs weigh `1`; weighted ones (see
-/// [`E::is_weighted`](graph::E::is_weighted)) their labels' weights, which must be non-negative
+/// [`E::is_weighted`]) their labels' weights, which must be non-negative
 /// integers totalling at most `2^60` (see [`directed_modularity`]): gains are compared exactly.
 ///
 /// [`DiGraph`]: crate::graph::DiGraph
@@ -1543,15 +1543,21 @@ struct ColorClasses {
     threads: usize,
 }
 
+/// What a sweep runs on each node: its id, the thread's accumulator, moves and gain.
+type Visit<'f> = dyn Fn(usize, &mut Accumulator, &mut usize, &mut i128) + Sync + 'f;
+
+/// What a thread's sweep ends with: its accumulator, moves and gain.
+type ThreadSweep = (Accumulator, usize, i128);
+
 impl ColorClasses {
     /// A sweep over the nodes, color after color, each color's nodes moved by `self.threads` at
     /// once (the same threads throughout, waiting for each other between colors): their moves
     /// and gains.
     fn sweep(
         &self,
-        visit: &(dyn Fn(usize, &mut Accumulator, &mut usize, &mut i128) + Sync),
+        visit: &Visit<'_>,
         keys: usize,
-    ) -> Result<Vec<(Accumulator, usize, i128)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<ThreadSweep>, Box<dyn std::error::Error>> {
         let threads = self.threads;
         let colors = self.starts.len() - 1;
         let next: Vec<AtomicUsize> = (0..colors).map(|_| AtomicUsize::new(0)).collect();
@@ -1561,11 +1567,11 @@ impl ColorClasses {
                 .map(|_| {
                     scope.spawn(|_| {
                         let (mut acc, mut moves, mut gain) = (Accumulator::for_keys(keys), 0, 0);
-                        for c in 0..colors {
+                        for (c, cursor) in next.iter().enumerate() {
                             let (begin, end) = (self.starts[c], self.starts[c + 1]);
                             let chunk = ((end - begin) / (threads * 4)).max(1);
                             loop {
-                                let at = begin + next[c].fetch_add(chunk, Ordering::Relaxed);
+                                let at = begin + cursor.fetch_add(chunk, Ordering::Relaxed);
                                 if at >= end {
                                     break;
                                 }
@@ -1703,6 +1709,7 @@ fn parallel_threads(n: usize, threads: usize) -> usize {
 ///
 /// Returns the number of moves, the modularity gained, the tolerance the phase's sweeps were
 /// held to, and the number of sweeps.
+#[allow(clippy::too_many_arguments)]
 fn local_move<A: Arcs>(
     a: &A,
     comm: &mut [usize],
