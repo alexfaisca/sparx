@@ -386,6 +386,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
 
         let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
         let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
+        // only read for weighted edges: unweighted ones all weigh one
+        let labels_ptr =
+            E::is_weighted().then(|| SharedSlice::<E>::new(self.g.edge_labels_ptr(), edge_count));
 
         // initialize
         thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
@@ -411,7 +414,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
 
                 threads_res.push(scope.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                        let weights: Vec<W> = vec![W::one(); u16::MAX as usize];
+                        // unit weights, written a chunk at a time (degrees may exceed it)
+                        let ones: Vec<W> = if labels_ptr.is_none() {
+                            vec![W::one(); u16::MAX as usize]
+                        } else {
+                            Vec::new()
+                        };
                         for u in begin..end {
                             let u_start = index_ptr.get(u).index();
                             let u_end = index_ptr.get(u + 1).index();
@@ -445,11 +453,36 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                             // `Ix`-width neighbours straight out of the original graph's mmap, and
                             // `gde` now stores them at the same width, so this is a plain memcpy.
                             gde.write_slice(u_start, edges);
-                            gdw.write_slice(u_start, &weights[0..(u_end - u_start)]);
+                            // 𝐾′[u]: u's total edge weight
+                            let k_u = match &labels_ptr {
+                                Some(labels) => {
+                                    let mut k_u = W::zero();
+                                    for e in u_start..u_end {
+                                        let label = labels.get(e);
+                                        let w = label.weight::<W>();
+                                        // (modularity is meaningless otherwise)
+                                        if !(w.is_finite() && w >= W::zero()) {
+                                            return Err(format!(
+                                                "error louvain's edge weights must be finite and non-negative, but one is {label:?}"
+                                            )
+                                            .into());
+                                        }
+                                        *gdw.get_mut(e) = w;
+                                        k_u += w;
+                                    }
+                                    k_u
+                                }
+                                None => {
+                                    for at in (u_start..u_end).step_by(ones.len()) {
+                                        gdw.write_slice(at, &ones[..ones.len().min(u_end - at)]);
+                                    }
+                                    W::from_usize(deg_u)
+                                }
+                            };
 
                             // Σ′ ← 𝐾′ ← 𝑣𝑒𝑟𝑡𝑒𝑥_w𝑒𝑖𝑔ℎ𝑡𝑠(𝐺′)
-                            *k.get_mut(u) = W::Atomic::new(W::from_usize(deg_u));
-                            *sigma.get_mut(u) = W::Atomic::new(W::from_usize(deg_u));
+                            *k.get_mut(u) = W::Atomic::new(k_u);
+                            *sigma.get_mut(u) = W::Atomic::new(k_u);
                         }
                         Ok(())
                     },
@@ -712,8 +745,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                                     if s
                                         .get(c_u)
                                         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-                                            if s < k_u {
+                                            // real-valued weights' totals (summed in any order)
+                                            // may round a hair below a member's own: only a
+                                            // larger shortfall means it isn't a member
+                                            let slack = W::from_f64(
+                                                k_u.to_f64() * W::epsilon().to_f64().sqrt(),
+                                            );
+                                            if s + slack < k_u {
                                                 None
+                                            } else if s < k_u {
+                                                Some(W::zero())
                                             } else {
                                                 Some(s - k_u)
                                             }
@@ -1027,6 +1068,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         // sum internal degree ---> int_deg | sum total degree ---> tot_deg
         for u in 0..node_count {
             let comm_u = communities.get(u).index();
+            if E::is_weighted() {
+                for (v, label) in self.g.weighted_neighbours(u)? {
+                    let w = label.weight::<T>();
+                    *tot_deg.get_mut(comm_u) += w;
+                    if v < node_count && communities.get(v).index() == comm_u {
+                        *int_deg.get_mut(comm_u) += w;
+                    }
+                }
+                continue;
+            }
             let iter = self.g.neighbours(u)?;
             *tot_deg.get_mut(comm_u) += T::from_usize(iter.remaining_neighbours());
             for v in iter {
@@ -1068,8 +1119,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         let mut prev_comm_count = node_count;
         let mut new_comm_count: usize = 0;
 
-        // 2m (since each undirected edge has weight 2)
-        let m2 = W::from_usize(edge_count);
+        // 2m (since each undirected edge has weight 2): the total of the nodes' weights, 𝐾′, for
+        // weighted edges (summed in `f64`), the arc count for unweighted ones
+        let m2 = if E::is_weighted() {
+            let k = k.shared_slice();
+            W::from_f64(
+                (0..node_count)
+                    .map(|u| k.get(u).load(Ordering::Relaxed).to_f64())
+                    .sum(),
+            )
+        } else {
+            W::from_usize(edge_count)
+        };
         let m = m2 / (W::one() + W::one());
 
         let mut coms = coms.shared_slice();
@@ -1771,5 +1832,263 @@ mod test {
         }
         assert_eq!(l.community_count(), 20);
         l.drop_cache().unwrap();
+    }
+
+    /// A partition's modularity, from scratch: Σ_c in_c / 2m − (tot_c / 2m)², arcs weighing what
+    /// their labels say.
+    fn reference_modularity<L: crate::graph::E>(
+        g: &GraphMemoryMap<VoidLabel, L, usize>,
+        com: &[usize],
+    ) -> f64 {
+        let n = g.size();
+        let (mut inside, mut total) = (vec![0f64; n], vec![0f64; n]);
+        let mut m2 = 0f64;
+        for u in 0..n {
+            for (v, label) in g.weighted_neighbours(u).unwrap() {
+                let w = label.weight::<f64>();
+                m2 += w;
+                total[com[u]] += w;
+                if com[u] == com[v] {
+                    inside[com[u]] += w;
+                }
+            }
+        }
+        (0..n)
+            .map(|c| inside[c] / m2 - (total[c] / m2).powi(2))
+            .sum()
+    }
+
+    /// The two-cliques fixture with every edge weighing `weight`, except the bridge (4-5).
+    fn write_weighted_cliques(path: &std::path::Path, weight: &str, bridge: &str) {
+        let mut text = "%%MatrixMarket matrix coordinate real symmetric\n8 8 13\n".to_string();
+        for (u, v) in [
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+            (5, 6),
+            (5, 7),
+            (5, 8),
+            (6, 7),
+            (6, 8),
+            (7, 8),
+        ] {
+            text += &format!("{u} {v} {weight}\n");
+        }
+        text += &format!("4 5 {bridge}\n");
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn louvain_of<L: crate::graph::E, W: Weight>(
+        g: &GraphMemoryMap<VoidLabel, L, usize>,
+        leiden: bool,
+    ) -> (Vec<usize>, f64) {
+        let l = if leiden {
+            AlgoGVELouvain::<_, _, _, W>::new_leiden(g)
+        } else {
+            AlgoGVELouvain::<_, _, _, W>::new(g)
+        }
+        .unwrap();
+        let com: Vec<usize> = (0..g.size()).map(|u| l.node_community(u)).collect();
+        (com, l.partition_modularity())
+    }
+
+    /// Whether two partitions group nodes alike, whatever their community ids.
+    fn same_grouping(a: &[usize], b: &[usize]) -> bool {
+        (0..a.len()).all(|u| (0..a.len()).all(|v| (a[u] == a[v]) == (b[u] == b[v])))
+    }
+
+    /// Scaling every weight alike leaves modularity, and so the partition, unchanged: uniform
+    /// weights must give exactly what unit (unweighted) ones do.
+    #[test]
+    fn gve_louvain_uniform_weights_match_unweighted() {
+        use crate::graph::Weighted;
+        let dir = unique_test_dir("gve_louvain_uniform_weights");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let tag = unique_run_tag();
+        let (plain, weighted) = (dir.join("plain.mtx"), dir.join("weighted.mtx"));
+        write_two_cliques_mtx(&plain);
+        write_weighted_cliques(&weighted, "3.5", "3.5");
+        let unweighted = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+            &plain,
+            Some(format!("gve_uniform_plain_{tag}")),
+            None,
+        )
+        .unwrap();
+        let g = GraphMemoryMap::<VoidLabel, Weighted<f32>, usize>::from_file(
+            &weighted,
+            Some(format!("gve_uniform_weighted_{tag}")),
+            None,
+        )
+        .unwrap();
+        for leiden in [false, true] {
+            let (want, want_q) = louvain_of::<_, f64>(&unweighted, leiden);
+            for (com, q) in [
+                louvain_of::<_, f64>(&g, leiden),
+                louvain_of::<_, f32>(&g, leiden),
+            ] {
+                assert!(
+                    same_grouping(&com, &want),
+                    "leiden {leiden}: {com:?} vs {want:?}"
+                );
+                assert!(
+                    (q - want_q).abs() < 1e-6,
+                    "leiden {leiden}: {q} vs {want_q}"
+                );
+                assert!((q - reference_modularity(&g, &com)).abs() < 1e-6);
+            }
+        }
+    }
+
+    /// A heavy enough bridge pulls its ends together, which unit weights never would; the
+    /// modularity reported is the weighted one.
+    #[test]
+    fn gve_louvain_follows_edge_weights() {
+        use crate::graph::Weighted;
+        let dir = unique_test_dir("gve_louvain_weights");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let tag = unique_run_tag();
+        let path = dir.join("bridged.mtx");
+        write_weighted_cliques(&path, "1", "50");
+        let weighted = GraphMemoryMap::<VoidLabel, Weighted<f64>, usize>::from_file(
+            &path,
+            Some(format!("gve_weights_{tag}")),
+            None,
+        )
+        .unwrap();
+        // the same file, its values ignored
+        let unweighted = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
+            &path,
+            Some(format!("gve_weights_ignored_{tag}")),
+            None,
+        )
+        .unwrap();
+        for leiden in [false, true] {
+            let (com, q) = louvain_of::<_, f64>(&weighted, leiden);
+            assert_eq!(
+                com[3], com[4],
+                "leiden {leiden}: bridge ends apart: {com:?}"
+            );
+            assert!((q - reference_modularity(&weighted, &com)).abs() < 1e-9);
+            // the graph's own modularity is the weighted one too
+            let count = com.iter().max().unwrap() + 1;
+            let q_graph = weighted.modularity(&com, count).unwrap();
+            assert!(
+                (q_graph - q).abs() < 1e-9,
+                "leiden {leiden}: {q_graph} vs {q}"
+            );
+            let (plain, _) = louvain_of::<_, f64>(&unweighted, leiden);
+            assert_ne!(plain[3], plain[4], "leiden {leiden}: {plain:?}");
+            assert!(!same_grouping(&com, &plain));
+        }
+    }
+
+    /// A node of degree past `u16::MAX` (the unit-weight buffer's length) gets every edge's
+    /// weight: the buffer used to be sliced to the degree, panicking.
+    #[test]
+    fn gve_louvain_handles_hubs_past_the_unit_weight_buffer() {
+        let dir = unique_test_dir("gve_louvain_hub");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let leaves = u16::MAX as usize + 10;
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate pattern symmetric\n{0} {0} {leaves}\n",
+            leaves + 1
+        );
+        for v in 2..=leaves + 1 {
+            text += &format!("1 {v}\n");
+        }
+        let path = dir.join("star.mtx");
+        std::fs::write(&path, text).unwrap();
+        let (count, q) = run_louvain::<usize, f64>(&path, &format!("gve_hub_{}", unique_run_tag()));
+        // a star is one community
+        assert_eq!(count, 1);
+        assert!(q.abs() < 1e-9, "{q}");
+    }
+
+    /// Weights modularity can't be computed with are refused, saying so.
+    #[test]
+    fn gve_louvain_rejects_bad_weights() {
+        use crate::graph::Weighted;
+        let dir = unique_test_dir("gve_louvain_bad_weights");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, w) in [("negative", "-1"), ("nan", "nan"), ("inf", "inf")] {
+            let path = dir.join(format!("{name}.mtx"));
+            write_weighted_cliques(&path, "1", w);
+            let g = GraphMemoryMap::<VoidLabel, Weighted<f64>, usize>::from_file(
+                &path,
+                Some(format!("gve_bad_{name}_{}", unique_run_tag())),
+                None,
+            )
+            .unwrap();
+            let Err(err) = AlgoGVELouvain::<_, _, _, f64>::new(&g) else {
+                panic!("{name}: ran");
+            };
+            assert!(
+                err.to_string().contains("finite and non-negative"),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    /// Real-valued weights' community totals, summed by threads in any order, can round a hair
+    /// below a member's own weight: moving it out mustn't fail (it once did), and the
+    /// modularity found is still the weighted one.
+    #[test]
+    fn gve_louvain_tolerates_rounding_of_real_weights() {
+        use crate::graph::Weighted;
+        let dir = unique_test_dir("gve_louvain_rounding");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        for seed in 0..8u64 {
+            let n = 300;
+            let mut state = seed;
+            let mut next = move || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state >> 33
+            };
+            let mut edges = std::collections::BTreeMap::new();
+            for _ in 0..2000 {
+                let (u, v) = (next() as usize % n, next() as usize % n);
+                if u != v {
+                    let w = 0.1 + (next() % 1_000_000) as f64 / 211_111.0;
+                    edges.insert((u.max(v), u.min(v)), w);
+                }
+            }
+            let mut text = format!(
+                "%%MatrixMarket matrix coordinate real symmetric\n{n} {n} {}\n",
+                edges.len()
+            );
+            for ((u, v), w) in &edges {
+                text += &format!("{} {} {w}\n", u + 1, v + 1);
+            }
+            let path = dir.join(format!("r{seed}.mtx"));
+            std::fs::write(&path, text).unwrap();
+            let g = GraphMemoryMap::<VoidLabel, Weighted<f64>, usize>::from_file(
+                &path,
+                Some(format!("gve_rounding_{seed}_{}", unique_run_tag())),
+                Some(16),
+            )
+            .unwrap();
+            for leiden in [false, true] {
+                let (com, q) = louvain_of::<_, f64>(&g, leiden);
+                assert!(
+                    (q - reference_modularity(&g, &com)).abs() < 1e-9,
+                    "seed {seed}"
+                );
+                let (com, q) = louvain_of::<_, f32>(&g, leiden);
+                assert!(
+                    (q - reference_modularity(&g, &com)).abs() < 1e-5,
+                    "seed {seed}"
+                );
+            }
+        }
     }
 }

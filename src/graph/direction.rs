@@ -137,12 +137,49 @@ pub enum UndirectedMode {
 }
 
 impl UndirectedMode {
-    /// The kind of the derived graph it makes, in cache ids.
-    pub(crate) fn kind(self) -> &'static str {
-        match self {
+    /// The kind of the derived graph it makes, in cache ids: weighted graphs' merged edges (see
+    /// [`WeightMerge`]) also by how their weights are merged.
+    pub(crate) fn kind(self, merge: Option<WeightMerge>) -> String {
+        let mode = match self {
             UndirectedMode::Collapse => "undirected_collapse",
             UndirectedMode::Each => "undirected_each",
             UndirectedMode::Mutual => "undirected_mutual",
+        };
+        match merge {
+            Some(merge) if self != UndirectedMode::Each => format!("{mode}_{}", merge.name()),
+            _ => mode.to_string(),
+        }
+    }
+}
+
+/// How [`DiGraph::to_undirected_merging`] weighs an edge `u - v` merging several weighted arcs
+/// ([`Collapse`](UndirectedMode::Collapse) and [`Mutual`](UndirectedMode::Mutual) modes): every
+/// arc `u -> v` and `v -> u` (parallel ones too) is merged into one weight, the edge's from both
+/// ends. ([`Each`](UndirectedMode::Each) keeps every arc as an edge of its own, and unweighted
+/// edges keep the label of the first arc they come from.)
+///
+/// [`DiGraph::to_undirected_merging`]: super::GraphMemoryMap::to_undirected_merging
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WeightMerge {
+    /// The arcs' total weight, as igraph's `collapse` mode with `edge_attr_comb="sum"`: the
+    /// total flow between the two nodes. Integer sums overflowing the weight type are an
+    /// error. The default.
+    #[default]
+    Sum = 0,
+    /// The lightest arc's weight.
+    Min = 1,
+    /// The heaviest arc's weight.
+    Max = 2,
+}
+
+impl WeightMerge {
+    pub(crate) const COUNT: usize = 3;
+
+    fn name(self) -> &'static str {
+        match self {
+            WeightMerge::Sum => "sum",
+            WeightMerge::Min => "min",
+            WeightMerge::Max => "max",
         }
     }
 }
@@ -317,6 +354,8 @@ impl<N: super::N, E: super::E, Ix: IndexType, Dir: Directedness> GraphMemoryMap<
             thread_count: self.thread_count,
             exports: self.exports,
             symmetric: self.symmetric,
+            // (the same arcs)
+            total_weight: self.total_weight,
             transpose: std::sync::OnceLock::new(),
             undirected: Default::default(),
             derive_lock: self.derive_lock,
@@ -363,9 +402,11 @@ impl<N: super::N, E: super::E, Ix: IndexType> DiGraph<N, E, Ix> {
     /// reverses; edges are ordered by node, and by neighbour within a node, as in every graph.
     ///
     /// Built once (in `O(|V| + |E|)`) and cached alongside the graph, which owns it:
-    /// [`drop_cache`](Self::drop_cache) removes it too. A symmetric graph is its own transpose.
+    /// [`drop_cache`](Self::drop_cache) removes it too. A symmetric graph with unlabeled arcs is
+    /// its own transpose; labeled ones' aren't (`v -> u` reversing `u -> v` takes `u -> v`'s
+    /// label, which needn't be `v -> u`'s own).
     pub fn transpose(&self) -> Result<&Self, Box<dyn std::error::Error>> {
-        if self.is_symmetric()? {
+        if self.is_symmetric()? && !E::is_labeled() {
             return Ok(self);
         }
         if let Some(transpose) = self.transpose.get() {
@@ -393,22 +434,44 @@ impl<N: super::N, E: super::E, Ix: IndexType> DiGraph<N, E, Ix> {
 
     /// The underlying undirected graph in a given [`UndirectedMode`]: each edge stored as `u -> v`
     /// and `v -> u` (self-loops once, as MatrixMarket `symmetric` files store them), keeping the
-    /// label of the (first) arc it comes from.
+    /// label of the (first) arc it comes from, or for weighted edges merging all their arcs'
+    /// weights by [`WeightMerge::Sum`] (see [`to_undirected_merging`](Self::to_undirected_merging)).
     ///
     /// Built once per mode (in `O(|V| + |E|)`, after the [transpose](Self::transpose)) and
     /// cached alongside the graph, which owns it: [`drop_cache`](Self::drop_cache) removes it
-    /// too. A symmetric graph without parallel arcs already is its collapsed (and mutual)
-    /// undirected graph: that's the same entry, as a [`Graph`].
+    /// too. An unweighted symmetric graph without parallel arcs already is its collapsed (and
+    /// mutual) undirected graph: that's the same entry, as a [`Graph`].
     pub fn to_undirected_with(
         &self,
         mode: UndirectedMode,
     ) -> Result<&Graph<N, E, Ix>, Box<dyn std::error::Error>> {
-        let slot = &self.undirected[mode as usize];
+        self.to_undirected_merging(mode, WeightMerge::default())
+    }
+
+    /// The underlying undirected graph in a given [`UndirectedMode`] (see
+    /// [`to_undirected_with`](Self::to_undirected_with)), merging the weights of the arcs an edge
+    /// comes from by `merge`: the edge weighs the same from both ends. Unweighted edges ignore
+    /// `merge`. Built (and cached) once per mode and, for weighted edges, per `merge`.
+    pub fn to_undirected_merging(
+        &self,
+        mode: UndirectedMode,
+        merge: WeightMerge,
+    ) -> Result<&Graph<N, E, Ix>, Box<dyn std::error::Error>> {
+        let merge = if E::is_weighted() {
+            merge
+        } else {
+            WeightMerge::default()
+        };
+        let slot = &self.undirected[mode as usize * WeightMerge::COUNT + merge as usize];
         if let Some(undirected) = slot.get() {
             return Ok(undirected);
         }
         let symmetric = self.is_symmetric()?;
-        let itself = symmetric && mode != UndirectedMode::Each && !self.has_parallel_arcs();
+        // (weighted arcs `u -> v` and `v -> u` are merged, even if they weigh the same)
+        let itself = symmetric
+            && mode != UndirectedMode::Each
+            && !E::is_weighted()
+            && !self.has_parallel_arcs();
         // (a symmetric graph is its own transpose)
         let transpose = self.transpose()?;
         let _building = self
@@ -422,7 +485,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> DiGraph<N, E, Ix> {
             self.graph_cache.clone()
         } else {
             self.graph_cache
-                .derive_undirected(&transpose.graph_cache, mode)?
+                .derive_undirected(&transpose.graph_cache, mode, merge)?
         };
         let undirected = Graph::init_from_cache(cache, Some(self.thread_count))?;
         Ok(slot.get_or_init(|| Box::new(undirected)))
@@ -1110,5 +1173,179 @@ mod directed_algorithms_tests {
         let mut visitor = BackEdges::default();
         DFSVisit::new(g.to_undirected().unwrap(), 0, &mut visitor).unwrap();
         assert_eq!(visitor.0, vec![]);
+    }
+}
+
+#[cfg(test)]
+mod weight_merge_tests {
+    use super::*;
+    use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
+    use crate::graph::{EdgeWeight, Weighted};
+
+    /// A directed graph of `arcs` `(u, v, weight)`, its weights `T`s, under cache id `id`.
+    fn weighted<T: EdgeWeight>(
+        id: &str,
+        n: usize,
+        arcs: &[(usize, usize, u64)],
+    ) -> TestGraph<(), Weighted<T>, usize, Directed> {
+        let dir = unique_test_dir("weight_merge");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("g.mtx");
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate integer general\n{n} {n} {}\n",
+            arcs.len()
+        );
+        for (u, v, w) in arcs {
+            text += &format!("{} {} {w}\n", u + 1, v + 1);
+        }
+        std::fs::write(&path, text).unwrap();
+        let g = DiGraph::<(), Weighted<T>, usize>::from_file(&path, Some(id.to_string()), Some(2))
+            .unwrap();
+        TestGraph::new(g, Some(dir))
+    }
+
+    /// Every edge `(u, v, weight)`, from both ends, sorted.
+    fn edges<T: EdgeWeight>(g: &Graph<(), Weighted<T>, usize>) -> Vec<(usize, usize, T)> {
+        let mut edges: Vec<_> = (0..g.size())
+            .flat_map(|u| {
+                g.weighted_neighbours(u)
+                    .unwrap()
+                    .map(move |(v, w)| (u, v, w.0))
+            })
+            .collect();
+        edges.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)).then(a.2.weight_cmp(&b.2)));
+        edges
+    }
+
+    /// Each edge weighs the same from both ends.
+    fn assert_symmetric<T: EdgeWeight + PartialEq>(edges: &[(usize, usize, T)], what: &str) {
+        for &(u, v, w) in edges {
+            let back = edges.iter().filter(|e| (e.0, e.1) == (v, u)).count();
+            let same = edges
+                .iter()
+                .filter(|e| (e.0, e.1, e.2) == (v, u, w))
+                .count();
+            let here = edges
+                .iter()
+                .filter(|e| (e.0, e.1, e.2) == (u, v, w))
+                .count();
+            assert!(
+                back > 0 && same == here,
+                "{what}: {u} - {v} ({w:?}): {edges:?}"
+            );
+        }
+    }
+
+    // arcs both ways (0, 1), parallel (1 -> 2), and parallel self-loops (2)
+    const ARCS: [(usize, usize, u64); 6] = [
+        (0, 1, 3),
+        (1, 0, 5),
+        (1, 2, 7),
+        (1, 2, 2),
+        (2, 2, 4),
+        (2, 2, 1),
+    ];
+
+    #[test]
+    fn merged_edges_weigh_the_same_from_both_ends() {
+        let g = weighted::<u32>(&format!("merge_{}", unique_run_tag()), 3, &ARCS);
+        for (merge, a, b, c) in [
+            (WeightMerge::Sum, 8, 9, 5),
+            (WeightMerge::Min, 3, 2, 1),
+            (WeightMerge::Max, 5, 7, 4),
+        ] {
+            let collapsed = edges(
+                g.to_undirected_merging(UndirectedMode::Collapse, merge)
+                    .unwrap(),
+            );
+            assert_eq!(
+                collapsed,
+                vec![(0, 1, a), (1, 0, a), (1, 2, b), (2, 1, b), (2, 2, c)],
+                "{merge:?}"
+            );
+            // mutual: only what's linked both ways (a self-loop is its own reverse)
+            let mutual = edges(
+                g.to_undirected_merging(UndirectedMode::Mutual, merge)
+                    .unwrap(),
+            );
+            assert_eq!(mutual, vec![(0, 1, a), (1, 0, a), (2, 2, c)], "{merge:?}");
+            // each: every arc an edge, whatever the merge
+            let each = edges(
+                g.to_undirected_merging(UndirectedMode::Each, merge)
+                    .unwrap(),
+            );
+            assert_symmetric(&each, &format!("each {merge:?}"));
+            assert_eq!(each.len(), 2 * 4 + 2, "{merge:?}");
+        }
+        // the default is summing
+        assert_eq!(edges(g.to_undirected().unwrap())[0], (0, 1, 8));
+    }
+
+    /// A symmetric weighted graph is merged too (its arcs both ways weighing the same or not):
+    /// it's no longer its own undirected graph.
+    #[test]
+    fn symmetric_weighted_graphs_are_merged() {
+        let g = weighted::<f64>(
+            &format!("merge_sym_{}", unique_run_tag()),
+            2,
+            &[(0, 1, 3), (1, 0, 3)],
+        );
+        assert!(g.is_symmetric().unwrap());
+        assert_eq!(
+            edges(g.to_undirected().unwrap()),
+            vec![(0, 1, 6.), (1, 0, 6.)]
+        );
+        let max = g.to_undirected_merging(UndirectedMode::Collapse, WeightMerge::Max);
+        assert_eq!(edges(max.unwrap()), vec![(0, 1, 3.), (1, 0, 3.)]);
+    }
+
+    /// Sums overflowing the weight type are refused; other merges still work.
+    #[test]
+    fn overflowing_sums_are_refused() {
+        let g = weighted::<u8>(
+            &format!("merge_overflow_{}", unique_run_tag()),
+            2,
+            &[(0, 1, 200), (1, 0, 100)],
+        );
+        let err = g.to_undirected().err().unwrap().to_string();
+        assert!(err.contains("WeightMerge"), "{err}");
+        let max = g.to_undirected_merging(UndirectedMode::Collapse, WeightMerge::Max);
+        assert_eq!(edges(max.unwrap()), vec![(0, 1, 200), (1, 0, 200)]);
+    }
+
+    /// Each merge is cached as an entry of its own: another instance of the graph's entry gets
+    /// the merge it asks for, not one built before.
+    #[test]
+    fn merges_are_cached_apart() {
+        let id = format!("merge_cache_{}", unique_run_tag());
+        let g = weighted::<u32>(&id, 3, &ARCS);
+        assert_eq!(edges(g.to_undirected().unwrap())[0], (0, 1, 8));
+        let again =
+            DiGraph::<(), Weighted<u32>, usize>::open(g.cache_index_filename(), None, Some(2))
+                .unwrap();
+        let max = again.to_undirected_merging(UndirectedMode::Collapse, WeightMerge::Max);
+        assert_eq!(edges(max.unwrap())[0], (0, 1, 5));
+        let sum = again.to_undirected_merging(UndirectedMode::Collapse, WeightMerge::Sum);
+        assert_eq!(edges(sum.unwrap())[0], (0, 1, 8));
+    }
+
+    /// A symmetric graph's transpose reverses its arcs' labels too: `1 -> 0` reversing `0 -> 1`
+    /// weighs what `0 -> 1` does (the graph was once its own transpose, labels and all).
+    #[test]
+    fn symmetric_transposes_reverse_labels() {
+        let g = weighted::<u16>(
+            &format!("merge_transpose_{}", unique_run_tag()),
+            2,
+            &[(0, 1, 200), (1, 0, 100)],
+        );
+        let t = g.transpose().unwrap();
+        let reversed: Vec<_> = (0..2)
+            .flat_map(|u| {
+                t.weighted_neighbours(u)
+                    .unwrap()
+                    .map(move |(v, w)| (u, v, w.0))
+            })
+            .collect();
+        assert_eq!(reversed, vec![(0, 1, 100), (1, 0, 200)]);
     }
 }

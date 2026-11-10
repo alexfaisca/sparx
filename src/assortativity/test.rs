@@ -2,6 +2,7 @@ use super::*;
 use crate::components::test_utils::random_arcs;
 use crate::directed_algorithms_test::graph_ix;
 use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
+use crate::graph::{Directed, Undirected};
 use std::io::Write;
 
 /// An undirected graph of `n` nodes and `edges` (parallel edges and self-loops kept).
@@ -405,4 +406,142 @@ mod gpu {
         }
         assert_eq!(backend.arc_products(&device, &x, &y).unwrap(), expected);
     }
+}
+
+/// A graph of `arcs` `(u, v, weight)`, its weights `f64`s: undirected (each edge listed once,
+/// `symmetric`) or directed.
+fn weighted<Dir: Directedness>(
+    name: &str,
+    n: usize,
+    arcs: &[(usize, usize, f64)],
+    threads: u8,
+) -> TestGraph<(), crate::graph::Weighted<f64>, u32, Dir> {
+    let dir = unique_test_dir("assortativity_weights");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.mtx"));
+    let symmetry = if Dir::DIRECTED {
+        "general"
+    } else {
+        "symmetric"
+    };
+    let mut text = format!(
+        "%%MatrixMarket matrix coordinate real {symmetry}\n{n} {n} {}\n",
+        arcs.len()
+    );
+    for &(u, v, w) in arcs {
+        let (u, v) = if Dir::DIRECTED {
+            (u, v)
+        } else {
+            (u.max(v), u.min(v))
+        };
+        text += &format!("{} {} {w}\n", u + 1, v + 1);
+    }
+    std::fs::write(&path, text).unwrap();
+    let id = format!("assortativity_w_{name}_{}", unique_run_tag());
+    TestGraph::new(
+        GraphMemoryMap::from_file(&path, Some(id), Some(threads)).unwrap(),
+        Some(dir),
+    )
+}
+
+fn with_weights(arcs: &[(usize, usize)], seed: u64) -> Vec<(usize, usize, f64)> {
+    let mut state = seed;
+    arcs.iter()
+        .map(|&(u, v)| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // zeros included
+            (u, v, ((state >> 33) % 64) as f64 / 4.0)
+        })
+        .collect()
+}
+
+/// Weighted degree assortativity correlates the ends' strengths over the arcs (networkx's with
+/// `weight`): self-loops' weights counted twice, parallel edges' added up, zero weights too.
+#[test]
+fn weighted_degree_assortativity_correlates_strengths() {
+    for seed in 0..4u64 {
+        let n = 200;
+        let mut edges = random_arcs(n, 900, 40 + seed);
+        edges.extend([(3, 3), (5, 5), (7, 8), (7, 8)]);
+        let edges = with_weights(&edges, seed);
+        let g = weighted::<Undirected>(&format!("u_{seed}"), n, &edges, 3);
+        let mut strength = vec![0.0; n];
+        for &(u, v, w) in &edges {
+            strength[u] += w;
+            strength[v] += w;
+        }
+        let plain: Vec<_> = edges.iter().map(|&(u, v, _)| (u, v)).collect();
+        let pairs: Vec<_> = undirected_arcs(&plain)
+            .into_iter()
+            .map(|(u, v)| (strength[u], strength[v]))
+            .collect();
+        for correlation in [Correlation::Pearson, Correlation::Spearman] {
+            let got = degree_assortativity(&g, correlation).unwrap();
+            let want = correlation_of(&pairs, correlation);
+            assert!(
+                close(got, want),
+                "seed {seed}, {correlation:?}: {got} vs {want}"
+            );
+        }
+
+        // directed: out- and in-strengths, as asked
+        let arcs = with_weights(&random_arcs(n, 900, 80 + seed), seed + 9);
+        let d = weighted::<Directed>(&format!("d_{seed}"), n, &arcs, 3);
+        let (mut out_s, mut in_s) = (vec![0.0; n], vec![0.0; n]);
+        for &(u, v, w) in &arcs {
+            out_s[u] += w;
+            in_s[v] += w;
+        }
+        let of = |t: DegreeType| match t {
+            DegreeType::Out => &out_s,
+            DegreeType::In => &in_s,
+        };
+        for x in [DegreeType::Out, DegreeType::In] {
+            for y in [DegreeType::Out, DegreeType::In] {
+                let pairs: Vec<_> = arcs.iter().map(|&(u, v, _)| (of(x)[u], of(y)[v])).collect();
+                for correlation in [Correlation::Pearson, Correlation::Spearman] {
+                    let got = directed_degree_assortativity(&d, x, y, correlation).unwrap();
+                    let want = correlation_of(&pairs, correlation);
+                    assert!(
+                        close(got, want),
+                        "seed {seed}, {x:?}/{y:?} {correlation:?}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Uniform weights correlate as unit ones do, and results don't depend on the threads.
+#[test]
+fn weighted_degree_assortativity_uniform_and_thread_independent() {
+    let n = 300;
+    let edges = random_arcs(n, 1500, 7);
+    let plain = undirected("w_plain", n, &edges, 3);
+    let uniform: Vec<_> = edges.iter().map(|&(u, v)| (u, v, 2.5)).collect();
+    let g = weighted::<Undirected>("w_uniform", n, &uniform, 3);
+    for correlation in [Correlation::Pearson, Correlation::Spearman] {
+        let want = degree_assortativity(&plain, correlation).unwrap();
+        let got = degree_assortativity(&g, correlation).unwrap();
+        assert!(close(got, want), "{correlation:?}: {got} vs {want}");
+    }
+    let edges = with_weights(&edges, 3);
+    let results: Vec<f64> = [1u8, 4, 8]
+        .iter()
+        .map(|&t| {
+            let g = weighted::<Undirected>(&format!("w_threads_{t}"), n, &edges, t);
+            degree_assortativity(&g, Correlation::Pearson).unwrap()
+        })
+        .collect();
+    assert_eq!(results[0].to_bits(), results[1].to_bits());
+    assert_eq!(results[0].to_bits(), results[2].to_bits());
+}
+
+#[test]
+fn weighted_degree_assortativity_rejects_bad_weights() {
+    let g = weighted::<Undirected>("w_bad", 3, &[(0, 1, 1.0), (1, 2, -1.0)], 2);
+    let err = degree_assortativity(&g, Correlation::Pearson).unwrap_err();
+    assert!(err.to_string().contains("finite and non-negative"), "{err}");
 }

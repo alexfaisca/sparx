@@ -38,6 +38,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
+        Self::refuse_weights("node/edge")?;
 
         let nodes_path_str =
             nodes_path

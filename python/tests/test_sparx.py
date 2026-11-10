@@ -959,3 +959,157 @@ def test_communities_are_connected(nx_graph, digraph, method):
             assert communities_connected(G, labels)
             groups = [{u for u in range(n) if labels[u] == c} for c in range(result["count"])]
             assert result["modularity"] == pytest.approx(nx.community.modularity(G, groups, weight=None), abs=1e-9)
+
+
+# --- weighted graphs --------------------------------------------------------------------------
+
+
+def write_weighted_mtx(path, n, edges, symmetric, field="real"):
+    with open(path, "w") as f:
+        kind = "symmetric" if symmetric else "general"
+        f.write(f"%%MatrixMarket matrix coordinate {field} {kind}\n{n} {n} {len(edges)}\n")
+        for u, v, w in edges:
+            f.write(f"{u + 1} {v + 1} {w}\n")
+    return str(path)
+
+
+def weighted_undirected(G, name="gw.mtx"):
+    edges = [(max(u, v), min(u, v), w) for u, v, w in G.edges(data="weight")]
+    return write_weighted_mtx(name, G.number_of_nodes(), edges, True)
+
+
+def weighted_directed(D, name="dw.mtx"):
+    return write_weighted_mtx(name, D.number_of_nodes(), list(D.edges(data="weight")), False)
+
+
+def with_random_weights(G, seed, integers=False):
+    rng = np.random.default_rng(seed)
+    for u, v in G.edges():
+        G[u][v]["weight"] = int(rng.integers(1, 10)) if integers else float(rng.uniform(0.1, 5))
+    return G
+
+
+def weighted_graphs():
+    # karate's edges have (integer) weights of their own
+    yield nx.convert_node_labels_to_integers(nx.karate_club_graph())
+    yield with_random_weights(nx.gnp_random_graph(60, 0.12, seed=1), 2)
+
+
+def weighted_digraphs():
+    for seed in range(3):
+        yield with_random_weights(nx.gnp_random_graph(40, 0.12, seed=seed, directed=True), seed, True)
+
+
+@pytest.mark.parametrize("G", list(weighted_graphs()))
+def test_weighted_csr(G, index):
+    with sparx.Graph(weighted_undirected(G), index=index, weighted=True) as g:
+        assert g.is_weighted
+        src, dst = edge_list(g)
+        weights = g.edge_weights()
+        assert weights.dtype == np.float64 and len(weights) == g.num_edges
+        for u, v, w in zip(src.tolist(), dst.tolist(), weights.tolist()):
+            assert w == pytest.approx(G[u][v]["weight"])
+        for u in G:
+            assert g.weights(u).tolist() == pytest.approx([G[u][v]["weight"] for v in g.neighbours(u)])
+    # the same file, unweighted: weights are ones
+    with sparx.Graph(weighted_undirected(G, "again.mtx")) as g:
+        assert not g.is_weighted
+        assert g.edge_weights().tolist() == [1.0] * g.num_edges
+
+
+@pytest.mark.parametrize("G", list(weighted_graphs()))
+def test_weighted_algorithms_against_networkx(G):
+    n = len(G)
+    with sparx.Graph(weighted_undirected(G), weighted=True) as g:
+        want = nx.pagerank(G, tol=1e-12 / n, weight="weight")
+        np.testing.assert_allclose(g.pagerank(tol=1e-12), [want[u] for u in range(n)], rtol=1e-6)
+
+        lv = g.louvain()
+        communities = lv["communities"]
+        parts = [set(np.flatnonzero(communities == c).tolist()) for c in np.unique(communities)]
+        assert lv["modularity"] == pytest.approx(
+            nx.community.modularity(G, parts, weight="weight"), abs=1e-9
+        )
+        best = nx.community.modularity(
+            G, nx.community.louvain_communities(G, weight="weight", seed=0), weight="weight"
+        )
+        assert lv["modularity"] >= best - 0.05
+
+        cc = g.clustering()
+        local = nx.clustering(G, weight="weight")
+        np.testing.assert_allclose(cc["local"], [local[u] for u in range(n)], atol=1e-12)
+        assert cc["average"] == pytest.approx(nx.average_clustering(G, weight="weight"))
+        # transitivity, as networkx's, ignores weights
+        assert cc["transitivity"] == pytest.approx(nx.transitivity(G))
+
+        assert g.degree_assortativity() == pytest.approx(
+            nx.degree_assortativity_coefficient(G, weight="weight"), abs=1e-9
+        )
+
+
+@pytest.mark.parametrize("D", list(weighted_digraphs()))
+def test_weighted_directed_algorithms_against_networkx(D):
+    n = len(D)
+    with sparx.DiGraph(weighted_directed(D), weighted=True) as g:
+        want = nx.pagerank(D, tol=1e-12 / n, weight="weight")
+        np.testing.assert_allclose(g.pagerank(tol=1e-12), [want[u] for u in range(n)], rtol=1e-6)
+
+        lv = g.louvain()
+        communities = lv["communities"]
+        parts = [set(np.flatnonzero(communities == c).tolist()) for c in np.unique(communities)]
+        assert lv["modularity"] == pytest.approx(
+            nx.community.modularity(D, parts, weight="weight"), abs=1e-9
+        )
+
+        c = g.clustering()
+        want = nx.clustering(D, weight="weight")
+        np.testing.assert_allclose(c["local"], [want[u] for u in range(n)], atol=1e-12)
+
+        for x, y in itertools.product(["out", "in"], repeat=2):
+            assert g.degree_assortativity(x=x, y=y) == pytest.approx(
+                nx.degree_assortativity_coefficient(D, x=x, y=y, weight="weight"), abs=1e-9
+            )
+
+
+def test_weighted_to_undirected_merges():
+    path = write_weighted_mtx("m.mtx", 3, [(0, 1, 3), (1, 0, 5), (1, 2, 7)], False)
+    with sparx.DiGraph(path, weighted=True) as d:
+        for merge, w01 in [("sum", 8), ("min", 3), ("max", 5)]:
+            u = d.to_undirected(merge=merge)
+            assert u.is_weighted
+            # the edge weighs the same from both ends
+            assert u.weights(0).tolist() == [w01]
+            assert sorted(u.weights(1).tolist()) == sorted([w01, 7])
+        with pytest.raises(ValueError, match="merge"):
+            d.to_undirected(merge="mean")
+
+
+def test_weight_parsing_and_formats(cache_dir):
+    path = write_weighted_mtx("bad.mtx", 2, [(0, 1, "abc")], False)
+    # fast parsing trusts the values; checked parsing refuses
+    with sparx.DiGraph(path, weighted=True) as g:
+        assert np.isnan(g.edge_weights()[0])
+    with pytest.raises(RuntimeError, match="abc"):
+        sparx.DiGraph(path, weighted=True, weight_parsing="checked")
+    with pytest.raises(ValueError, match="weight parsing"):
+        sparx.DiGraph(path, weighted=True, weight_parsing="slow")
+    # ggcat graphs carry no weights
+    with pytest.raises(RuntimeError, match="no edge weights"):
+        sparx.Graph(FIXTURES / "random_graph_1_5.lz4", weighted=True)
+    # a weighted cache entry reopens weighted (ones, reopened unweighted)
+    good = write_weighted_mtx("good.mtx", 2, [(0, 1, 2.5)], False)
+    with sparx.DiGraph(good, weighted=True, keep_cache=True) as g:
+        cache_file = g.cache_file
+    with sparx.DiGraph.open(cache_file, weighted=True) as g:
+        assert g.is_weighted and g.edge_weights().tolist() == [2.5]
+    with sparx.DiGraph.open(cache_file) as g:
+        assert g.edge_weights().tolist() == [1.0]
+    for f in cache_dir.iterdir():
+        f.unlink()
+    # an unweighted entry doesn't reopen weighted
+    with sparx.DiGraph(good, keep_cache=True) as g:
+        cache_file = g.cache_file
+    with pytest.raises(RuntimeError):
+        sparx.DiGraph.open(cache_file, weighted=True)
+    for f in cache_dir.iterdir():
+        f.unlink()

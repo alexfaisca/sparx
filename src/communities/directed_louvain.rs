@@ -81,9 +81,14 @@ impl<'a> Scratch<'a> {
 /// they count as one arc here, where undirected modularity counts them twice (networkx's
 /// `modularity` of a `Graph` with self-loops differs from this, that of `G.to_directed()` doesn't).
 ///
+/// With weighted arcs (see [`E::is_weighted`](graph::E::is_weighted)), `m` is their total weight,
+/// `A_ij` that of the arcs `i -> j`, and `k_i^out`, `k_i^in` that of `i`'s out- and in-arcs.
+/// Weights must be non-negative integers (`3.0` is one; see
+/// [`integer_weight`](graph::E::integer_weight)), totalling at most `2^60`: the sums are exact.
+///
 /// `communities[v]` is node `v`'s community; any labels will do. Computed in `O(|V| + |E|)`
-/// from each community's total out- and in-degree and number of internal arcs. A graph without
-/// arcs has modularity `0`.
+/// from each community's total out- and in-weight and weight of internal arcs. A graph without
+/// arcs (or whose arcs all weigh `0`) has modularity `0`.
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
@@ -136,9 +141,35 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: 
     let offsets = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
     let neighbours = SharedSlice::<Ix>::new(g.neighbours_ptr(), arc_count);
     let (offsets, neighbours) = (offsets.as_slice(), neighbours.as_slice());
-
-    // communities' total out- and in-degrees, and arcs within communities, in parallel
     let threads = g.thread_num().max(1);
+
+    // weighted arcs weigh their labels' integer weights (checked, and their total, first)
+    let labels = E::is_weighted().then(|| SharedSlice::<E>::new(g.edge_labels_ptr(), arc_count));
+    let m = match &labels {
+        None => arc_count as u128,
+        Some(labels) => {
+            let mut m = 0u128;
+            for part in by_range(threads, arc_count, &|begin, end| {
+                (begin..end)
+                    .map(|e| exact_weight(labels.get(e)).map(u128::from))
+                    .sum::<Result<u128, _>>()
+            })? {
+                m += part.map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            }
+            m
+        }
+    };
+    let m = check_total_weight(m)?;
+    if m == 0 {
+        return Ok(0.0);
+    }
+    let weight = |e: usize| {
+        labels
+            .as_ref()
+            .map_or(1, |l| l.get(e).integer_weight().unwrap_or(0))
+    };
+
+    // communities' total out- and in-weights, and weight within communities, in parallel
     let sigma_out_mem = scratch.zeroed::<u64>(node_count)?;
     let sigma_in_mem = scratch.zeroed::<u64>(node_count)?;
     let (sigma_out, sigma_in) = (atomics(&sigma_out_mem), atomics(&sigma_in_mem));
@@ -146,13 +177,17 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: 
         let mut internal = 0u64;
         for u in begin..end {
             let cu = dense(u);
-            let row = &neighbours[offsets[u].index()..offsets[u + 1].index()];
-            sigma_out[cu].fetch_add(row.len() as u64, Ordering::Relaxed);
-            for v in row {
-                let cv = dense(v.index());
-                sigma_in[cv].fetch_add(1, Ordering::Relaxed);
-                internal += (cu == cv) as u64;
+            let mut k_out = 0u64;
+            let row = offsets[u].index()..offsets[u + 1].index();
+            for (e, v) in row.clone().zip(&neighbours[row]) {
+                let (cv, w) = (dense(v.index()), weight(e));
+                k_out += w;
+                sigma_in[cv].fetch_add(w, Ordering::Relaxed);
+                if cu == cv {
+                    internal += w;
+                }
             }
+            sigma_out[cu].fetch_add(k_out, Ordering::Relaxed);
         }
         internal
     })?
@@ -165,7 +200,7 @@ pub fn directed_modularity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: 
     })?
     .into_iter()
     .sum();
-    let m = arc_count as f64;
+    let m = m as f64;
     Ok(internal as f64 / m - expected as f64 / (m * m))
 }
 
@@ -181,7 +216,9 @@ pub use super::Refinement;
 /// Louvain Algorithm for Community Detection in Shared Memory
 /// Setting"](https://doi.org/10.48550/arXiv.2312.04876); on a symmetric `DiGraph` (e.g. a
 /// `Graph`'s [`into_directed`](crate::graph::GraphMemoryMap::into_directed)) it is ordinary
-/// Louvain. The graph is unweighted: each arc weighs `1`, so parallel arcs add up.
+/// Louvain. Parallel arcs add up. Unweighted arcs weigh `1`; weighted ones (see
+/// [`E::is_weighted`](graph::E::is_weighted)) their labels' weights, which must be non-negative
+/// integers totalling at most `2^60` (see [`directed_modularity`]): gains are compared exactly.
 ///
 /// [`DiGraph`]: crate::graph::DiGraph
 /// [`Graph`]: crate::graph::Graph
@@ -197,7 +234,7 @@ pub use super::Refinement;
 ///   nodes one of whose neighbours moved since they were last visited (GVE-Louvain's vertex
 ///   pruning).
 /// * *aggregation*: communities become the nodes of a weighted directed supergraph (arc weights
-///   are the number of arcs between communities, internal arcs becoming self-loops), on which
+///   are the total weight of arcs between communities, internal arcs becoming self-loops), on which
 ///   local moving starts again from singletons. Supergraphs are built in parallel too, each
 ///   community's arcs within room reserved from prefix sums.
 ///
@@ -373,11 +410,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
         if node_count == 0 {
             return Ok(());
         }
-        let base = BaseArcs::new(self.g)?;
-        let m = self.g.width() as u64;
         let g = self.g;
         let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
         let scratch = Scratch::new(&name, 0);
+        let base = BaseArcs::new(g, &scratch)?;
+        // total arc weight
+        let m = base.m;
+        if m == 0 {
+            return self.all_alone();
+        }
 
         let threads = g.thread_num().max(1);
         // graphs large enough for parallel local moving have every phase held to GVE-Louvain's
@@ -460,6 +501,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
 }
 
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, E, Ix> {
+    /// The result when no arc weighs anything (no arcs, or all of weight `0`): no move gains
+    /// anything, and every node stays in a community of its own.
+    fn all_alone(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        for (u, c) in self.communities.as_mut_slice().iter_mut().enumerate() {
+            *c = Ix::new(u);
+        }
+        self.community_count = self.g.size();
+        self.communities.flush_async()?;
+        self.modularity = 0.0;
+        Ok(())
+    }
+
     /// [`compute`](Self::compute), with Leiden's refinement: each pass's communities (its
     /// *bounds*) are refined into connected sub-communities (see [`refine`]), which are
     /// aggregated, each supernode starting the next pass in its bound.
@@ -472,11 +525,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
         if node_count == 0 {
             return Ok(());
         }
-        let base = BaseArcs::new(self.g)?;
-        let m = self.g.width() as u64;
         let g = self.g;
         let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
         let scratch = Scratch::new(&name, 0);
+        let base = BaseArcs::new(g, &scratch)?;
+        // total arc weight
+        let m = base.m;
+        if m == 0 {
+            return self.all_alone();
+        }
 
         let threads = g.thread_num().max(1);
         let gve = parallel_threads(node_count, threads) > 1;
@@ -994,27 +1051,112 @@ trait Arcs: Sync {
     fn in_arcs(&self, i: usize, f: impl FnMut(usize, u64));
 }
 
-/// The original graph's arcs, each of weight `1`: out-arcs from its CSR, in-arcs from its
-/// transpose's.
-struct BaseArcs<Ix: graph::IndexType> {
+/// Largest total arc weight `m` local moving accepts: its gains, `m·w − (k_out Σ_in + k_in Σ_out)`
+/// (each term at most `m²`), are summed exactly in `i128`, with room for many.
+const MAX_TOTAL_WEIGHT: u64 = 1 << 60;
+
+/// An arc's weight, as an exact integer: what [`DirectedLouvain`] and [`directed_modularity`]
+/// compute with.
+fn exact_weight<L: graph::E>(label: &L) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    label.integer_weight().ok_or_else(|| {
+        format!(
+            "error directed modularity is computed exactly, in integers, so arc weights must be non-negative integers, but one is {label:?}"
+        )
+        .into()
+    })
+}
+
+/// Checks a graph's total arc weight is within [`MAX_TOTAL_WEIGHT`].
+fn check_total_weight(m: u128) -> Result<u64, Box<dyn std::error::Error>> {
+    if m > MAX_TOTAL_WEIGHT as u128 {
+        return Err(format!(
+            "error the arcs' total weight, {m}, exceeds the {MAX_TOTAL_WEIGHT} directed modularity is computed exactly up to: scale the weights down"
+        )
+        .into());
+    }
+    Ok(m as u64)
+}
+
+/// The original graph's arcs: out-arcs from its CSR, in-arcs from its transpose's. Unweighted
+/// arcs (see [`E::is_weighted`](graph::E::is_weighted)) weigh `1`, and nodes' total weights are
+/// their degrees; weighted ones weigh their labels' [`integer_weight`](graph::E::integer_weight),
+/// and nodes' total weights are summed once, up front.
+struct BaseArcs<Ix: graph::IndexType, L: graph::E> {
     out_offsets: SharedSlice<Ix>,
     out_neighbours: SharedSlice<Ix>,
     in_offsets: SharedSlice<Ix>,
     in_neighbours: SharedSlice<Ix>,
+    /// Out- and in-arcs' labels, and nodes' total out- and in-weights: only for weighted arcs.
+    weights: Option<BaseWeights<L>>,
+    /// Total arc weight.
+    m: u64,
 }
 
-impl<Ix: graph::IndexType> BaseArcs<Ix> {
-    /// Valid while `g` (which owns its transpose) is.
-    fn new<N: graph::N, E: graph::E>(
-        g: &DiGraph<N, E, Ix>,
+struct BaseWeights<L> {
+    out_labels: SharedSlice<L>,
+    in_labels: SharedSlice<L>,
+    k_out: ScratchMem<u64>,
+    k_in: ScratchMem<u64>,
+}
+
+impl<Ix: graph::IndexType, L: graph::E> BaseArcs<Ix, L> {
+    /// Valid while `g` (which owns its transpose) is. Fails on arc weights local moving can't
+    /// compute with exactly (see [`exact_weight`], [`MAX_TOTAL_WEIGHT`]).
+    fn new<N: graph::N>(
+        g: &DiGraph<N, L, Ix>,
+        scratch: &Scratch,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let t = g.transpose()?;
-        Ok(Self {
+        let mut base = Self {
             out_offsets: SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size()),
             out_neighbours: SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width()),
             in_offsets: SharedSlice::<Ix>::new(t.offsets_ptr(), t.offsets_size()),
             in_neighbours: SharedSlice::<Ix>::new(t.neighbours_ptr(), t.width()),
-        })
+            weights: None,
+            m: check_total_weight(g.width() as u128)?,
+        };
+        if L::is_weighted() {
+            let n = g.size();
+            let mut w = BaseWeights {
+                // (a transpose's arcs keep their labels)
+                out_labels: SharedSlice::<L>::new(g.edge_labels_ptr(), g.width()),
+                in_labels: SharedSlice::<L>::new(t.edge_labels_ptr(), t.width()),
+                k_out: scratch.zeroed(n)?,
+                k_in: scratch.zeroed(n)?,
+            };
+            let threads = g.thread_num().max(1);
+            let totals = |offsets: &SharedSlice<Ix>,
+                          labels: &SharedSlice<L>,
+                          k: &mut ScratchMem<u64>|
+             -> Result<u128, Box<dyn std::error::Error>> {
+                let k = SharedSliceMut::<u64>::new(k.as_mut_ptr(), n);
+                let mut m = 0u128;
+                for part in by_range(threads, n, &|begin, end| {
+                    let mut k = k;
+                    let mut m = 0u128;
+                    for i in begin..end {
+                        let mut k_i = 0u128;
+                        for e in Self::range(offsets, i) {
+                            k_i += exact_weight(labels.get(e))? as u128;
+                        }
+                        // (within the total's bound, checked below, if the total is)
+                        *k.get_mut(i) = k_i.min(u64::MAX as u128) as u64;
+                        m += k_i;
+                    }
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(m)
+                })? {
+                    m +=
+                        part.map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+                }
+                Ok(m)
+            };
+            let m = totals(&base.out_offsets, &w.out_labels, &mut w.k_out)?;
+            // the same arcs, seen from their heads
+            totals(&base.in_offsets, &w.in_labels, &mut w.k_in)?;
+            base.m = check_total_weight(m)?;
+            base.weights = Some(w);
+        }
+        Ok(base)
     }
 
     fn range(offsets: &SharedSlice<Ix>, i: usize) -> std::ops::Range<usize> {
@@ -1022,7 +1164,7 @@ impl<Ix: graph::IndexType> BaseArcs<Ix> {
     }
 }
 
-impl<Ix: graph::IndexType> Arcs for BaseArcs<Ix> {
+impl<Ix: graph::IndexType, L: graph::E> Arcs for BaseArcs<Ix, L> {
     fn len(&self) -> usize {
         self.out_offsets.len() - 1
     }
@@ -1032,11 +1174,17 @@ impl<Ix: graph::IndexType> Arcs for BaseArcs<Ix> {
     }
 
     fn k_out(&self, i: usize) -> u64 {
-        Self::range(&self.out_offsets, i).len() as u64
+        match &self.weights {
+            Some(w) => w.k_out[i],
+            None => Self::range(&self.out_offsets, i).len() as u64,
+        }
     }
 
     fn k_in(&self, i: usize) -> u64 {
-        Self::range(&self.in_offsets, i).len() as u64
+        match &self.weights {
+            Some(w) => w.k_in[i],
+            None => Self::range(&self.in_offsets, i).len() as u64,
+        }
     }
 
     fn out_degree(&self, i: usize) -> usize {
@@ -1048,14 +1196,37 @@ impl<Ix: graph::IndexType> Arcs for BaseArcs<Ix> {
     }
 
     fn out_arcs(&self, i: usize, mut f: impl FnMut(usize, u64)) {
-        for j in &self.out_neighbours.as_slice()[Self::range(&self.out_offsets, i)] {
-            f(j.index(), 1);
+        let range = Self::range(&self.out_offsets, i);
+        match &self.weights {
+            // (weights checked in `new`)
+            Some(w) => {
+                for e in range {
+                    let weight = w.out_labels.get(e).integer_weight().unwrap_or(0);
+                    f(self.out_neighbours.get(e).index(), weight);
+                }
+            }
+            None => {
+                for j in &self.out_neighbours.as_slice()[range] {
+                    f(j.index(), 1);
+                }
+            }
         }
     }
 
     fn in_arcs(&self, i: usize, mut f: impl FnMut(usize, u64)) {
-        for j in &self.in_neighbours.as_slice()[Self::range(&self.in_offsets, i)] {
-            f(j.index(), 1);
+        let range = Self::range(&self.in_offsets, i);
+        match &self.weights {
+            Some(w) => {
+                for e in range {
+                    let weight = w.in_labels.get(e).integer_weight().unwrap_or(0);
+                    f(self.in_neighbours.get(e).index(), weight);
+                }
+            }
+            None => {
+                for j in &self.in_neighbours.as_slice()[range] {
+                    f(j.index(), 1);
+                }
+            }
         }
     }
 }
@@ -2093,7 +2264,9 @@ mod test {
         // two triangles and an isolated pair, all labelled one community
         let arcs = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (6, 7)];
         let g = graph("split", "general", 9, &arcs);
-        let base = BaseArcs::new(&g).unwrap();
+        let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
+        let scratch = Scratch::new(&name, 0);
+        let base = BaseArcs::new(&g, &scratch).unwrap();
         let (offsets, neighbours) = (base.out_offsets.as_slice(), base.out_neighbours.as_slice());
         let mut comm = vec![0usize; 9];
         let count = super::super::split_disconnected(3, offsets, neighbours, &mut comm).unwrap();
@@ -2120,7 +2293,9 @@ mod test {
                     &arcs,
                     threads,
                 );
-                let base = BaseArcs::new(&g).unwrap();
+                let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
+                let scratch = Scratch::new(&name, 0);
+                let base = BaseArcs::new(&g, &scratch).unwrap();
                 let Some(classes) = color_classes(&base, threads as usize).unwrap() else {
                     continue;
                 };
@@ -2278,5 +2453,315 @@ mod test {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    /// A directed graph whose arcs `(u, v, value)` carry `value`s, as written in a `field`
+    /// MatrixMarket file, loaded with `T` weights on `threads` threads.
+    fn weighted_graph<T: crate::graph::EdgeWeight>(
+        name: &str,
+        field: &str,
+        n: usize,
+        arcs: &[(usize, usize, String)],
+        threads: u8,
+    ) -> Result<
+        crate::graph::test_utils::TestGraph<label::VoidLabel, Weighted<T>, usize, Directed>,
+        String,
+    > {
+        use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
+        let dir = unique_test_dir("directed_louvain_weights");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.mtx"));
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate {field} general\n{n} {n} {}\n",
+            arcs.len()
+        );
+        for (u, v, w) in arcs {
+            text += &format!("{} {} {w}\n", u + 1, v + 1);
+        }
+        std::fs::write(&path, text).unwrap();
+        let g = DiGraph::<label::VoidLabel, Weighted<T>, usize>::from_file(
+            &path,
+            Some(format!("dl_weights_{name}_{}", unique_run_tag())),
+            Some(threads),
+        )
+        .map_err(|e| e.to_string());
+        let g = match g {
+            Ok(g) => g,
+            Err(e) => {
+                std::fs::remove_dir_all(&dir).ok();
+                return Err(e);
+            }
+        };
+        Ok(crate::graph::test_utils::TestGraph::new(g, Some(dir)))
+    }
+
+    /// The weighted formula, in `O(n²)`.
+    fn brute_force_weighted_modularity(
+        n: usize,
+        arcs: &[(usize, usize, u64)],
+        comm: &[usize],
+    ) -> f64 {
+        let m: f64 = arcs.iter().map(|a| a.2 as f64).sum();
+        if m == 0.0 {
+            return 0.0;
+        }
+        let mut a = vec![vec![0.0; n]; n];
+        let (mut k_out, mut k_in) = (vec![0.0; n], vec![0.0; n]);
+        for &(u, v, w) in arcs {
+            a[u][v] += w as f64;
+            k_out[u] += w as f64;
+            k_in[v] += w as f64;
+        }
+        let mut q = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                if comm[i] == comm[j] {
+                    q += a[i][j] - k_out[i] * k_in[j] / m;
+                }
+            }
+        }
+        q / m
+    }
+
+    fn with_weights(arcs: &[(usize, usize)], seed: u64) -> Vec<(usize, usize, u64)> {
+        let mut state = seed;
+        arcs.iter()
+            .map(|&(u, v)| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                // zeros included
+                (u, v, (state >> 33) % 20)
+            })
+            .collect()
+    }
+
+    fn as_text(arcs: &[(usize, usize, u64)]) -> Vec<(usize, usize, String)> {
+        arcs.iter()
+            .map(|&(u, v, w)| (u, v, w.to_string()))
+            .collect()
+    }
+
+    fn assert_close_rel(a: f64, b: f64, what: &str) {
+        assert!((a - b).abs() < 1e-9, "{what}: {a} != {b}");
+    }
+
+    /// Weighted modularity is the formula, for any partition, parallel arcs and zero weights
+    /// included.
+    #[test]
+    fn weighted_directed_modularity_is_the_formula() {
+        for seed in 0..6u64 {
+            let n = 40;
+            let arcs = with_weights(&random_arcs(n, 300, 50 + seed), seed);
+            let g =
+                weighted_graph::<u32>(&format!("wmod_{seed}"), "integer", n, &as_text(&arcs), 3)
+                    .unwrap();
+            for parts in [1, 3, 7, n] {
+                let comm: Vec<usize> = (0..n).map(|u| (u * 7 + seed as usize) % parts).collect();
+                let labels: Vec<usize> = comm.clone();
+                assert_close_rel(
+                    directed_modularity(&g, &labels).unwrap(),
+                    brute_force_weighted_modularity(n, &arcs, &comm),
+                    &format!("seed {seed}, {parts} parts"),
+                );
+            }
+        }
+    }
+
+    /// Scaling every weight alike scales every gain alike: uniform weights find exactly what
+    /// unit ones do, with Louvain and Leiden.
+    #[test]
+    fn uniform_weights_find_what_unit_ones_do() {
+        for seed in 0..4u64 {
+            let n = 120;
+            let arcs = random_arcs(n, 600, 300 + seed);
+            let plain = graph_with_threads(&format!("uni_plain_{seed}"), "general", n, &arcs, 1);
+            let uniform: Vec<_> = arcs.iter().map(|&(u, v)| (u, v, "7".to_string())).collect();
+            let weighted =
+                weighted_graph::<u16>(&format!("uni_{seed}"), "integer", n, &uniform, 1).unwrap();
+            for refinement in [Refinement::None, Refinement::Leiden] {
+                let want =
+                    DirectedLouvain::new_with_refinement(&plain, 256, 0.0, refinement).unwrap();
+                let got =
+                    DirectedLouvain::new_with_refinement(&weighted, 256, 0.0, refinement).unwrap();
+                assert_eq!(
+                    as_usize(got.communities()),
+                    as_usize(want.communities()),
+                    "seed {seed}, {refinement:?}"
+                );
+                assert_close_rel(
+                    got.partition_modularity(),
+                    want.partition_modularity(),
+                    &format!("seed {seed}, {refinement:?}"),
+                );
+            }
+        }
+    }
+
+    /// Two directed 4-cliques (arcs both ways), linked both ways between nodes 3 and 4:
+    /// unweighted, the cliques are the communities; a heavy enough link pulls its ends together. The modularity reported is
+    /// the weighted one.
+    #[test]
+    fn weights_steer_communities() {
+        let mut arcs = vec![];
+        for base in [0, 4] {
+            for u in 0..4 {
+                for v in 0..4 {
+                    if u != v {
+                        arcs.push((base + u, base + v));
+                    }
+                }
+            }
+        }
+        arcs.extend([(3, 4), (4, 3)]);
+        let weighted: Vec<_> = arcs
+            .iter()
+            .map(|&(u, v)| {
+                (
+                    u,
+                    v,
+                    if (u, v) == (3, 4) || (u, v) == (4, 3) {
+                        60
+                    } else {
+                        1
+                    },
+                )
+            })
+            .collect();
+        let plain = graph("steer_plain", "general", 8, &arcs);
+        let g = weighted_graph::<u64>("steer", "integer", 8, &as_text(&weighted), 3).unwrap();
+        for refinement in [Refinement::None, Refinement::Leiden] {
+            let unweighted = DirectedLouvain::new_with_refinement(&plain, 256, 0.0, refinement)
+                .unwrap()
+                .communities()
+                .to_vec();
+            assert_ne!(unweighted[3], unweighted[4], "{refinement:?}");
+            let l = DirectedLouvain::new_with_refinement(&g, 256, 0.0, refinement).unwrap();
+            let comm = as_usize(l.communities());
+            assert_eq!(comm[3], comm[4], "{refinement:?}: {comm:?}");
+            assert_close_rel(
+                l.partition_modularity(),
+                brute_force_weighted_modularity(8, &weighted, &comm),
+                &format!("{refinement:?}"),
+            );
+        }
+    }
+
+    /// Integral floats are integers; other weights directed modularity can't be exact with are
+    /// refused, by Louvain and by the modularity alike, saying why.
+    #[test]
+    fn weights_must_be_exact_integers() {
+        let arcs = |w: &str| {
+            vec![
+                (0, 1, w.to_string()),
+                (1, 2, "1".to_string()),
+                (2, 0, "1".to_string()),
+            ]
+        };
+        let ints = weighted_graph::<u32>("exact_int", "integer", 3, &arcs("3"), 2).unwrap();
+        let floats = weighted_graph::<f64>("exact_float", "real", 3, &arcs("3.0"), 2).unwrap();
+        assert_close_rel(
+            DirectedLouvain::new(&floats)
+                .unwrap()
+                .partition_modularity(),
+            DirectedLouvain::new(&ints).unwrap().partition_modularity(),
+            "3.0 is 3",
+        );
+        let check = |err: String, expected: &str| assert!(err.contains(expected), "{err}");
+        let fractional = weighted_graph::<f64>("exact_half", "real", 3, &arcs("0.5"), 2).unwrap();
+        let negative = weighted_graph::<i32>("exact_neg", "integer", 3, &arcs("-2"), 2).unwrap();
+        let huge = weighted_graph::<u64>(
+            "exact_huge",
+            "integer",
+            3,
+            &arcs(&(1u64 << 60).to_string()),
+            2,
+        )
+        .unwrap();
+        for (what, err) in [
+            (
+                "fractional",
+                DirectedLouvain::new(&fractional)
+                    .err()
+                    .map(|e| e.to_string()),
+            ),
+            (
+                "negative",
+                DirectedLouvain::new(&negative).err().map(|e| e.to_string()),
+            ),
+        ] {
+            check(
+                err.unwrap_or_else(|| panic!("{what}: ran")),
+                "non-negative integers",
+            );
+        }
+        check(
+            DirectedLouvain::new(&huge).err().unwrap().to_string(),
+            "exceeds",
+        );
+        let comm = [0usize, 0, 1];
+        check(
+            directed_modularity(&fractional, &comm)
+                .unwrap_err()
+                .to_string(),
+            "non-negative integers",
+        );
+        check(
+            directed_modularity(&huge, &comm).unwrap_err().to_string(),
+            "exceeds",
+        );
+    }
+
+    /// Arcs all weighing nothing leave every node alone, with modularity `0` (not `0 / 0`).
+    #[test]
+    fn weightless_arcs_leave_nodes_alone() {
+        let arcs: Vec<_> = random_arcs(30, 200, 7)
+            .into_iter()
+            .map(|(u, v)| (u, v, "0".to_string()))
+            .collect();
+        let g = weighted_graph::<u8>("weightless", "integer", 30, &arcs, 2).unwrap();
+        for refinement in [Refinement::None, Refinement::Leiden] {
+            let l = DirectedLouvain::new_with_refinement(&g, 256, 0.0, refinement).unwrap();
+            assert_eq!(as_usize(l.communities()), (0..30).collect::<Vec<_>>());
+            assert_eq!(l.community_count(), 30);
+            assert_eq!(l.partition_modularity(), 0.0);
+        }
+        assert_eq!(directed_modularity(&g, &[0; 30]).unwrap(), 0.0);
+    }
+
+    /// In-arcs carry the weights of the arcs they are, also on graphs whose arcs all have a
+    /// reverse (whose transpose was once the graph itself, labels and all).
+    #[test]
+    fn in_arcs_weigh_what_their_arcs_do() {
+        let n = 30;
+        let simple = simple_edges(n, 120, 77);
+        // each edge both ways, weighing differently each way
+        let arcs: Vec<(usize, usize, u64)> = simple
+            .iter()
+            .enumerate()
+            .flat_map(|(k, &(u, v))| [(u, v, 1 + k as u64), (v, u, 100 + k as u64)])
+            .collect();
+        let g = weighted_graph::<u32>("in_weights", "integer", n, &as_text(&arcs), 2).unwrap();
+        assert!(g.is_symmetric().unwrap());
+        let name = |seq| g.build_cache_filename(CacheFile::DirectedLouvain, Some(seq));
+        let scratch = Scratch::new(&name, 0);
+        let base = BaseArcs::new(&g, &scratch).unwrap();
+        for i in 0..n {
+            let mut want: Vec<(usize, u64)> = arcs
+                .iter()
+                .filter(|a| a.1 == i)
+                .map(|a| (a.0, a.2))
+                .collect();
+            let mut got = vec![];
+            base.in_arcs(i, |j, w| got.push((j, w)));
+            want.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(got, want, "node {i}");
+            assert_eq!(
+                base.k_in(i),
+                want.iter().map(|a| a.1).sum::<u64>(),
+                "node {i}"
+            );
+        }
     }
 }

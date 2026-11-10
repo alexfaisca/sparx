@@ -27,6 +27,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Examples](#examples)
   - [Narrow index types & accumulators](#narrow-index-types--accumulators)
   - [Configurable edge/community weight precision](#configurable-edgecommunity-weight-precision)
+  - [Weighted graphs](#weighted-graphs)
   - [Triangle counts, trussness widths & directed triangles](#triangle-counts-trussness-widths--directed-triangles)
   - [Coreness widths](#coreness-widths)
   - [GPU HyperBall & triangles](#gpu-hyperball--triangles)
@@ -58,6 +59,8 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   re-parsing the original dataset
 - **Configurable edge/community weight precision** (`Weight`: `f32`/`f64`) for GVE-Louvain,
   HyperBall, and the exact centralities, independent of `Ix`
+- **Weighted graphs**: edge weights of any integer or float type (`Weighted<T>`), read fast or
+  validated, used by PageRank, Louvain/Leiden, clustering, assortativity, HK-Relax and HKPR
 - Cache files + rich **metadata** (`Display` implemented)
 - Algorithms expose summaries and can **drop** local caches
 - Minimal, dependency-free **CSV appenders** to `results/`
@@ -424,6 +427,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 ```
+
+## Weighted Graphs
+
+An edge label type's `E::is_weighted()` makes its graph weighted: `Weighted<T>` holds a weight of
+any of `u8`..`u64`, `usize`, `i8`..`i64`, `isize`, `f32` or `f64`, read from a MatrixMarket file's
+values (`pattern` files' edges weigh one; GGCAT and nodes/edges files carry no weights, and
+refuse weighted labels). A weight's stored type is independent of the `W: Weight` algorithms
+compute with: they read `E::weight::<W>()`. Unweighted labels weigh one --- even labeled ones,
+like GGCAT edges' directions --- and algorithms don't read their label file at all.
+
+Weights are parsed `WeightParsing::Fast` by default: no per-value validation, a value that isn't
+one of the type (`70000` as a `u16`, `-3` as a `u32`, `abc`) giving an unspecified weight.
+`WeightParsing::Checked` (through `from_file_with_weight_parsing`) refuses them instead. Either way,
+what a file declares is checked once against the type: a `real` file can't load integer weights,
+nor a `skew-symmetric` one unsigned weights. A cache entry only opens with its own weight type.
+
+```rust
+use sparx::graph::{DiGraph, Graph, WeightParsing, Weighted, label::VoidLabel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // u32 weights, unvalidated
+    let g = Graph::<VoidLabel, Weighted<u32>, usize>::from_file("graph.mtx", None, None)?;
+    // f64 weights, every value validated
+    let d = DiGraph::<VoidLabel, Weighted<f64>, usize>::from_file_with_weight_parsing(
+        "digraph.mtx", None, None, WeightParsing::Checked,
+    )?;
+    println!("{} {}", g.total_weight()?, d.weighted_degree(0)?);
+    Ok(())
+}
+```
+
+Algorithms using weights follow networkx's `weight="weight"`; weights must be finite and
+non-negative:
+
+| Algorithm | Weighted as |
+|---|---|
+| `PageRank` | transitions in proportion to weight; nodes whose arcs all weigh nothing dangle (always partition-centric: pulling reads in-arcs' weights off out-arcs) |
+| `AlgoGVELouvain` (and Leiden), `Graph::modularity` | weighted modularity |
+| `DirectedLouvain`, `directed_modularity` | weighted directed modularity, still exact: weights must be integers (`3.0` is one), totalling at most `2^60` |
+| `ClusteringCoefficient`, `DirectedClusteringCoefficient` | Onnela's and Fagiolo's weighted local coefficients (transitivity stays unweighted, as networkx's) |
+| `degree_assortativity`, `directed_degree_assortativity` | correlation of strengths (weighted degrees), Pearson's or Spearman's |
+| `HKRelax`, `ApproxDirHKPR`, `sweep_cut` | weighted diffusion, walks and conductance (`Community::volume` is the weighted volume, `width` the arc count) |
+
+Traversals, distances and the centralities built on them, k-cores, k-trusses, triangles and
+components ignore weights.
+
+`DiGraph::to_undirected_merging(mode, WeightMerge)` weighs an undirected edge merged from several
+arcs (`Collapse` and `Mutual`: every arc between two nodes, both ways) by their `Sum` (the
+default, as `to_undirected`'s; integer sums overflowing their type fail), `Min` or `Max`: the
+same weight from both ends.
 
 ## Triangle Counts, Trussness Widths & Directed Triangles
 

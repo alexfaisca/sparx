@@ -35,6 +35,43 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         // helper total degree accumulator
         let td_fn = self.build_helper_filename(1)?;
 
+        if E::is_weighted() {
+            // edges weigh their labels' weights (finite and non-negative), summed in `f64`
+            let mut internal =
+                SharedSliceMut::<f64>::abst_mem_mut(&id_fn, comms_cardinality, true)?;
+            let mut total = SharedSliceMut::<f64>::abst_mem_mut(&td_fn, comms_cardinality, true)?;
+            let mut m2 = 0f64;
+            for u in 0..node_count {
+                let comm_u = communities[u].index();
+                for (v, label) in self.weighted_neighbours(u)? {
+                    let w = label.weight::<f64>();
+                    if !(w.is_finite() && w >= 0.) {
+                        drop((internal, total));
+                        self.cleanup_helpers()?;
+                        return Err(format!(
+                            "error modularity's edge weights must be finite and non-negative, but one is {label:?}"
+                        )
+                        .into());
+                    }
+                    m2 += w;
+                    *total.get_mut(comm_u) += w;
+                    if v < node_count && communities[v].index() == comm_u {
+                        *internal.get_mut(comm_u) += w;
+                    }
+                }
+            }
+            let modularity = if m2 == 0. {
+                0.
+            } else {
+                (0..comms_cardinality)
+                    .map(|c| internal.get(c) / m2 - (total.get(c) / m2).powi(2))
+                    .sum()
+            };
+            drop((internal, total));
+            self.cleanup_helpers()?;
+            return Ok(modularity);
+        }
+
         let mut internal_degree =
             SharedSliceMut::<usize>::abst_mem_mut(&id_fn, comms_cardinality, true)?;
         let mut total_degree =
@@ -165,6 +202,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
     /// [^2]: entries must be descendingly ordered by diffusion.
     /// [^3]: if [`None`] is provided defaults to `|V|`, effectively, the overall best partition by conducatance is returned independent on the number of nodes in it.
     /// [^4]: if [`None`] is provided defaults to `|E|`, effectively, the overall best partition by conducatance is returned independent on the number of edges in it.
+    /// The sweep cut of a diffusion vector: its nodes, by decreasing diffusion, added one by one
+    /// to a set `S`, the best prefix by conductance `ϕ(S) = cut(S) / min(vol(S), vol(V \ S))`.
+    /// Weighted edges (see [`E::is_weighted`](crate::graph::E::is_weighted)) count their weight
+    /// in cuts and volumes (and must be finite, non-negative, and symmetric: each edge's weight
+    /// the same both ways); unweighted ones count one each. The sweep stops once `S` holds twice
+    /// `target_size` nodes or twice `target_volume` arcs.
     pub(super) fn sweep_cut_over_diffusion_vector_by_conductance(
         &self,
         diffusion: &mut [(usize, f64)],
@@ -174,40 +217,39 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         diffusion.sort_unstable_by_key(|(_, mass)| std::cmp::Reverse(OrderedFloat(*mass)));
         let target_size = target_size.map_or(self.size(), |s| s);
         let target_volume = target_volume.map_or(self.width(), |s| s);
+        let weighted = E::is_weighted();
+        // (checks the weights, for weighted edges)
+        let total_weight = self.total_weight()?;
 
-        let mut vol_s = 0usize;
+        // arcs out of S, and of V \ S, and arcs across: counted, and weighed
+        let (mut vol_s, mut cut_s) = (0usize, 0usize);
         let mut vol_v_minus_s = self.width();
-        let mut cut_s = 0usize;
+        let (mut w_vol_s, mut w_cut_s) = (0f64, 0f64);
         let mut community: HashSet<usize> = HashSet::new();
         let mut best_conductance = 1f64;
         let mut best_community: Vec<(usize, f64)> = Vec::new();
         let mut best_size = 0usize;
         let mut best_width = 0usize;
+        let mut best_volume = 0f64;
 
         for (idx, (u, _)) in diffusion.iter().enumerate() {
             let u_n = self
-                .neighbours(*u)
+                .weighted_neighbours(*u)
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     format!("error sweep cut couldn't get {u} neighbours: {e}").into()
                 })?;
-            let neighbour_count = u_n.remaining_neighbours();
+            let neighbour_count = u_n.len();
 
-            vol_s = match vol_s.overflowing_add(neighbour_count) {
-                (r, false) => r,
-                (_, true) => {
-                    return Err(format!("error sweep cut overflow_add in vol_s at node {u}").into());
-                }
-            };
-
-            vol_v_minus_s = match vol_v_minus_s.overflowing_sub(neighbour_count) {
-                (r, false) => r,
-                (_, true) => {
-                    return Err(format!(
-                        "error sweep cut overflow_add in vol_v_minus_s at node {u}"
-                    )
-                    .into());
-                }
-            };
+            vol_s = vol_s.checked_add(neighbour_count).ok_or_else(
+                || -> Box<dyn std::error::Error> {
+                    format!("error sweep cut overflow_add in vol_s at node {u}").into()
+                },
+            )?;
+            vol_v_minus_s = vol_v_minus_s.checked_sub(neighbour_count).ok_or_else(
+                || -> Box<dyn std::error::Error> {
+                    format!("error sweep cut overflow_sub in vol_v_minus_s at node {u}").into()
+                },
+            )?;
 
             if !community.insert(*u) {
                 return Err(
@@ -215,39 +257,43 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
                 );
             }
 
-            for v in u_n {
-                // if edge is (u, u) it doesn't influence delta(S)
+            for (v, label) in u_n {
+                let w = if weighted { label.weight::<f64>() } else { 1. };
+                w_vol_s += w;
                 if v == *u {
                     continue;
                 }
+                // an edge to S stops crossing the cut, one to V \ S starts
                 if community.contains(&v) {
-                    cut_s = match cut_s.overflowing_sub(1) {
-                        (r, false) => r,
-                        (_, true) => {
-                            return Err(format!(
-                                "error sweepcut overflow_sub at node {u} in neighbour {v}",
-                            )
-                            .into());
-                        }
-                    };
+                    cut_s = cut_s
+                        .checked_sub(1)
+                        .ok_or_else(|| -> Box<dyn std::error::Error> {
+                            format!("error sweepcut overflow_sub at node {u} in neighbour {v}")
+                                .into()
+                        })?;
+                    w_cut_s -= w;
                 } else {
-                    cut_s = match cut_s.overflowing_add(1) {
-                        (r, false) => r,
-                        (_, true) => {
-                            return Err(format!(
-                                "error sweepcut overflow_add at node {u} in neighbour {v}",
-                            )
-                            .into());
-                        }
-                    };
+                    cut_s = cut_s
+                        .checked_add(1)
+                        .ok_or_else(|| -> Box<dyn std::error::Error> {
+                            format!("error sweepcut overflow_add at node {u} in neighbour {v}")
+                                .into()
+                        })?;
+                    w_cut_s += w;
                 }
             }
 
-            let conductance = (cut_s as f64) / (std::cmp::min(vol_s, vol_v_minus_s) as f64);
+            let conductance = if weighted {
+                // (rounding may leave a cut of nothing a hair below zero)
+                w_cut_s.max(0.) / w_vol_s.min(total_weight - w_vol_s)
+            } else {
+                (cut_s as f64) / (std::cmp::min(vol_s, vol_v_minus_s) as f64)
+            };
             if conductance < best_conductance {
                 best_conductance = conductance;
                 best_community = diffusion[0..=idx].to_vec();
                 best_width = vol_s;
+                best_volume = if weighted { w_vol_s } else { vol_s as f64 };
                 best_size = community.len();
             }
 
@@ -266,6 +312,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
             nodes: best_community,
             size: best_size,
             width: best_width,
+            volume: best_volume,
             conductance: best_conductance,
         })
     }

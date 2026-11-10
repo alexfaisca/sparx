@@ -156,22 +156,42 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             .collect())
     }
 
-    #[inline(always)]
-    fn random_neighbour(
+    /// The neighbour of `u` a uniform draw `r` (in `[0, 1)`) picks: uniformly among its arcs, or
+    /// for weighted arcs in proportion to their weights; `None` if `u` has no arcs (or they all
+    /// weigh nothing). Linear in `u`'s degree, as was the uniform pick.
+    fn pick_neighbour(
         &self,
-        deg_u: usize,
-        u_n: NeighbourIter<N, E, Ix>,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        let inv_deg_u = 1. / deg_u as f64;
-        let random: f64 = rand::rng().random();
-        let mut idx_plus_one = 1f64;
-        for v in u_n {
-            if idx_plus_one * inv_deg_u > random {
-                return Ok(v);
+        u: usize,
+        r: f64,
+    ) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+        let mut arcs = self.g.weighted_neighbours(u)?;
+        if !E::is_weighted() {
+            let deg = arcs.len();
+            if deg == 0 {
+                return Ok(None);
             }
-            idx_plus_one += idx_plus_one;
+            let i = ((r * deg as f64) as usize).min(deg - 1);
+            return Ok(arcs.nth(i).map(|(v, _)| v));
         }
-        Err("error approx-dirchlet-hkpr didn't find random neighbour".into())
+        let total = self.g.weighted_degree(u)?;
+        if total.is_nan() || total <= 0. {
+            return Ok(None);
+        }
+        // the arc whose share of `[0, total)` holds `r * total` (the last weighing anything, if
+        // rounding overshoots)
+        let target = r * total;
+        let (mut at, mut last) = (0f64, None);
+        for (v, label) in arcs {
+            let w = label.weight::<f64>();
+            if w > 0. {
+                at += w;
+                last = Some(v);
+                if target < at {
+                    return Ok(last);
+                }
+            }
+        }
+        Ok(last)
     }
 
     fn random_walk_seed(
@@ -179,21 +199,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
         k: usize,
         seed_node: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut rng = rand::rng();
         let mut curr_node = seed_node;
         for _ in 0..k {
-            let (deg_u, u_n) = match self.g.neighbours(curr_node) {
-                Ok(u_n) => (u_n.remaining_neighbours(), u_n),
-                Err(e) => {
-                    return Err(format!(
-                        "error approx-dirchlet-hkpr couldn't get neighbours for {curr_node}: {e}"
-                    )
-                    .into());
-                }
-            };
-            if deg_u > 0 {
-                curr_node = self.random_neighbour(deg_u, u_n)?;
-            } else {
-                return Ok(curr_node);
+            match self.pick_neighbour(curr_node, rng.random())? {
+                Some(v) => curr_node = v,
+                // nowhere to go
+                None => return Ok(curr_node),
             }
         }
         Ok(curr_node)
@@ -215,6 +227,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             0 => return Err("error approx-dirchlet-hkpr |V| == 0".into()),
             i => i as f64,
         };
+        // (checks weighted edges' weights: finite, non-negative)
+        self.g.total_weight()?;
 
         let r = f64_is_nomal(
             (16. / self.eps.powi(2)) * f64::ln(node_count),
@@ -277,7 +291,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             .map(|u| {
                 (
                     *u,
-                    *aprox_hkpr_samples.get(u).unwrap() / self.g.node_degree(*u) as f64,
+                    *aprox_hkpr_samples.get(u).unwrap() / self.g.weighted_degree(*u).unwrap_or(0.),
                 )
             })
             .collect::<Vec<(usize, f64)>>();
@@ -304,6 +318,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             0 => return Err("error approx-dirchlet-hkpr |V| == 0".into()),
             i => i as f64,
         };
+        // (checks weighted edges' weights: finite, non-negative)
+        self.g.total_weight()?;
 
         let r = f64_is_nomal(
             (16. / self.eps.powi(2)) * f64::ln(node_count),
@@ -355,7 +371,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             .map(|u| {
                 (
                     *u,
-                    *aprox_hkpr_samples.get(u).unwrap() / self.g.node_degree(*u) as f64,
+                    *aprox_hkpr_samples.get(u).unwrap() / self.g.weighted_degree(*u).unwrap_or(0.),
                 )
             })
             .collect::<Vec<(usize, f64)>>();
@@ -373,5 +389,69 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             }
             Err(e) => Err(format!("error approx-dirichlet-hkpr performing sweep cut: {e}").into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::communities::hk_relax::test::undirected;
+
+    /// Uniform draws pick each of a node's neighbours alike (the pick once doubled its index, so
+    /// that from degree 4 on later neighbours were never picked), and weighted ones in proportion
+    /// to their weights, never one weighing nothing. Nodes with nowhere to go pick nothing.
+    #[test]
+    fn neighbours_are_picked_in_proportion() {
+        // node 0: neighbours 1-4; node 5: 6 (1), 7 (0), 8 (3); node 9: 10 (0); 11 alone
+        let edges = [
+            (0, 1, "1"),
+            (0, 2, "1"),
+            (0, 3, "1"),
+            (0, 4, "1"),
+            (5, 6, "1"),
+            (5, 7, "0"),
+            (5, 8, "3"),
+            (9, 10, "0"),
+        ];
+        let plain = undirected::<()>("pick_plain", 12, &edges);
+        let weighted = undirected::<Weighted<f64>>("pick_w", 12, &edges);
+        fn pick<L: graph::E>(g: &GraphMemoryMap<(), L, usize>, u: usize, r: f64) -> Option<usize> {
+            ApproxDirHKPR::new(g, 0.5, 0, 2, 4, 0.5)
+                .unwrap()
+                .pick_neighbour(u, r)
+                .unwrap()
+        }
+        let draws = [0.0, 0.26, 0.51, 0.76, 0.999_999];
+        let picked: Vec<_> = draws.iter().map(|&r| pick(&plain, 0, r)).collect();
+        assert_eq!(picked, [1, 2, 3, 4, 4].map(Some));
+        // unweighted, node 5's three neighbours alike
+        let picked: Vec<_> = [0.0, 0.34, 0.67]
+            .iter()
+            .map(|&r| pick(&plain, 5, r))
+            .collect();
+        assert_eq!(picked, [6, 7, 8].map(Some));
+        // weighted: 6 for the first quarter, 8 for the rest, 7 never
+        let picked: Vec<_> = [0.0, 0.24, 0.25, 0.5, 0.999_999]
+            .iter()
+            .map(|&r| pick(&weighted, 5, r))
+            .collect();
+        assert_eq!(picked, [6, 6, 8, 8, 8].map(Some));
+        assert_eq!(pick(&weighted, 9, 0.5), None);
+        assert_eq!(pick(&plain, 9, 0.5), Some(10));
+        assert_eq!(pick(&plain, 11, 0.5), None);
+        assert_eq!(pick(&weighted, 11, 0.5), None);
+    }
+
+    /// Weights that aren't finite and non-negative are refused.
+    #[test]
+    fn approx_dirichlet_hkpr_rejects_bad_weights() {
+        let g = undirected::<Weighted<f64>>("adh_negative", 3, &[(0, 1, "1"), (1, 2, "-2")]);
+        let err = ApproxDirHKPR::new(&g, 0.5, 0, 2, 4, 0.5)
+            .unwrap()
+            .compute()
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("finite and non-negative"), "{err}");
     }
 }

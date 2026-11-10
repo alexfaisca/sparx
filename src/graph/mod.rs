@@ -2,6 +2,7 @@ pub(crate) mod cache;
 pub mod direction;
 #[cfg(test)]
 mod direction_regression_test;
+mod edge_weight;
 mod export_induced_subgraph;
 mod impl_algos;
 mod impl_csc;
@@ -24,7 +25,10 @@ use crate::shared_slice::{
     AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut,
 };
 use cache::CacheMetadata;
-pub use direction::{AnyGraph, Directed, Directedness, Direction, Undirected, UndirectedMode};
+pub use direction::{
+    AnyGraph, Directed, Directedness, Direction, Undirected, UndirectedMode, WeightMerge,
+};
+pub use edge_weight::{EdgeWeight, ParseWeightError, WeightDomain, WeightParsing, Weighted};
 pub use graph_derive::{GenericEdge, GenericEdgeType};
 pub use weight::{Weight, WeightAtomic};
 
@@ -48,7 +52,7 @@ use graph_derive::sparkx_label;
 /// The default integer type for indexing.
 ///
 /// The default type is `usize` to facilitate usage. As graphs that fit in `u32` or smaller unsizeds
-/// won't have performance issues give nthe nature of our algorithms.
+/// won't have performance issues given the nature of our algorithms.
 ///
 /// Used for node indices in memmaped `CSR` representation.
 pub type DefaultIx = usize;
@@ -136,6 +140,11 @@ unsafe impl IndexType for u8 {
         u8::MAX
     }
 }
+
+/// A directed graph's underlying undirected graphs, once built: one per [`UndirectedMode`] and,
+/// for weighted edges, [`WeightMerge`].
+type UndirectedSlots<N, E, Ix> =
+    [std::sync::OnceLock<Box<GraphMemoryMap<N, E, Ix, Undirected>>>; 3 * WeightMerge::COUNT];
 
 /// Node identifier.
 #[derive(Copy, Clone, Debug, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
@@ -233,9 +242,10 @@ pub trait N:
     fn color(&self) -> usize {
         0
     }
+    /// The node's weight, as an algorithm's `W`: `1` unless [`is_weighted`](Self::is_weighted).
     #[inline]
-    fn weigth(&self) -> usize {
-        1
+    fn weight<W: Weight>(&self) -> W {
+        W::one()
     }
 }
 
@@ -243,6 +253,11 @@ pub trait N:
 ///
 /// Given a repr C/transparent struct the required traits may be derived automatically by
 /// annotating the struct with #[sparkx_label].
+///
+/// Being labeled ([`is_labeled`](Self::is_labeled)) and being weighted
+/// ([`is_weighted`](Self::is_weighted)) are independent: a labeled but unweighted edge (e.g. a
+/// GGCAT edge's direction) keeps its label, yet weighs `1` to every algorithm. The ready-made
+/// weighted label is [`Weighted`].
 #[allow(dead_code)]
 pub trait E:
     Copy + std::fmt::Debug + Ord + bytemuck::Pod + bytemuck::Zeroable + Send + Sync
@@ -252,6 +267,8 @@ pub trait E:
     fn is_labeled() -> bool {
         false
     }
+    /// Whether the label holds a weight algorithms should use. When `false`, every edge weighs
+    /// `1` and algorithms needn't read the edge label file at all.
     #[inline]
     fn is_weighted() -> bool {
         false
@@ -268,9 +285,39 @@ pub trait E:
     fn color(&self) -> usize {
         0
     }
+    /// The edge's weight, as an algorithm's `W`: `1` unless [`is_weighted`](Self::is_weighted).
     #[inline]
-    fn weigth(&self) -> usize {
-        1
+    fn weight<W: Weight>(&self) -> W {
+        W::one()
+    }
+    /// The edge's weight as an exact non-negative integer, if it is one: `1` unless
+    /// [`is_weighted`](Self::is_weighted). For algorithms computing exactly in integers.
+    #[inline]
+    fn integer_weight(&self) -> Option<u64> {
+        Some(1)
+    }
+    /// What values the weight can hold (only meaningful if [`is_weighted`](Self::is_weighted)),
+    /// checked once per input file against what the file declares.
+    #[inline]
+    fn weight_domain() -> WeightDomain {
+        WeightDomain::Real
+    }
+    /// Reads a weight from an input token: validated if `CHECKED` (see [`WeightParsing`]),
+    /// otherwise never failing. Only called if [`is_weighted`](Self::is_weighted).
+    #[inline]
+    fn parse_weight<const CHECKED: bool>(_tok: &[u8]) -> Result<Self, ParseWeightError> {
+        Ok(Self::new(1))
+    }
+    /// The weight of the reverse of an arc in a skew-symmetric input.
+    #[inline]
+    fn negate_weight(self) -> Self {
+        self
+    }
+    /// Two arcs' labels merged into one edge's (see [`WeightMerge`]), `None` if their weights'
+    /// merge doesn't fit the weight type. Unweighted labels keep the first.
+    #[inline]
+    fn merge_weight(self, _other: Self, _merge: WeightMerge) -> Option<Self> {
+        Some(self)
     }
 }
 
@@ -410,10 +457,13 @@ pub struct GraphMemoryMap<
     exports: u8,
     /// Whether every arc has a reverse: recorded in its metadata, or else checked on first use.
     symmetric: std::sync::OnceLock<bool>,
+    /// The arcs' total weight (see [`total_weight`](Self::total_weight)), once summed.
+    total_weight: std::sync::OnceLock<f64>,
     /// A directed graph's transpose and underlying undirected graph, once built.
     transpose: std::sync::OnceLock<Box<Self>>,
     /// (one per [`UndirectedMode`])
-    undirected: [std::sync::OnceLock<Box<GraphMemoryMap<N, E, Ix, Undirected>>>; 3],
+    /// (one per [`UndirectedMode`] and, for weighted edges, [`WeightMerge`])
+    undirected: UndirectedSlots<N, E, Ix>,
     derive_lock: Arc<std::sync::Mutex<()>>,
     /// Tells this instance's scratch files apart from other instances' of the same entry.
     instance: InstanceTag,
@@ -502,6 +552,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
                 thread_count,
                 exports,
                 symmetric,
+                total_weight: std::sync::OnceLock::new(),
                 transpose: std::sync::OnceLock::new(),
                 undirected: Default::default(),
                 derive_lock: Arc::new(std::sync::Mutex::new(())),
@@ -546,6 +597,21 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         thread_count: Option<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let graph_cache = GraphCache::<N, E, Ix>::from_file(p, id, None, None)?;
+        Self::init_from_new_cache(graph_cache, thread_count)
+    }
+
+    /// Same as [`from_file`](Self::from_file), but lets the caller choose how edge weights are
+    /// read (see [`WeightParsing`]); [`from_file`](Self::from_file) reads them
+    /// [`Fast`](WeightParsing::Fast), unvalidated.
+    #[inline(always)]
+    pub fn from_file_with_weight_parsing<P: AsRef<Path>>(
+        p: P,
+        id: Option<String>,
+        thread_count: Option<u8>,
+        parsing: WeightParsing,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let graph_cache =
+            GraphCache::<N, E, Ix>::from_file_with_weight_parsing(p, id, None, None, parsing)?;
         Self::init_from_new_cache(graph_cache, thread_count)
     }
 
@@ -616,6 +682,13 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
     #[inline(always)]
     pub(crate) fn neighbours_ptr(&self) -> *const Ix {
         self.graph.as_ptr() as *const Ix
+    }
+
+    /// The edge labels, in flat edge order. Only meaningful (sized [`width`](Self::width)) for
+    /// labeled edges (see [`E::is_labeled`]).
+    #[inline(always)]
+    pub(crate) fn edge_labels_ptr(&self) -> *const E {
+        self.edge_labels.as_ptr() as *const E
     }
 
     /// Returns the (suggested) number of threads being used for computations on the graph.
@@ -1099,6 +1172,63 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         ))
     }
 
+    /// A node's weighted degree: the total weight of its arcs out (its degree, for unweighted
+    /// arcs; see [`E::is_weighted`]).
+    pub fn weighted_degree(&self, node_id: usize) -> Result<f64, Box<dyn std::error::Error>> {
+        if !E::is_weighted() {
+            return Ok(self.node_degree(node_id) as f64);
+        }
+        Ok(self
+            .weighted_neighbours(node_id)?
+            .map(|(_, label)| label.weight::<f64>())
+            .sum())
+    }
+
+    /// The arcs' total weight: their number, for unweighted arcs (see [`E::is_weighted`]), or
+    /// the sum of their weights, which must be finite and non-negative. Summed once (in `f64`,
+    /// in parallel, in a fixed order), then remembered.
+    pub fn total_weight(&self) -> Result<f64, Box<dyn std::error::Error>> {
+        if !E::is_weighted() {
+            return Ok(self.width() as f64);
+        }
+        if let Some(&total) = self.total_weight.get() {
+            return Ok(total);
+        }
+        let arcs = self.width();
+        let labels = crate::shared_slice::SharedSlice::<E>::new(self.edge_labels_ptr(), arcs);
+        let chunks = (self.thread_num().max(1)).min(arcs.max(1));
+        let load = arcs.div_ceil(chunks);
+        let parts: Vec<Result<f64, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..chunks)
+                .map(|c| {
+                    s.spawn(move || {
+                        let mut total = 0f64;
+                        for e in (c * load).min(arcs)..((c + 1) * load).min(arcs) {
+                            let label = labels.get(e);
+                            let w = label.weight::<f64>();
+                            if !(w.is_finite() && w >= 0.) {
+                                return Err(format!(
+                                    "error edge weights must be finite and non-negative here, but one is {label:?}"
+                                ));
+                            }
+                            total += w;
+                        }
+                        Ok(total)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|e| Err(format!("{e:?}"))))
+                .collect()
+        });
+        let mut total = 0f64;
+        for part in parts {
+            total += part?;
+        }
+        Ok(*self.total_weight.get_or_init(|| total))
+    }
+
     /// Returns an [`Edges`] iterator over every edge in the graph, as `(source, target, weight)`
     /// triples, in flat edge-array order.
     pub fn edges(&self) -> Edges<N, E, Ix> {
@@ -1451,8 +1581,11 @@ pub struct Community<NodeId: Copy + Debug> {
     pub nodes: Vec<(NodeId, f64)>,
     /// |S|
     pub size: usize,
-    /// vol(S)
+    /// vol(S), in arcs: the number of arcs out of S's nodes
     pub width: usize,
+    /// vol(S), weighted: the total weight of the arcs out of S's nodes (`width`, for unweighted
+    /// arcs). What `conductance` is computed with.
+    pub volume: f64,
     /// ϕ(S)
     pub conductance: f64,
 }

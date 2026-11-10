@@ -11,7 +11,207 @@ use super::triangles::Triangles;
 
 type ProceduralMemoryClusteringCoefficient = ();
 
+/// A node's neighbours other than itself, sorted, with the weight of its arcs to each (parallel
+/// arcs' added up).
+fn merged_row<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    u: usize,
+) -> Result<Vec<(usize, f64)>, Box<dyn std::error::Error>> {
+    let mut row: Vec<(usize, f64)> = Vec::new();
+    for (v, label) in g.weighted_neighbours(u)? {
+        let w = label.weight::<f64>();
+        match row.last_mut() {
+            Some((last, total)) if *last == v => *total += w,
+            _ if v == u => {}
+            _ => row.push((v, w)),
+        }
+    }
+    Ok(row)
+}
+
+/// The largest weight between two nodes (parallel arcs' added up, self-loops included): what
+/// networkx normalizes weights by. Weights are checked finite and non-negative.
+fn max_merged_weight<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    g.total_weight()?;
+    let mut max = 0f64;
+    for u in 0..g.size() {
+        let (mut last, mut total) = (None, 0f64);
+        for (v, label) in g.weighted_neighbours(u)? {
+            if last != Some(v) {
+                max = max.max(total);
+                (last, total) = (Some(v), 0.);
+            }
+            total += label.weight::<f64>();
+        }
+        max = max.max(total);
+    }
+    Ok(max)
+}
+
+/// `f(u)` for every node, in parallel, in node order.
+fn per_node(
+    threads: usize,
+    n: usize,
+    f: &(dyn Fn(usize) -> Result<f64, Box<dyn std::error::Error>> + Sync),
+) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    let threads = threads.clamp(1, n.max(1));
+    let load = n.div_ceil(threads);
+    let parts: Vec<Result<Vec<f64>, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                scope.spawn(move || {
+                    ((t * load).min(n)..((t + 1) * load).min(n))
+                        .map(|u| f(u).map_err(|e| e.to_string()))
+                        .collect()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| Err(format!("{e:?}"))))
+            .collect()
+    });
+    let mut values = Vec::with_capacity(n);
+    for part in parts {
+        values.extend(part?);
+    }
+    Ok(values)
+}
+
+/// Each node's weighted clustering coefficient, networkx's `clustering` with `weight` (Onnela et
+/// al.'s): `c(i) = 2 / (d(i) (d(i) - 1)) Σ_{j < k} (ŵ_ij ŵ_ik ŵ_jk)^(1/3)`, over the pairs of
+/// `i`'s `d(i)` neighbours (self-loops ignored), weights `ŵ` divided by the largest. Parallel
+/// edges weigh their weights' sum.
+fn weighted_local_clustering<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    g: &GraphMemoryMap<N, E, Ix>,
+) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    let max = max_merged_weight(g)?;
+    per_node(g.thread_num(), g.size(), &|i| {
+        let row = merged_row(g, i)?;
+        let d = row.len() as f64;
+        if row.len() < 2 || max == 0. {
+            return Ok(0.);
+        }
+        let mut sum = 0f64;
+        for &(j, w_ij) in &row {
+            let row_j = merged_row(g, j)?;
+            // the k > j both neighbour, by merging the sorted rows
+            let (mut a, mut b) = (row.partition_point(|&(k, _)| k <= j), 0);
+            while a < row.len() && b < row_j.len() {
+                match row[a].0.cmp(&row_j[b].0) {
+                    std::cmp::Ordering::Less => a += 1,
+                    std::cmp::Ordering::Greater => b += 1,
+                    std::cmp::Ordering::Equal => {
+                        sum += (w_ij / max * (row[a].1 / max) * (row_j[b].1 / max)).cbrt();
+                        a += 1;
+                        b += 1;
+                    }
+                }
+            }
+        }
+        Ok(2. * sum / (d * (d - 1.)))
+    })
+}
+
+/// A neighbour, with the weights of the arcs to and from it (`None` for none).
+type BothWays = (usize, Option<f64>, Option<f64>);
+
+/// A node's neighbours other than itself, sorted, with the weights of its arcs to and from each
+/// (parallel arcs' added up; `None` for none).
+fn merged_both_ways<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    g: &DiGraph<N, E, Ix>,
+    t: &DiGraph<N, E, Ix>,
+    u: usize,
+) -> Result<Vec<BothWays>, Box<dyn std::error::Error>> {
+    let (outs, ins) = (merged_row(g, u)?, merged_row(t, u)?);
+    let mut both = Vec::with_capacity(outs.len() + ins.len());
+    let (mut a, mut b) = (0, 0);
+    while a < outs.len() || b < ins.len() {
+        let next = match (outs.get(a), ins.get(b)) {
+            (Some(o), Some(i)) if o.0 == i.0 => (o.0, Some(o.1), Some(i.1)),
+            (Some(o), Some(i)) if o.0 < i.0 => (o.0, Some(o.1), None),
+            (Some(o), None) => (o.0, Some(o.1), None),
+            (_, Some(i)) => (i.0, None, Some(i.1)),
+            (None, None) => unreachable!(),
+        };
+        if next.1.is_some() {
+            a += 1;
+        }
+        if next.2.is_some() {
+            b += 1;
+        }
+        both.push(next);
+    }
+    Ok(both)
+}
+
+/// Each node's weighted directed clustering coefficient, networkx's `clustering` with `weight`
+/// on directed graphs (Fagiolo's): `c(i) = t(i) / (2 (d(i) (d(i) - 1) - 2 d↔(i)))`, `t(i)` the
+/// sum over ordered pairs of `i`'s neighbours `j ≠ k`, and over every arc between `i` and `j`,
+/// `i` and `k`, `j` and `k` (any direction), of the cube root of the product of their weights
+/// (divided by the largest), `d(i)` the number of `i`'s in- and out-neighbours and `d↔(i)` of
+/// those both. Self-loops are ignored; parallel arcs weigh their weights' sum.
+fn weighted_directed_local_clustering<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    g: &DiGraph<N, E, Ix>,
+    t: &DiGraph<N, E, Ix>,
+) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    let max = max_merged_weight(g)?;
+    // the weights of the arcs either way, normalized
+    let arcs = |out: Option<f64>, into: Option<f64>| {
+        [out, into].into_iter().flatten().map(move |w| w / max)
+    };
+    per_node(g.thread_num(), g.size(), &|i| {
+        let row = merged_both_ways(g, t, i)?;
+        let degree = row
+            .iter()
+            .map(|r| r.1.is_some() as usize + r.2.is_some() as usize)
+            .sum::<usize>() as f64;
+        let reciprocated = row
+            .iter()
+            .filter(|r| r.1.is_some() && r.2.is_some())
+            .count() as f64;
+        let possible = degree * (degree - 1.) - 2. * reciprocated;
+        if possible <= 0. || max == 0. {
+            return Ok(0.);
+        }
+        let mut sum = 0f64;
+        for &(j, o_ij, i_ij) in &row {
+            let row_j = merged_both_ways(g, t, j)?;
+            let (mut a, mut b) = (0, 0);
+            while a < row.len() && b < row_j.len() {
+                match row[a].0.cmp(&row_j[b].0) {
+                    std::cmp::Ordering::Less => a += 1,
+                    std::cmp::Ordering::Greater => b += 1,
+                    std::cmp::Ordering::Equal => {
+                        let (k, o_ik, i_ik) = row[a];
+                        let (_, o_jk, i_jk) = row_j[b];
+                        if k != i {
+                            for x in arcs(o_ij, i_ij) {
+                                for y in arcs(o_ik, i_ik) {
+                                    for z in arcs(o_jk, i_jk) {
+                                        sum += (x * y * z).cbrt();
+                                    }
+                                }
+                            }
+                        }
+                        a += 1;
+                        b += 1;
+                    }
+                }
+            }
+        }
+        Ok(sum / (2. * possible))
+    })
+}
+
 /// For the computation of a [`GraphMemoryMap`] instance's local clustering coefficient, transitivity and average local clustering coefficient.
+///
+/// With weighted edges (see [`E::is_weighted`](graph::E::is_weighted)), local coefficients (and
+/// their average) are networkx's weighted ones (Onnela et al.'s geometric means of triangles'
+/// normalized weights, see `weighted_local_clustering`); transitivity, as networkx's, ignores
+/// weights.
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
@@ -240,6 +440,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
             0.
         };
 
+        // weighted edges: the local coefficients are the weighted ones (transitivity, as
+        // networkx's, isn't)
+        if E::is_weighted() {
+            let weighted = weighted_local_clustering(self.g)?;
+            self.local.as_mut_slice()[..node_count].copy_from_slice(&weighted);
+            self.local_average = if node_count > 0 {
+                weighted.iter().sum::<f64>() / node_count as f64
+            } else {
+                0.
+            };
+        }
+
         // cleanup cache
         triangles.drop_cache()?;
 
@@ -258,6 +470,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
 /// in- plus out-degree and `d↔(i)` the number of its reciprocated arcs (with multiplicity: the
 /// product of the arcs each way). Self-loops are ignored. On undirected graphs it's the usual
 /// clustering coefficient ([`ClusteringCoefficient`]).
+///
+/// With weighted arcs, networkx's weighted directed coefficients instead (Fagiolo's, see
+/// `weighted_directed_local_clustering`): parallel arcs weigh their weights' sum.
 ///
 /// Built on the counts of [`DirectedTriangles`] of every type
 /// ([`DirectedTriangleType::CycleFeedForward`]): an arc `u -> v`'s count is
@@ -353,6 +568,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
             sum += *t_i;
         }
         triangles.drop_cache()?;
+        // weighted arcs: the weighted coefficients
+        if E::is_weighted() {
+            let weighted = weighted_directed_local_clustering(g, transpose)?;
+            sum = weighted.iter().sum();
+            local.as_mut_slice()[..node_count].copy_from_slice(&weighted);
+        }
         local.flush()?;
 
         Ok(Self {
@@ -492,5 +713,199 @@ mod directed_test {
         let cc = ClusteringCoefficient::new(g.to_undirected().unwrap()).unwrap();
         assert_eq!(cc.get_graph_transitivity(), 0.);
         assert_eq!(cc.get_average_clustering_coefficient(), 0.);
+    }
+}
+
+#[cfg(test)]
+mod weighted_test {
+    use super::*;
+    use crate::components::test_utils::random_arcs;
+    use crate::graph::test_utils::{TestGraph, unique_run_tag, unique_test_dir};
+
+    fn weighted<Dir: Directedness>(
+        name: &str,
+        n: usize,
+        arcs: &[(usize, usize, f64)],
+    ) -> TestGraph<(), Weighted<f64>, usize, Dir> {
+        let dir = unique_test_dir("clustering_weights");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.mtx"));
+        let symmetry = if Dir::DIRECTED {
+            "general"
+        } else {
+            "symmetric"
+        };
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate real {symmetry}\n{n} {n} {}\n",
+            arcs.len()
+        );
+        for &(u, v, w) in arcs {
+            let (u, v) = if Dir::DIRECTED {
+                (u, v)
+            } else {
+                (u.max(v), u.min(v))
+            };
+            text += &format!("{} {} {w}\n", u + 1, v + 1);
+        }
+        std::fs::write(&path, text).unwrap();
+        let id = format!("clustering_w_{name}_{}", unique_run_tag());
+        TestGraph::new(
+            GraphMemoryMap::from_file(&path, Some(id), Some(3)).unwrap(),
+            Some(dir),
+        )
+    }
+
+    /// Simple (no parallel arcs, no self-loops) random arcs, weighted, zeros included.
+    fn simple_weighted(
+        n: usize,
+        m: usize,
+        seed: u64,
+        undirected: bool,
+    ) -> Vec<(usize, usize, f64)> {
+        let mut arcs: Vec<(usize, usize)> = random_arcs(n, m, seed)
+            .into_iter()
+            .filter(|(u, v)| u != v)
+            .map(|(u, v)| {
+                if undirected {
+                    (u.min(v), u.max(v))
+                } else {
+                    (u, v)
+                }
+            })
+            .collect();
+        arcs.sort_unstable();
+        arcs.dedup();
+        let mut state = seed;
+        arcs.into_iter()
+            .map(|(u, v)| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (u, v, ((state >> 33) % 40) as f64 / 8.0)
+            })
+            .collect()
+    }
+
+    /// networkx's weighted clustering, in `O(n³)`: `a` whether arcs exist, `w` their weights.
+    fn brute_force(n: usize, arcs: &[(usize, usize, f64)], directed: bool) -> Vec<f64> {
+        let (mut a, mut w) = (vec![vec![false; n]; n], vec![vec![0.0; n]; n]);
+        for &(u, v, x) in arcs {
+            a[u][v] = true;
+            w[u][v] = x;
+            if !directed {
+                a[v][u] = true;
+                w[v][u] = x;
+            }
+        }
+        let max = arcs.iter().map(|x| x.2).fold(0.0, f64::max);
+        let w = |u: usize, v: usize| w[u][v] / max;
+        (0..n)
+            .map(|i| {
+                if !directed {
+                    let nb: Vec<usize> = (0..n).filter(|&j| j != i && a[i][j]).collect();
+                    let d = nb.len() as f64;
+                    if nb.len() < 2 {
+                        return 0.0;
+                    }
+                    let mut s = 0.0;
+                    for (x, &j) in nb.iter().enumerate() {
+                        for &k in &nb[x + 1..] {
+                            if a[j][k] {
+                                s += (w(i, j) * w(i, k) * w(j, k)).cbrt();
+                            }
+                        }
+                    }
+                    return 2.0 * s / (d * (d - 1.0));
+                }
+                let d: usize = (0..n)
+                    .filter(|&j| j != i)
+                    .map(|j| a[i][j] as usize + a[j][i] as usize)
+                    .sum();
+                let both = (0..n).filter(|&j| j != i && a[i][j] && a[j][i]).count();
+                let possible = (d * d.saturating_sub(1)) as f64 - 2.0 * both as f64;
+                if possible <= 0.0 {
+                    return 0.0;
+                }
+                let arcs = |x: usize, y: usize| {
+                    [(a[x][y], w(x, y)), (a[y][x], w(y, x))]
+                        .into_iter()
+                        .filter(|p| p.0)
+                        .map(|p| p.1)
+                        .collect::<Vec<f64>>()
+                };
+                let mut t = 0.0;
+                for j in (0..n).filter(|&j| j != i) {
+                    for k in (0..n).filter(|&k| k != i && k != j) {
+                        for x in arcs(i, j) {
+                            for y in arcs(i, k) {
+                                for z in arcs(j, k) {
+                                    t += (x * y * z).cbrt();
+                                }
+                            }
+                        }
+                    }
+                }
+                t / (2.0 * possible)
+            })
+            .collect()
+    }
+
+    fn assert_close(got: &[f64], want: &[f64], what: &str) {
+        for (u, (a, b)) in got.iter().zip(want).enumerate() {
+            assert!((a - b).abs() <= 1e-12, "{what}: node {u}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn weighted_clustering_matches_networkx_formulas() {
+        for seed in 0..4u64 {
+            let n = 40;
+            let arcs = simple_weighted(n, 300, 10 + seed, true);
+            let g = weighted::<Undirected>(&format!("u_{seed}"), n, &arcs);
+            let cc = ClusteringCoefficient::new(&g).unwrap();
+            let got: Vec<f64> = (0..n)
+                .map(|u| cc.get_node_clusteringcoefficient(u))
+                .collect();
+            let want = brute_force(n, &arcs, false);
+            assert_close(&got, &want, &format!("undirected {seed}"));
+            let average = want.iter().sum::<f64>() / n as f64;
+            assert!((cc.get_average_clustering_coefficient() - average).abs() < 1e-12);
+
+            let arcs = simple_weighted(n, 400, 20 + seed, false);
+            let g = weighted::<Directed>(&format!("d_{seed}"), n, &arcs);
+            let cc = DirectedClusteringCoefficient::new(&g).unwrap();
+            let want = brute_force(n, &arcs, true);
+            assert_close(
+                cc.local_clustering_coefficients(),
+                &want,
+                &format!("directed {seed}"),
+            );
+        }
+    }
+
+    /// Uniform weights cluster as unit ones do; transitivity ignores weights.
+    #[test]
+    fn uniform_weights_cluster_as_unit_ones() {
+        let n = 60;
+        let arcs: Vec<_> = simple_weighted(n, 500, 3, true)
+            .into_iter()
+            .map(|(u, v, _)| (u, v, 7.5))
+            .collect();
+        let g = weighted::<Undirected>("uniform", n, &arcs);
+        let plain: Vec<_> = arcs.iter().map(|&(u, v, _)| (u, v)).collect();
+        let p = crate::components::test_utils::graph("uniform_plain", "symmetric", n, &plain);
+        let p = p.to_undirected().unwrap();
+        let (w, u) = (
+            ClusteringCoefficient::new(&g).unwrap(),
+            ClusteringCoefficient::new(p).unwrap(),
+        );
+        for x in 0..n {
+            let (a, b) = (
+                w.get_node_clusteringcoefficient(x),
+                u.get_node_clusteringcoefficient(x),
+            );
+            assert!((a - b).abs() < 1e-12, "node {x}: {a} vs {b}");
+        }
+        assert_eq!(w.get_graph_transitivity(), u.get_graph_transitivity());
     }
 }

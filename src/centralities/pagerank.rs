@@ -31,8 +31,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// ranked by each node summing its neighbours' contributions instead, which needs no bins and is
 /// faster there, for the same ranks, bit for bit: see [`PageRankEngine`] to choose either.
 ///
+/// Weighted arcs (see [`E::is_weighted`](graph::E::is_weighted)) are followed in proportion to
+/// their weight, as networkx's `pagerank` does with `weight`: node `u`'s rank goes to `v` in
+/// proportion to `w(u, v) / Σ_x w(u, x)`, and nodes whose arcs out all weigh `0` are dangling.
+/// Weights must be finite and non-negative. Weighted graphs are always ranked partition-centric:
+/// pulling reads a node's in-arcs' weights off its out-arcs, which only holds for symmetric
+/// weights.
+///
 /// Scratch memory: at most `4 * |E| + size_of::<W>() * (|E| + |V|)` bytes and a few MB
-/// (partition-centric), or `2 * size_of::<W>() * |V|` bytes (pulling).
+/// (partition-centric; `size_of::<W>() * (|E| + |V|)` more for weighted arcs), or
+/// `2 * size_of::<W>() * |V|` bytes (pulling).
 ///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
@@ -132,6 +140,9 @@ struct Layout<W: Weight> {
     /// Where each source partition's contributions start in each destination partition's bin
     /// (source partition major).
     value_cursors: AbstractedProceduralMemoryMut<usize>,
+    /// For weighted arcs, each arc's weight, beside its destination in `ids`: the arc carries
+    /// its source's contribution times it.
+    weights: Option<AbstractedProceduralMemoryMut<W>>,
 }
 
 #[allow(dead_code)]
@@ -187,6 +198,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         if engine == PageRankEngine::Pull && Dir::DIRECTED {
             return Err("error PageRank pulls contributions on undirected graphs only".into());
         }
+        if engine == PageRankEngine::Pull && E::is_weighted() {
+            return Err("error PageRank pulls contributions on unweighted graphs only (a node's in-arcs' weights are read off its out-arcs, right for symmetric weights only): rank weighted graphs partition-centric".into());
+        }
         if !(0. ..=1.).contains(&alpha) {
             return Err(
                 format!("error PageRank's damping factor must be in [0, 1], not {alpha}").into(),
@@ -209,7 +223,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         };
         let pull = match engine {
             PageRankEngine::Auto => {
-                !Dir::DIRECTED && g.size().saturating_mul(size_of::<W>()) <= PULL_MAX_BYTES
+                !Dir::DIRECTED
+                    && !E::is_weighted()
+                    && g.size().saturating_mul(size_of::<W>()) <= PULL_MAX_BYTES
             }
             PageRankEngine::Pull => true,
             PageRankEngine::PartitionCentric => false,
@@ -264,6 +280,40 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             .g
             .build_cache_filename(CacheFile::PageRank, Some(seq))?;
         SharedSliceMut::<T>::abst_mem_mut(&file, len.max(1), true)
+    }
+
+    /// Each node's total out-weight (summed in `f64`), in scratch file `seq`, after checking every
+    /// weight is finite and non-negative.
+    fn out_weights(
+        &self,
+        seq: usize,
+    ) -> Result<AbstractedProceduralMemoryMut<W>, Box<dyn std::error::Error>> {
+        let n = self.g.size();
+        let mem = self.scratch::<W>(seq, n)?;
+        let offsets = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
+        let labels = SharedSlice::<E>::new(self.g.edge_labels_ptr(), self.g.width());
+        let threads = self.g.thread_num().max(1);
+        let load = n.div_ceil(threads);
+        let out = mem.shared_slice();
+        parallel(threads, |t| {
+            let mut out = out;
+            for u in (t * load).min(n)..((t + 1) * load).min(n) {
+                let mut total = 0f64;
+                for e in offsets.get(u).index()..offsets.get(u + 1).index() {
+                    let label = labels.get(e);
+                    let w = label.weight::<f64>();
+                    if !(w.is_finite() && w >= 0.) {
+                        return Err(format!(
+                            "error PageRank's arc weights must be finite and non-negative, but one is {label:?}"
+                        ));
+                    }
+                    total += w;
+                }
+                *out.get_mut(u) = W::from_f64(total);
+            }
+            Ok(())
+        })?;
+        Ok(mem)
     }
 
     /// The graph's bins (see [`Layout`]), filled with destinations.
@@ -324,13 +374,23 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         id_starts.push(arc_total);
         value_starts.push(run_total);
 
-        // the destinations, in each source partition's place of each bin
+        // the destinations (and weights), in each source partition's place of each bin
         let ids = self.scratch::<u32>(2, arc_total)?;
         let values = self.scratch::<W>(3, run_total)?;
+        let weights = if E::is_weighted() {
+            Some(self.scratch::<W>(7, arc_total)?)
+        } else {
+            None
+        };
+        let labels = weights
+            .as_ref()
+            .map(|_| SharedSlice::<E>::new(self.g.edge_labels_ptr(), self.g.width()));
         let ids_slice = ids.shared_slice();
+        let weights_slice = weights.as_ref().map(|w| w.shared_slice());
         let next = AtomicUsize::new(0);
         parallel(threads, |_| {
             let mut ids = ids_slice;
+            let mut weights = weights_slice;
             let mut cursor = vec![0usize; k];
             loop {
                 let ps = next.fetch_add(1, Ordering::Relaxed);
@@ -347,6 +407,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
                         let pd = v >> shift;
                         let id = (v & ((1 << shift) - 1)) as u32;
                         *ids.get_mut(cursor[pd]) = if pd != last { id | FIRST } else { id };
+                        if let (Some(weights), Some(labels)) = (&mut weights, &labels) {
+                            *weights.get_mut(cursor[pd]) = labels.get(e).weight::<W>();
+                        }
                         cursor[pd] += 1;
                         last = pd;
                     }
@@ -361,6 +424,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             id_starts,
             value_starts,
             value_cursors,
+            weights,
         })
     }
 
@@ -377,6 +441,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         if n == 0 {
             return Ok(0);
         }
+        // weights checked before anything else is built
+        let out_weights_mem = if E::is_weighted() {
+            Some(self.out_weights(6)?)
+        } else {
+            None
+        };
         let layout = if pull { None } else { Some(self.layout()?) };
         // the same partitions either way: their sums are added up in the same order
         let shift = partition_shift(n);
@@ -396,8 +466,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         let mut next_contributions = next_mem
             .as_ref()
             .map_or(contributions, |m| m.shared_slice());
-        let degree = |u: usize| offsets.get(u + 1).index() - offsets.get(u).index();
         let partition = |p: usize| (p << shift)..std::cmp::min((p + 1) << shift, n);
+        // what a node's rank is divided by among its arcs: their number, or for weighted arcs
+        // their total weight (checked finite and non-negative, summed in `f64`); `0` for dangling
+        // nodes
+        let out_weights = out_weights_mem.as_ref().map(|w| w.shared_slice());
+        let share = |u: usize| match &out_weights {
+            Some(w) => *w.get(u),
+            None => W::from_usize(offsets.get(u + 1).index() - offsets.get(u).index()),
+        };
 
         // ranks start even; each partition's sum of its dangling nodes' ranks, and of its
         // ranks' change, are added up in partition order, whatever the threads
@@ -408,12 +485,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             for (p, partial) in partials.iter_mut().enumerate() {
                 for u in partition(p) {
                     *ranks.get_mut(u) = initial;
-                    *contributions.get_mut(u) = match degree(u) {
-                        0 => {
-                            partial.0 += initial.to_f64();
-                            W::zero()
-                        }
-                        out => initial / W::from_usize(out),
+                    let out = share(u);
+                    *contributions.get_mut(u) = if out == W::zero() {
+                        partial.0 += initial.to_f64();
+                        W::zero()
+                    } else {
+                        initial / out
                     };
                 }
             }
@@ -435,12 +512,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
                 let rank = alpha_w * sum + even_share;
                 change += (rank.to_f64() - ranks.get(u).to_f64()).abs();
                 *ranks.get_mut(u) = rank;
-                *contributions.get_mut(u) = match degree(u) {
-                    0 => {
-                        dangling += rank.to_f64();
-                        W::zero()
-                    }
-                    out => rank / W::from_usize(out),
+                let out = share(u);
+                *contributions.get_mut(u) = if out == W::zero() {
+                    dangling += rank.to_f64();
+                    W::zero()
+                } else {
+                    rank / out
                 };
             }
             (dangling, change)
@@ -478,6 +555,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
                 }
                 Some(layout) => {
                     let (ids, values) = (layout.ids.shared_slice(), layout.values.shared_slice());
+                    let weights = layout.weights.as_ref().map(|w| w.shared_slice());
                     let value_cursors = layout.value_cursors.shared_slice();
                     let (id_starts, value_starts) = (&layout.id_starts, &layout.value_starts);
 
@@ -525,13 +603,29 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
                             let sums = &mut sums[..nodes.len()];
                             sums.fill(W::zero());
                             let (mut v, mut value) = (value_starts[pd], W::zero());
-                            for i in id_starts[pd]..id_starts[pd + 1] {
-                                let id = *ids.get(i);
-                                if id & FIRST != 0 {
-                                    value = *values.get(v);
-                                    v += 1;
+                            let bin = id_starts[pd]..id_starts[pd + 1];
+                            // (two loops: unweighted arcs pay no multiplication)
+                            match &weights {
+                                None => {
+                                    for i in bin {
+                                        let id = *ids.get(i);
+                                        if id & FIRST != 0 {
+                                            value = *values.get(v);
+                                            v += 1;
+                                        }
+                                        sums[(id & !FIRST) as usize] += value;
+                                    }
                                 }
-                                sums[(id & !FIRST) as usize] += value;
+                                Some(weights) => {
+                                    for i in bin {
+                                        let id = *ids.get(i);
+                                        if id & FIRST != 0 {
+                                            value = *values.get(v);
+                                            v += 1;
+                                        }
+                                        sums[(id & !FIRST) as usize] += value * *weights.get(i);
+                                    }
+                                }
                             }
                             *partials.get_mut(pd) = update(nodes, sums, even_share, contributions);
                         }
@@ -766,5 +860,181 @@ mod test {
         // no result left behind
         let out = g.build_cache_filename(CacheFile::PageRank, None).unwrap();
         assert!(!std::path::Path::new(&out).exists(), "{out}");
+    }
+
+    /// A graph whose arcs `(u, v, value)` carry `value`s, as written in a `real` MatrixMarket
+    /// file of the given symmetry, loaded with `f64` weights on `threads` threads.
+    fn weighted<Dir: Directedness>(
+        name: &str,
+        symmetry: &str,
+        n: usize,
+        arcs: &[(usize, usize, String)],
+        threads: u8,
+    ) -> crate::graph::test_utils::TestGraph<(), Weighted<f64>, usize, Dir> {
+        use crate::graph::test_utils::{unique_run_tag, unique_test_dir};
+        let dir = unique_test_dir("pagerank_weights");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.mtx"));
+        let mut text = format!(
+            "%%MatrixMarket matrix coordinate real {symmetry}\n{n} {n} {}\n",
+            arcs.len()
+        );
+        for (u, v, w) in arcs {
+            text += &format!("{} {} {w}\n", u + 1, v + 1);
+        }
+        std::fs::write(&path, text).unwrap();
+        let g = GraphMemoryMap::<(), Weighted<f64>, usize, Dir>::from_file(
+            &path,
+            Some(format!("pr_weights_{name}_{}", unique_run_tag())),
+            Some(threads),
+        )
+        .unwrap();
+        crate::graph::test_utils::TestGraph::new(g, Some(dir))
+    }
+
+    /// Weighted PageRank by plain power iterations, and the number of iterations.
+    fn weighted_reference<Dir: Directedness>(
+        g: &GraphMemoryMap<(), Weighted<f64>, usize, Dir>,
+        alpha: f64,
+        tolerance: f64,
+    ) -> (Vec<f64>, usize) {
+        let n = g.size();
+        let out: Vec<Vec<(usize, f64)>> = (0..n)
+            .map(|u| {
+                g.weighted_neighbours(u)
+                    .unwrap()
+                    .map(|(v, w)| (v, w.0))
+                    .collect()
+            })
+            .collect();
+        let total: Vec<f64> = out.iter().map(|o| o.iter().map(|a| a.1).sum()).collect();
+        let mut x = vec![1. / n as f64; n];
+        for iteration in 1.. {
+            let dangling: f64 = (0..n).filter(|&u| total[u] == 0.).map(|u| x[u]).sum();
+            let mut next = vec![alpha * dangling / n as f64 + (1. - alpha) / n as f64; n];
+            for u in 0..n {
+                for &(v, w) in &out[u] {
+                    if total[u] > 0. {
+                        next[v] += alpha * x[u] * w / total[u];
+                    }
+                }
+            }
+            let change: f64 = next.iter().zip(&x).map(|(a, b)| (a - b).abs()).sum();
+            x = next;
+            if change < tolerance {
+                return (x, iteration);
+            }
+        }
+        unreachable!()
+    }
+
+    fn random_weights(arcs: &[(usize, usize)], seed: u64) -> Vec<(usize, usize, String)> {
+        let mut state = seed;
+        arcs.iter()
+            .map(|&(u, v)| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                // a few zeros, the rest spread over three orders of magnitude
+                let r = (state >> 33) % 1000;
+                let w = if r < 50 { 0.0 } else { r as f64 / 7.0 };
+                (u, v, format!("{w}"))
+            })
+            .collect()
+    }
+
+    /// Weighted ranks are those of plain weighted power iterations, on one partition or many,
+    /// directed or not, with zero weights, nodes whose arcs out all weigh nothing (dangling),
+    /// self-loops and parallel arcs.
+    #[test]
+    fn weighted_pagerank_matches_power_iterations() {
+        let mut loops =
+            random_weights(&[(0, 0), (0, 1), (0, 1), (1, 2), (2, 0), (3, 3), (4, 5)], 1);
+        // node 4's only arc weighs nothing: it's dangling
+        loops[6].2 = "0".to_string();
+        let cases = [
+            ("w_loops", 6, loops),
+            (
+                "w_one_partition",
+                900,
+                random_weights(&random_arcs(900, 4000, 11), 2),
+            ),
+            (
+                "w_partitions",
+                3000,
+                random_weights(&random_arcs(3000, 9000, 12), 3),
+            ),
+            (
+                "w_many",
+                70_000,
+                random_weights(&random_arcs(70_000, 350_000, 13), 4),
+            ),
+        ];
+        for (name, n, arcs) in &cases {
+            let g = weighted::<Directed>(name, "general", *n, arcs, 4);
+            for (alpha, tolerance) in [(0.85, 1e-6), (0.5, 1e-10)] {
+                let pr = PageRank::<_, _, _, f64, _>::new_with_conf(&g, alpha, tolerance, 10_000)
+                    .unwrap();
+                let (want, iterations) = weighted_reference(&g, alpha, tolerance);
+                assert_eq!(pr.iterations(), iterations, "{name}, alpha {alpha}");
+                assert_close(pr.ranks(), &want, 1e-10, &format!("{name}, alpha {alpha}"));
+                let total: f64 = pr.ranks().iter().sum();
+                assert!((total - 1.).abs() <= 1e-9, "{name}: ranks sum to {total}");
+            }
+        }
+        // undirected, symmetric weights: ranked partition-centric (pulling is refused)
+        let arcs = random_weights(&random_arcs(2000, 6000, 14), 5);
+        let g = weighted::<Undirected>("w_symmetric", "symmetric", 2000, &arcs, 4);
+        let pr = PageRank::<_, _, _, f64, _>::new(&g).unwrap();
+        let (want, _) = weighted_reference(&g, 0.85, 1e-6);
+        assert_close(pr.ranks(), &want, 1e-10, "symmetric");
+        assert!(
+            PageRank::<_, _, _, f64, _>::new_with_engine(&g, 0.85, 1e-6, 100, PageRankEngine::Pull)
+                .is_err()
+        );
+    }
+
+    /// Uniform weights rank as unit ones do, and ranks don't depend on the threads, bit for bit.
+    #[test]
+    fn weighted_pagerank_uniform_and_thread_independent() {
+        let arcs = random_arcs(3000, 12_000, 21);
+        let plain = graph("w_plain", "general", 3000, &arcs);
+        let uniform: Vec<_> = arcs
+            .iter()
+            .map(|&(u, v)| (u, v, "2.5".to_string()))
+            .collect();
+        let g = weighted::<Directed>("w_uniform", "general", 3000, &uniform, 4);
+        let want = PageRank::<_, _, _, f64, _>::new(&plain).unwrap();
+        let got = PageRank::<_, _, _, f64, _>::new(&g).unwrap();
+        assert_eq!(got.iterations(), want.iterations());
+        assert_close(got.ranks(), want.ranks(), 1e-12, "uniform");
+
+        let arcs = random_weights(&arcs, 22);
+        let ranks: Vec<Vec<f64>> = [1u8, 3, 8]
+            .iter()
+            .map(|&t| {
+                let g = weighted::<Directed>(&format!("w_threads_{t}"), "general", 3000, &arcs, t);
+                PageRank::<_, _, _, f64, _>::new(&g)
+                    .unwrap()
+                    .ranks()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(ranks[0], ranks[1]);
+        assert_eq!(ranks[0], ranks[2]);
+    }
+
+    /// Weights that aren't finite and non-negative are refused, saying so.
+    #[test]
+    fn weighted_pagerank_rejects_bad_weights() {
+        for (name, w) in [("w_negative", "-1"), ("w_nan", "nan"), ("w_inf", "inf")] {
+            let arcs = vec![(0, 1, "1".to_string()), (1, 0, w.to_string())];
+            let g = weighted::<Directed>(name, "general", 2, &arcs, 2);
+            let err = PageRank::<_, _, _, f64, _>::new(&g)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(err.contains("finite and non-negative"), "{name}: {err}");
+        }
     }
 }

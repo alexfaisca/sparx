@@ -10,7 +10,7 @@ mod parser_mtx;
 #[cfg(feature = "nodes_edges")]
 mod parser_nodes_edges;
 
-use super::{CacheFile, E, GraphFile, IndexType, N};
+use super::{CacheFile, E, GraphFile, IndexType, N, WeightParsing};
 use crate::shared_slice::{
     AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut,
 };
@@ -300,6 +300,20 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
     /// |alphabet = 4| * |annotation set = 4| = 4 * 4 = 16
     const DEFAULT_MAX_EDGES: u16 = 16;
     const DEFAULT_CORRECTION_BUFFER_SIZE: usize = 1024;
+
+    /// Refuses weighted edge labels for an input format that carries no weights, rather than
+    /// loading every edge with a meaningless one.
+    #[allow(dead_code)]
+    fn refuse_weights(format: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if E::is_weighted() {
+            return Err(format!(
+                "error {format} inputs carry no edge weights, so they can't be loaded with weighted edge labels (`{}`): use unweighted ones",
+                crate::utils::type_of::<E>()
+            )
+            .into());
+        }
+        Ok(())
+    }
 
     #[cfg(not(any(test, feature = "bench")))]
     fn guarantee_caching_dir() -> Result<(), Box<dyn std::error::Error>> {
@@ -691,12 +705,22 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             } else if std::mem::size_of::<E>() != metadata.edge_label_size {
                 return Err(
                     format!(
-                        "error cached entry for {:?} was built without labeled nodes sized {}: node labels sized {} can't be provided, please re-parse dataset",
+                        "error cached entry for {:?} was built with edge labels sized {}: edge labels sized {} can't be provided, please re-parse dataset",
                         filename,
                         metadata.edge_label_size,
-                        std::mem::size_of::<N>()
+                        std::mem::size_of::<E>()
                         ).into()
                     );
+            } else if E::is_weighted() && metadata.edge_label_type != crate::utils::type_of::<E>() {
+                // same size isn't enough: a `u32` weight read as an `f32` one (or a GGCAT
+                // direction read as a weight) would be silently meaningless
+                return Err(format!(
+                    "error cached entry for {:?} was built with edge labels of type `{}`, so it can't be opened with edge weights of type `{}`: please re-parse dataset",
+                    filename,
+                    metadata.edge_label_type,
+                    crate::utils::type_of::<E>()
+                )
+                .into());
             }
         }
 
@@ -833,6 +857,33 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         batch: Option<usize>,
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_file_with_options::<P, D>(p, id, batch, in_fst, WeightParsing::Fast)
+    }
+
+    /// Same as [`from_file`](Self::from_file), but lets the caller choose how edge weights are
+    /// read (see [`WeightParsing`]): [`from_file`](Self::from_file) reads them
+    /// [`Fast`](WeightParsing::Fast), unvalidated. Only weighted edge labels (see
+    /// [`E::is_weighted`](crate::graph::E::is_weighted)) are affected, and only MatrixMarket
+    /// inputs carry weights.
+    pub fn from_file_with_weight_parsing<P: AsRef<Path>>(
+        p: P,
+        id: Option<String>,
+        batch: Option<usize>,
+        in_fst: Option<fn(usize) -> bool>,
+        parsing: WeightParsing,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_file_with_options::<P, portable_atomic::AtomicUsize>(
+            p, id, batch, in_fst, parsing,
+        )
+    }
+
+    fn from_file_with_options<P: AsRef<Path>, D: AccumulatorAtomic>(
+        p: P,
+        id: Option<String>,
+        batch: Option<usize>,
+        in_fst: Option<fn(usize) -> bool>,
+        parsing: WeightParsing,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
 
         // before any cache file is created
@@ -859,7 +910,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 let _ = std::fs::remove_file(f);
             }
         }
-        let result = Self::from_file_type::<P, D>(p, input_type, id, batch, in_fst);
+        let result = Self::from_file_type::<P, D>(p, input_type, id, batch, in_fst, parsing);
         // a failed parse leaves no partial cache entry behind
         if result.is_err()
             && let Some(key) = key
@@ -880,10 +931,11 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         id: Option<String>,
         batch: Option<usize>,
         in_fst: Option<fn(usize) -> bool>,
+        parsing: WeightParsing,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut cache = match input_type {
             #[cfg(feature = "mtx")]
-            InputFileType::MTX(_) => Self::from_mtx_file_with_accumulator::<_, D>(p.as_ref(), id, batch),
+            InputFileType::MTX(_) => Self::from_mtx_file_impl::<_, D>(p.as_ref(), id, batch, parsing),
             #[cfg(feature = "nodes_edges")]
             InputFileType::NODE_EDGE(ext) =>
             match ext {
@@ -1078,7 +1130,12 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         id: Option<String>,
         batch: Option<usize>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_mtx_file_impl::<P, portable_atomic::AtomicUsize>(path, id, batch)
+        Self::from_mtx_file_impl::<P, portable_atomic::AtomicUsize>(
+            path,
+            id,
+            batch,
+            WeightParsing::Fast,
+        )
     }
 
     /// Same as [`from_mtx_file`](Self::from_mtx_file), but lets the caller choose the
@@ -1089,7 +1146,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         id: Option<String>,
         batch: Option<usize>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_mtx_file_impl::<P, D>(path, id, batch)
+        Self::from_mtx_file_impl::<P, D>(path, id, batch, WeightParsing::Fast)
     }
 
     /// Creates a [`GraphCache`] instance from an existing cached graph.

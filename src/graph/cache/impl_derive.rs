@@ -9,7 +9,7 @@ use super::{
     utils::{CACHE_DIR, FileType, H, cache_file_name, id_from_filename},
 };
 use crate::graph::IndexType;
-use crate::graph::direction::UndirectedMode;
+use crate::graph::direction::{UndirectedMode, WeightMerge};
 use crate::shared_slice::{AbstractedProceduralMemory, AbstractedProceduralMemoryMut};
 
 use std::{
@@ -80,6 +80,12 @@ fn metadata_last(files: &mut [PathBuf], metadata_fn: &str) {
 enum Source {
     Out(usize),
     In(usize),
+    /// Every arc between two nodes, both ways (`[begin, end)` positions, out-arcs here and
+    /// in-arcs in the transpose): one edge, its label merged from theirs.
+    Merged {
+        outs: (usize, usize),
+        ins: (usize, usize),
+    },
 }
 
 /// Tells apart concurrent builds of derived graphs within a process.
@@ -165,16 +171,19 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
     /// The underlying undirected graph, in a given mode (see [`UndirectedMode`]): each node's
     /// out-neighbours merged with its in-neighbours (from `transpose`, this entry's transpose;
     /// self-loops counted once), keeping every arc (`Each`), one edge per neighbour (`Collapse`) or
-    /// one edge per neighbour linked both ways (`Mutual`). Edges keep the label of the (first)
-    /// arc they come from, out-arcs first.
+    /// one edge per neighbour linked both ways (`Mutual`). `Each`'s edges keep their arc's label;
+    /// the others' merge every arc between their ends, both ways: weighted ones by `merge` (the
+    /// same weight from both ends), unweighted ones keeping the first arc's label, out-arcs first.
     ///
     /// [`UndirectedMode`]: crate::graph::direction::UndirectedMode
     pub(crate) fn derive_undirected(
         &self,
         transpose: &Self,
         mode: UndirectedMode,
+        merge: WeightMerge,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        self.open_or_derive(mode.kind(), true, |undirected| {
+        let kind = mode.kind(E::is_weighted().then_some(merge));
+        self.open_or_derive(&kind, true, |undirected| {
             let node_count = self.index_bytes.saturating_sub(1);
 
             let out_offsets =
@@ -203,32 +212,33 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                         (None, Some(&i)) => in_neighbors[i],
                         (Some(&o), Some(&i)) => out_neighbors[o].min(in_neighbors[i]),
                     };
-                    let (mut first_out, mut first_in) = (None, None);
+                    // the run's arcs, out and in (each run contiguous: neighbours are sorted)
+                    let (mut run_out, mut run_in) = ((0, 0), (0, 0));
                     while let Some(&o) = outs.peek().filter(|&&o| out_neighbors[o] == v) {
                         outs.next();
                         if mode == UndirectedMode::Each {
                             emit(v, Source::Out(o));
                         }
-                        first_out = first_out.or(Some(o));
+                        run_out = if run_out.0 == run_out.1 { (o, o + 1) } else { (run_out.0, o + 1) };
                     }
                     while let Some(&i) = ins.peek().filter(|&&i| in_neighbors[i] == v) {
                         ins.next();
                         if mode == UndirectedMode::Each {
                             emit(v, Source::In(i));
                         }
-                        first_in = first_in.or(Some(i));
+                        run_in = if run_in.0 == run_in.1 { (i, i + 1) } else { (run_in.0, i + 1) };
                     }
+                    let (has_out, has_in) = (run_out.0 < run_out.1, run_in.0 < run_in.1);
                     // (a self-loop is its own reverse)
-                    let both_ways = first_out.is_some() && (first_in.is_some() || v.index() == w);
+                    let both_ways = has_out && (has_in || v.index() == w);
+                    let merged = Source::Merged {
+                        outs: run_out,
+                        ins: run_in,
+                    };
                     match mode {
                         UndirectedMode::Each => {}
-                        UndirectedMode::Collapse => emit(
-                            v,
-                            first_out.map_or_else(|| Source::In(first_in.unwrap()), Source::Out),
-                        ),
-                        UndirectedMode::Mutual if both_ways => {
-                            emit(v, Source::Out(first_out.unwrap()))
-                        }
+                        UndirectedMode::Collapse => emit(v, merged),
+                        UndirectedMode::Mutual if both_ways => emit(v, merged),
                         UndirectedMode::Mutual => {}
                     }
                 }
@@ -254,6 +264,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             let mut in_labels = transpose.edge_label_copier(undirected, edge_count)?;
 
             let mut position = 0usize;
+            // a merge overflowing the weight type: (edge, its ends)
+            let mut overflow = None;
             for w in 0..node_count {
                 u_offsets[w] = Ix::new(position);
                 edges_of(w, &mut |v, arc| {
@@ -261,11 +273,47 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                     match arc {
                         Source::Out(e) => out_labels.copy(e, position),
                         Source::In(e) => in_labels.copy(e, position),
+                        Source::Merged { outs, ins } if E::is_weighted() => {
+                            let labels = (outs.0..outs.1)
+                                .filter_map(|e| out_labels.source(e))
+                                .chain((ins.0..ins.1).filter_map(|e| in_labels.source(e)));
+                            let mut merged: Option<E> = None;
+                            for label in labels {
+                                merged = match merged {
+                                    None => Some(label),
+                                    Some(m) => match m.merge_weight(label, merge) {
+                                        Some(m) => Some(m),
+                                        None => {
+                                            overflow.get_or_insert((w, v.index()));
+                                            Some(m)
+                                        }
+                                    },
+                                };
+                            }
+                            if let Some(merged) = merged {
+                                out_labels.set(position, merged);
+                            }
+                        }
+                        // unweighted: the first arc's label, out-arcs first
+                        Source::Merged { outs, ins } => {
+                            if outs.0 < outs.1 {
+                                out_labels.copy(outs.0, position)
+                            } else {
+                                in_labels.copy(ins.0, position)
+                            }
+                        }
                     }
                     position += 1;
                 });
             }
             u_offsets[node_count] = Ix::new(position);
+            if let Some((u, v)) = overflow {
+                return Err(format!(
+                    "error the weights of the arcs between {u} and {v} sum to more than their type, `{}`, holds: merge them otherwise (see `WeightMerge`)",
+                    crate::utils::type_of::<E>()
+                )
+                .into());
+            }
 
             out_labels.finish()?;
             in_labels.finish()?;
@@ -551,6 +599,20 @@ impl<E: Copy> EdgeLabelCopier<E> {
     fn copy(&mut self, from: usize, to: usize) {
         if let Some((src, dest)) = &mut self.0 {
             dest.as_mut_slice()[to] = src.as_slice()[from];
+        }
+    }
+
+    /// The source's label `from` (none for unlabeled edges).
+    #[inline(always)]
+    fn source(&self, from: usize) -> Option<E> {
+        self.0.as_ref().map(|(src, _)| src.as_slice()[from])
+    }
+
+    /// Writes `label` as the derived graph's label `to`.
+    #[inline(always)]
+    fn set(&mut self, to: usize, label: E) {
+        if let Some((_, dest)) = &mut self.0 {
+            dest.as_mut_slice()[to] = label;
         }
     }
 

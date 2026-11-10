@@ -67,6 +67,21 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   which the parent owns: they're usable while it's open, and raise `RuntimeError` after.
 * Inputs: Matrix Market (`.mtx`), [ggcat](https://github.com/algbio/ggcat) graphs (`.lz4`) and
   nodes/edges files.
+* `weighted=True` reads a Matrix Market file's values as `f64` edge weights (`pattern` files'
+  edges weigh one; ggcat and nodes/edges files carry no weights, and fail). `weight_parsing` is
+  `"fast"` (the default: no per-value validation, malformed values give unspecified weights) or
+  `"checked"` (malformed, out of range or non-finite values raise). `is_weighted`, `weights(u)`
+  and `edge_weights()` (in `csr()` order) read them back; unweighted graphs' weigh one. A kept
+  weighted graph reopens with `open(cache_file, weighted=True)`.
+* On weighted graphs, algorithms follow networkx's `weight="weight"`: PageRank (transitions in
+  proportion to weight), Louvain and Leiden (weighted modularity), clustering (Onnela's and
+  Fagiolo's weighted coefficients; transitivity stays unweighted, as networkx's) and degree
+  assortativity (of strengths). Weights must be finite and non-negative, and a `DiGraph`'s
+  Louvain needs integer weights (it compares gains exactly). Traversals, distances,
+  centralities, k-cores, k-trusses and components ignore weights.
+* `DiGraph.to_undirected(merge=...)` weighs an edge merged from several arcs (`"collapse"` and
+  `"mutual"`: every arc between two nodes, both ways) by their `"sum"` (the default), `"min"` or
+  `"max"`, the same from both ends.
 * `index` (`"u32"` or `"u64"`) is the width of node and edge indices. `width` (`"u8"` to `"u64"`)
   is the width of triangle counts, trussness and coreness values; a value that doesn't fit, such
   as a node of degree 256 in a `"u8"` `k_core`, fails with an error rather than overflowing.
@@ -89,7 +104,8 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   (GVE-Leiden), finding better communities on some graphs for some more time.
 * `pagerank`'s `tol` bounds the ranks' total change, while networkx's is multiplied by the
   number of nodes (which, ranks summing to 1, graphs of millions of nodes meet at once):
-  networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`).
+  networkx's results are those of `tol=nx_tol * len(g)`. Edges are unweighted (`weight=None`)
+  unless the graph is weighted.
 * `pagerank(engine=...)` picks how ranks are computed, with the same results, bit for bit:
   `"pull"` (fastest while the ranks fit in the CPU's cache; undirected graphs only),
   `"partition"` (partition-centric, fastest once they don't) or `"auto"` (the default: `"pull"`

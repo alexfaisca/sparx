@@ -1675,6 +1675,7 @@ dependencies = [
  "fst",
  "glob",
  "lz4",
+ "memchr",
  "memmap2",
  "num_cpus",
  "once_cell",

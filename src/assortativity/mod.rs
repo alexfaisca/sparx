@@ -571,6 +571,11 @@ fn with_arcs<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness, 
 /// networkx's `degree_assortativity_coefficient`), or its rank based counterpart
 /// ([`Correlation::Spearman`]): the correlation of the degrees of the ends of each arc (each
 /// edge, both ways). Degrees count self-loops twice, as networkx's.
+///
+/// With weighted edges (see [`E::is_weighted`](graph::E::is_weighted)), as networkx's with
+/// `weight`: the correlation of the ends' strengths (weighted degrees, self-loops' weights
+/// counted twice), each arc counting once; weights must be finite and non-negative. Computed
+/// in floating point, as [`numeric_assortativity`] (on the CPU, also by the GPU variants).
 pub fn degree_assortativity<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     g: &Graph<N, E, Ix>,
     correlation: Correlation,
@@ -583,6 +588,23 @@ fn degree_assortativity_impl<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     correlation: Correlation,
     arc_products: Option<ArcProducts>,
 ) -> Result<f64, Box<dyn std::error::Error>> {
+    if E::is_weighted() {
+        // strengths, self-loops' weights counted twice (as their degrees are)
+        let strength = strengths(g, true)?;
+        return with_arcs(g, |a| {
+            let offsets = a.offsets;
+            let arcs_of = |u: usize| (offsets[u + 1].index() - offsets[u].index()) as u64;
+            strength_correlation(
+                a,
+                &strength,
+                &strength,
+                &arcs_of,
+                &arcs_of,
+                true,
+                correlation,
+            )
+        });
+    }
     if correlation == Correlation::Pearson && arc_products.is_none() {
         return with_arcs(g, |a| {
             // rows of up to a byte's length, typically: tried first, the narrowest
@@ -744,6 +766,9 @@ fn undirected_pearson<Ix: graph::IndexType, T: Value>(
 ///
 /// Uses the graph's [transpose](DiGraph::transpose) (built, and cached, if it isn't yet) for
 /// in-degrees.
+///
+/// With weighted arcs, the correlation of out- and in-strengths (weighted out- and in-degrees)
+/// instead, as networkx's with `weight` and as [`degree_assortativity`]'s.
 pub fn directed_degree_assortativity<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     g: &DiGraph<N, E, Ix>,
     x: DegreeType,
@@ -762,6 +787,29 @@ fn directed_degree_assortativity_impl<N: graph::N, E: graph::E, Ix: graph::Index
 ) -> Result<f64, Box<dyn std::error::Error>> {
     let t = g.transpose()?;
     let in_offsets = SharedSlice::<Ix>::new(t.offsets_ptr(), t.offsets_size());
+    if E::is_weighted() {
+        // out-strengths, and in-strengths (out-strengths in the transpose)
+        let (out_strength, in_strength) = (strengths(g, false)?, strengths(t, false)?);
+        let strength = |d: DegreeType| match d {
+            DegreeType::Out => &out_strength,
+            DegreeType::In => &in_strength,
+        };
+        return with_arcs(g, |a| {
+            let offsets = a.offsets;
+            let tails = |u: usize| (offsets[u + 1].index() - offsets[u].index()) as u64;
+            let heads =
+                |u: usize| (in_offsets.get(u + 1).index() - in_offsets.get(u).index()) as u64;
+            strength_correlation(
+                a,
+                strength(x),
+                strength(y),
+                &tails,
+                &heads,
+                false,
+                correlation,
+            )
+        });
+    }
     with_arcs(g, |a| {
         let offsets = a.offsets;
         let out_degree = |u: usize| (offsets[u + 1].index() - offsets[u].index()) as u64;
@@ -917,66 +965,157 @@ pub fn numeric_assortativity<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir
         .into());
     }
     let symmetric = !Dir::DIRECTED || g.is_symmetric()?;
-    with_arcs(g, |a| {
-        let (offsets, neighbours) = (a.offsets, a.neighbours);
-        let arcs = neighbours.len() as f64;
-        if neighbours.is_empty() {
-            return Ok(f64::NAN);
-        }
-        // means: of the tails' values, and of the heads' (the same, if arcs all have reverses)
-        let means = chunked(a.threads, a.n, &|begin, end| {
-            let (mut x, mut y) = (Sum::default(), Sum::default());
-            for u in begin..end {
-                let row = &neighbours[offsets[u].index()..offsets[u + 1].index()];
-                x.add(row.len() as f64 * values[u]);
-                if !symmetric {
-                    for v in row {
-                        y.add(values[v.index()]);
+    with_arcs(g, |a| arc_pearson(a, values, values, symmetric))
+}
+
+/// Every node's strength: the total weight of its arcs out (weights checked finite and
+/// non-negative), its self-loops' counted twice if `loops_twice`.
+fn strengths<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    loops_twice: bool,
+) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    g.total_weight()?;
+    let parts = chunked(g.thread_num(), g.size(), &|begin, end| {
+        (begin..end)
+            .map(|u| {
+                let mut s = Sum::default();
+                for (v, label) in g.weighted_neighbours(u).map_err(|e| e.to_string())? {
+                    let w = label.weight::<f64>();
+                    s.add(w);
+                    if loops_twice && v == u {
+                        s.add(w);
                     }
                 }
-            }
-            (x, y)
-        })?;
+                Ok(s.value())
+            })
+            .collect::<Result<Vec<f64>, String>>()
+    })?;
+    let mut strengths = Vec::with_capacity(g.size());
+    for part in parts {
+        strengths.extend(part?);
+    }
+    Ok(strengths)
+}
+
+/// Each node's value's rank among the arcs' values, ties ranked by their average rank: node `u`
+/// standing for `arcs(u)` arcs' values.
+fn arc_ranks(values: &[f64], arcs: &(dyn Fn(usize) -> u64 + Sync)) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_unstable_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut ranks = vec![0.0; values.len()];
+    let (mut i, mut before) = (0, 0u64);
+    while i < order.len() {
+        let value = values[order[i]];
+        let mut j = i;
+        let mut tied = 0u64;
+        while j < order.len() && values[order[j]].total_cmp(&value).is_eq() {
+            tied += arcs(order[j]);
+            j += 1;
+        }
+        // ranks `before + 1 ..= before + tied`, averaged
+        let rank = before as f64 + (tied as f64 + 1.0) / 2.0;
+        for &u in &order[i..j] {
+            ranks[u] = rank;
+        }
+        before += tied;
+        i = j;
+    }
+    ranks
+}
+
+/// Pearson's or Spearman's correlation of node strengths `x[u]` and `y[v]` over the arcs
+/// `u -> v`: `tails(u)` arcs out of `u` and `heads(v)` into `v` (for ranks); `same` as
+/// [`arc_pearson`]'s.
+fn strength_correlation<Ix: graph::IndexType>(
+    a: &Arcs<Ix>,
+    x: &[f64],
+    y: &[f64],
+    tails: &(dyn Fn(usize) -> u64 + Sync),
+    heads: &(dyn Fn(usize) -> u64 + Sync),
+    same: bool,
+    correlation: Correlation,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    match correlation {
+        Correlation::Pearson => arc_pearson(a, x, y, same),
+        Correlation::Spearman => {
+            let rx = arc_ranks(x, tails);
+            let ry = if same {
+                rx.clone()
+            } else {
+                arc_ranks(y, heads)
+            };
+            arc_pearson(a, &rx, &ry, same)
+        }
+    }
+}
+
+/// Pearson's correlation of `x[u]` and `y[v]` over every arc `u -> v`, as
+/// [`numeric_assortativity`] computes it; `same` if `x` and `y` are the same values and every
+/// arc has a reverse (heads' sums are then tails').
+fn arc_pearson<Ix: graph::IndexType>(
+    a: &Arcs<Ix>,
+    x_values: &[f64],
+    y_values: &[f64],
+    same: bool,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    let (offsets, neighbours) = (a.offsets, a.neighbours);
+    let arcs = neighbours.len() as f64;
+    if neighbours.is_empty() {
+        return Ok(f64::NAN);
+    }
+    // means: of the tails' values, and of the heads' (the same, if arcs all have reverses)
+    let means = chunked(a.threads, a.n, &|begin, end| {
         let (mut x, mut y) = (Sum::default(), Sum::default());
-        for (px, py) in means {
-            x.merge(px);
-            y.merge(py);
-        }
-        let mean_x = x.value() / arcs;
-        let mean_y = if symmetric { mean_x } else { y.value() / arcs };
-        let parts = chunked(a.threads, a.n, &|begin, end| {
-            let (mut xy, mut xx, mut yy) = (Sum::default(), Sum::default(), Sum::default());
-            let last = offsets[end].index().max(1) - 1;
-            for u in begin..end {
-                let (b, e) = (offsets[u].index(), offsets[u + 1].index());
-                let row = &neighbours[b..e];
-                let xu = values[u] - mean_x;
-                let mut heads = Sum::default();
-                for (i, v) in (b..e).zip(row) {
-                    prefetch(&values[neighbours[(i + PREFETCH).min(last)].index()]);
-                    let yv = values[v.index()] - mean_y;
-                    heads.add(yv);
-                    if !symmetric {
-                        yy.add(yv * yv);
-                    }
+        for u in begin..end {
+            let row = &neighbours[offsets[u].index()..offsets[u + 1].index()];
+            x.add(row.len() as f64 * x_values[u]);
+            if !same {
+                for v in row {
+                    y.add(y_values[v.index()]);
                 }
-                xy.add(xu * heads.value());
-                xx.add(row.len() as f64 * xu * xu);
             }
-            (xy, xx, yy)
-        })?;
+        }
+        (x, y)
+    })?;
+    let (mut x, mut y) = (Sum::default(), Sum::default());
+    for (px, py) in means {
+        x.merge(px);
+        y.merge(py);
+    }
+    let mean_x = x.value() / arcs;
+    let mean_y = if same { mean_x } else { y.value() / arcs };
+    let parts = chunked(a.threads, a.n, &|begin, end| {
         let (mut xy, mut xx, mut yy) = (Sum::default(), Sum::default(), Sum::default());
-        for (pxy, pxx, pyy) in parts {
-            xy.merge(pxy);
-            xx.merge(pxx);
-            yy.merge(pyy);
+        let last = offsets[end].index().max(1) - 1;
+        for u in begin..end {
+            let (b, e) = (offsets[u].index(), offsets[u + 1].index());
+            let row = &neighbours[b..e];
+            let xu = x_values[u] - mean_x;
+            let mut heads = Sum::default();
+            for (i, v) in (b..e).zip(row) {
+                prefetch(&y_values[neighbours[(i + PREFETCH).min(last)].index()]);
+                let yv = y_values[v.index()] - mean_y;
+                heads.add(yv);
+                if !same {
+                    yy.add(yv * yv);
+                }
+            }
+            xy.add(xu * heads.value());
+            xx.add(row.len() as f64 * xu * xu);
         }
-        let (xx, yy) = (xx.value(), if symmetric { xx.value() } else { yy.value() });
-        if xx == 0.0 || yy == 0.0 {
-            return Ok(f64::NAN);
-        }
-        Ok(xy.value() / (xx.sqrt() * yy.sqrt()))
-    })
+        (xy, xx, yy)
+    })?;
+    let (mut xy, mut xx, mut yy) = (Sum::default(), Sum::default(), Sum::default());
+    for (pxy, pxx, pyy) in parts {
+        xy.merge(pxy);
+        xx.merge(pxx);
+        yy.merge(pyy);
+    }
+    let (xx, yy) = (xx.value(), if same { xx.value() } else { yy.value() });
+    if xx == 0.0 || yy == 0.0 {
+        return Ok(f64::NAN);
+    }
+    Ok(xy.value() / (xx.sqrt() * yy.sqrt()))
 }
 
 /// Newman's assortativity coefficient of the categories `labels` (any `usize`s), networkx's
@@ -1016,7 +1155,12 @@ pub fn attribute_assortativity<
             distinct.dedup();
             distinct
         });
-        let categories = distinct.as_ref().map_or(max + 1, |d| d.len());
+        // (`max + 1` only when the labels are used as they are, `max < n`: a label of
+        // `usize::MAX` would overflow it)
+        let categories = match &distinct {
+            None => max + 1,
+            Some(d) => d.len(),
+        };
         let dense = |u: usize| match &distinct {
             None => labels[u] as u64,
             Some(d) => d.partition_point(|&l| l < labels[u]) as u64,

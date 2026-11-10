@@ -10,14 +10,19 @@ use portable_atomic::Ordering;
 use std::path::Path;
 
 use super::{AccumulatorAtomic, GraphCache};
+use crate::graph::{WeightDomain, WeightParsing};
 
 impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
     /// Parses a [`MatrixMarket`](https://math.nist.gov/MatrixMarket/formats.html) file input into a [`GraphCache`] instance.
     ///
     /// Input file is assumed have file extension .mtx and must be a sparse (`coordinate`) square
     /// matrix, of `pattern`, `integer`, `real`/`double` or `complex` entries, `general`,
-    /// `symmetric`, `skew-symmetric` or `hermitian` (see [`MtxHeader`]). Values are only read into
-    /// integer edge labels; unlabelled graphs ignore them.
+    /// `symmetric`, `skew-symmetric` or `hermitian` (see [`MtxHeader`]). Unlabelled graphs ignore
+    /// values; labeled ones read them as non-negative integer labels, and weighted ones (see
+    /// [`E::is_weighted`]) as weights of their type, in the given [`WeightParsing`] mode (`pattern`
+    /// files' arcs weigh one).
+    ///
+    /// [`E::is_weighted`]: crate::graph::E::is_weighted
     ///
     /// # Arguments
     ///
@@ -38,6 +43,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         path: P,
         id: Option<String>,
         batch: Option<usize>,
+        parsing: WeightParsing,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
 
@@ -53,7 +59,10 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
 
         let threads = (get_physical() * 2).max(1);
 
-        let node_count = Self::parse_mtx_header(path.as_ref())?.nodes;
+        let header = Self::parse_mtx_header(path.as_ref())?;
+        // before any work: whether the edges' labels can hold the file's values
+        Self::check_mtx_values(&header)?;
+        let node_count = header.nodes;
 
         let h_fn = cache_file_name(&cache.offsets_filename(), &FileType::Helper(H::H), Some(0))?;
         let offset_size = match node_count.overflowing_add(1) {
@@ -92,25 +101,57 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         let edgelabels = AbstractedProceduralMemoryMut::<E>::from_file(&cache.edgelabel_file, sum)?;
 
         if E::is_labeled() {
-            Self::parallel_edge_labels_parse_mtx_with(
-                path.as_ref(),
-                {
-                    let mut neighbors = neighbors.shared_slice();
-                    let mut edgelabels = edgelabels.shared_slice();
-                    let counters = counters.shared_slice();
-                    move |u, v, w| {
-                        // safe, unchecked: a per-node position counter can never exceed that
-                        // node's own degree, which `checked_increment` above already validated
-                        // fits `D`'s width.
-                        // one claim for both: other threads may be placing edges of `u` too
-                        let pos = D::widen(*offsets_s.get(u))
-                            + counters.get(u).fetch_add_one_widened(Ordering::Relaxed);
-                        *neighbors.get_mut(pos) = Ix::new(v);
-                        *edgelabels.get_mut(pos) = E::new(w);
-                    }
-                },
-                threads,
-            )?;
+            let place = {
+                let mut neighbors = neighbors.shared_slice();
+                let mut edgelabels = edgelabels.shared_slice();
+                let counters = counters.shared_slice();
+                move |u, v, w| {
+                    // safe, unchecked: a per-node position counter can never exceed that
+                    // node's own degree, which `checked_increment` above already validated
+                    // fits `D`'s width.
+                    // one claim for both: other threads may be placing edges of `u` too
+                    let pos = D::widen(*offsets_s.get(u))
+                        + counters.get(u).fetch_add_one_widened(Ordering::Relaxed);
+                    *neighbors.get_mut(pos) = Ix::new(v);
+                    *edgelabels.get_mut(pos) = w;
+                }
+            };
+            // one monomorphized pass per value reader: no per-edge mode branch
+            match (E::is_weighted(), parsing) {
+                (true, WeightParsing::Fast) => Self::parallel_edge_labels_parse_mtx_with(
+                    path.as_ref(),
+                    place,
+                    |tok| Ok(E::parse_weight::<false>(tok)?),
+                    E::new(1),
+                    threads,
+                )?,
+                (true, WeightParsing::Checked) => Self::parallel_edge_labels_parse_mtx_with(
+                    path.as_ref(),
+                    place,
+                    |tok| Ok(E::parse_weight::<true>(tok)?),
+                    E::new(1),
+                    threads,
+                )?,
+                (false, _) => Self::parallel_edge_labels_parse_mtx_with(
+                    path.as_ref(),
+                    place,
+                    |tok| {
+                        std::str::from_utf8(tok)
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .map(E::new)
+                            .ok_or_else(|| {
+                                format!(
+                                    "value {:?} isn't a non-negative integer, which edge labels are",
+                                    String::from_utf8_lossy(tok)
+                                )
+                                .into()
+                            })
+                    },
+                    E::new(0),
+                    threads,
+                )?,
+            }
             Self::sort_edges_with_labels::<D>(
                 offsets_s,
                 neighbors.shared_slice(),
@@ -147,6 +188,49 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         }
 
         Ok(cache)
+    }
+
+    /// Checks, once per file, that the edges' labels can hold the values a MatrixMarket file
+    /// declares: non-negative integer labels hold `integer` values (not skew-symmetric ones,
+    /// whose mirrored values are negated); weights hold those of their [`WeightDomain`], but
+    /// never `complex` ones. Unlabelled edges ignore values.
+    fn check_mtx_values(header: &MtxHeader) -> Result<(), Box<dyn std::error::Error>> {
+        if !E::is_labeled() {
+            return Ok(());
+        }
+        let skew = header.symmetry == MtxSymmetry::SkewSymmetric;
+        let ty = crate::utils::type_of::<E>();
+        if E::is_weighted() {
+            let domain = E::weight_domain();
+            return match header.field {
+                MtxField::Complex => Err(format!(
+                    "error edge weights (`{ty}`) are real, so a MatrixMarket file of complex values can't be loaded with them"
+                )
+                .into()),
+                MtxField::Real if domain != WeightDomain::Real => Err(format!(
+                    "error edge weights `{ty}` are integers, so a MatrixMarket file of real values can't be loaded with them: use a floating point weight"
+                )
+                .into()),
+                MtxField::Integer | MtxField::Real
+                    if skew && domain == WeightDomain::Unsigned =>
+                {
+                    Err(format!(
+                        "error edge weights `{ty}` are unsigned, so a skew-symmetric MatrixMarket file (whose mirrored values are negated) can't be loaded with them: use a signed or floating point weight"
+                    )
+                    .into())
+                }
+                _ => Ok(()),
+            };
+        }
+        match header.field {
+            MtxField::Real | MtxField::Complex => Err(format!(
+                "error edge labels are integers, so a MatrixMarket file of {} values can't be loaded with them: load it with unlabelled edges",
+                header.field
+            )
+            .into()),
+            MtxField::Integer if skew => Err("error edge labels are non-negative integers, so a skew-symmetric MatrixMarket file (whose mirrored values are negated) can't be loaded with them: load it with unlabelled edges".into()),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -979,6 +1063,315 @@ mod test {
         .unwrap();
         assert_eq!((g.edge_label(0), g.edge_label(1)), (Label(5), Label(7)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every arc `(u, v, weight)` of a graph, in flat edge order.
+    fn weighted_arcs<T: crate::graph::EdgeWeight>(
+        g: &crate::graph::DiGraph<VoidLabel, crate::graph::Weighted<T>, usize>,
+    ) -> Vec<(usize, usize, T)> {
+        (0..g.size())
+            .flat_map(|u| {
+                g.weighted_neighbours(u)
+                    .unwrap()
+                    .map(move |(v, w)| (u, v, w.0))
+            })
+            .collect()
+    }
+
+    fn load_weighted<T: crate::graph::EdgeWeight>(
+        path: &std::path::Path,
+        id: &str,
+        parsing: crate::graph::WeightParsing,
+    ) -> Result<crate::graph::DiGraph<VoidLabel, crate::graph::Weighted<T>, usize>, String> {
+        crate::graph::DiGraph::<VoidLabel, crate::graph::Weighted<T>, usize>::from_file_with_weight_parsing(
+            path,
+            Some(format!("{id}_{}", unique_run_tag())),
+            Some(2),
+            parsing,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Integer and real values load into every weight type that holds them, in both parsing
+    /// modes, alike.
+    #[test]
+    fn mtx_weights_load_into_every_weight_type() {
+        use crate::graph::WeightParsing::{Checked, Fast};
+        let dir = unique_test_dir("mtx_weights");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let int = write(
+            &dir,
+            "int",
+            "%%MatrixMarket matrix coordinate integer general\n3 3 4\n1 2 5\n1 3 250\n2 3 0\n3 1 17\n",
+        );
+        let expected = [(0, 1, 5), (0, 2, 250), (1, 2, 0), (2, 0, 17)];
+        macro_rules! check_int {
+            ($($t:ty),*) => {$(
+                for parsing in [Fast, Checked] {
+                    let g = load_weighted::<$t>(&int, concat!("int_", stringify!($t)), parsing)
+                        .unwrap_or_else(|e| panic!("{} {parsing:?}: {e}", stringify!($t)));
+                    let want: Vec<(usize, usize, $t)> =
+                        expected.iter().map(|&(u, v, w)| (u, v, w as $t)).collect();
+                    assert_eq!(weighted_arcs(&g), want, "{} {parsing:?}", stringify!($t));
+                }
+            )*};
+        }
+        check_int!(u8, u16, u32, u64, usize, i16, i32, i64, f32, f64);
+
+        let real = write(
+            &dir,
+            "real",
+            "%%MatrixMarket matrix coordinate real general\n2 2 2\n1 2 0.5\n2 1 -2.5e-1\n",
+        );
+        for parsing in [Fast, Checked] {
+            let g = load_weighted::<f64>(&real, "real_f64", parsing).unwrap();
+            assert_eq!(weighted_arcs(&g), vec![(0, 1, 0.5), (1, 0, -0.25)]);
+            let g = load_weighted::<f32>(&real, "real_f32", parsing).unwrap();
+            assert_eq!(weighted_arcs(&g), vec![(0, 1, 0.5f32), (1, 0, -0.25)]);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Symmetric entries weigh the same both ways, skew-symmetric ones the opposite, and pattern
+    /// files' arcs weigh one.
+    #[test]
+    fn mtx_mirrored_and_pattern_weights() {
+        use crate::graph::WeightParsing::Fast;
+        let dir = unique_test_dir("mtx_weights_mirrored");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let sorted = |mut a: Vec<(usize, usize, i32)>| {
+            a.sort();
+            a
+        };
+        let sym = write(
+            &dir,
+            "sym",
+            "%%MatrixMarket matrix coordinate integer symmetric\n3 3 2\n2 1 4\n3 3 9\n",
+        );
+        let g = load_weighted::<i32>(&sym, "sym", Fast).unwrap();
+        assert_eq!(
+            sorted(weighted_arcs(&g)),
+            vec![(0, 1, 4), (1, 0, 4), (2, 2, 9)]
+        );
+        let skew = write(
+            &dir,
+            "skew",
+            "%%MatrixMarket matrix coordinate integer skew-symmetric\n2 2 1\n2 1 3\n",
+        );
+        let g = load_weighted::<i32>(&skew, "skew", Fast).unwrap();
+        assert_eq!(sorted(weighted_arcs(&g)), vec![(0, 1, -3), (1, 0, 3)]);
+        let pattern = write(
+            &dir,
+            "pattern",
+            "%%MatrixMarket matrix coordinate pattern general\n2 2 2\n1 2\n2 1\n",
+        );
+        let g = load_weighted::<f32>(&pattern, "pattern", Fast).unwrap();
+        assert_eq!(weighted_arcs(&g), vec![(0, 1, 1.0), (1, 0, 1.0)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Values a weight type can't hold: refused per file whatever the mode (it costs nothing),
+    /// refused per value only when checked; fast parsing loads them as something.
+    #[test]
+    fn mtx_weights_fast_trusts_checked_validates() {
+        use crate::graph::WeightParsing::{Checked, Fast};
+        let dir = unique_test_dir("mtx_weights_checked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+
+        // per file: the header declares values the type can't hold
+        for (name, text, expected) in [
+            (
+                "real",
+                "%%MatrixMarket matrix coordinate real general\n2 2 1\n1 2 0.5\n",
+                "real values",
+            ),
+            (
+                "complex",
+                "%%MatrixMarket matrix coordinate complex general\n2 2 1\n1 2 1 1\n",
+                "complex",
+            ),
+            (
+                "skew",
+                "%%MatrixMarket matrix coordinate integer skew-symmetric\n2 2 1\n2 1 3\n",
+                "unsigned",
+            ),
+        ] {
+            let path = write(&dir, name, text);
+            for parsing in [Fast, Checked] {
+                let err = load_weighted::<u32>(&path, name, parsing)
+                    .err()
+                    .unwrap_or_else(|| panic!("{name} {parsing:?}: loaded"));
+                assert!(err.contains(expected), "{name} {parsing:?}: {err}");
+            }
+        }
+
+        // per value: only checked parsing looks
+        for (name, value, ty_ok) in [
+            ("overflow", "70000", false),
+            ("negative", "-3", false),
+            ("garbage", "abc", false),
+            ("fits", "65535", true),
+        ] {
+            let path = write(
+                &dir,
+                name,
+                &format!(
+                    "%%MatrixMarket matrix coordinate integer general\n2 2 2\n1 2 1\n2 1 {value}\n"
+                ),
+            );
+            load_weighted::<u16>(&path, name, Fast)
+                .unwrap_or_else(|e| panic!("{name}: fast parsing failed: {e}"));
+            let checked = load_weighted::<u16>(&path, name, Checked);
+            assert_eq!(checked.is_ok(), ty_ok, "{name}: {checked:?}");
+            if let Err(e) = checked {
+                assert!(e.contains(value) && e.contains("u16"), "{name}: {e}");
+            }
+        }
+        let nan = write(
+            &dir,
+            "nan",
+            "%%MatrixMarket matrix coordinate real general\n2 2 1\n1 2 nan\n",
+        );
+        assert!(load_weighted::<f64>(&nan, "nan_fast", Fast).is_ok());
+        assert!(load_weighted::<f64>(&nan, "nan_checked", Checked).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A weighted cache only opens with its own weight type: same-sized ones would misread it.
+    #[test]
+    fn weighted_caches_open_only_with_their_weight_type() {
+        use crate::graph::{DiGraph, Weighted, label::EdgeLabel};
+        let dir = unique_test_dir("mtx_weights_reopen");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let path = write(
+            &dir,
+            "w",
+            "%%MatrixMarket matrix coordinate integer general\n2 2 1\n1 2 3\n",
+        );
+        let g = load_weighted::<u32>(&path, "reopen", crate::graph::WeightParsing::Fast).unwrap();
+        let file = g.cache_index_filename();
+        DiGraph::<VoidLabel, Weighted<u32>, usize>::open(&file, None, Some(1)).unwrap();
+        let Err(err) = DiGraph::<VoidLabel, Weighted<f32>, usize>::open(&file, None, Some(1))
+        else {
+            panic!("opened u32 weights as f32 ones");
+        };
+        assert!(err.to_string().contains("f32"), "{err}");
+        // an unweighted label of the same size still opens it: it doesn't read weights
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        #[repr(transparent)]
+        struct Label32(u32);
+        unsafe impl bytemuck::Zeroable for Label32 {}
+        unsafe impl bytemuck::Pod for Label32 {}
+        impl crate::graph::E for Label32 {
+            fn new(v: usize) -> Self {
+                Label32(v as u32)
+            }
+            fn is_labeled() -> bool {
+                true
+            }
+        }
+        DiGraph::<VoidLabel, Label32, usize>::open(&file, None, Some(1)).unwrap();
+        // and a cache of plain labels doesn't open as weights
+        let labels = DiGraph::<VoidLabel, EdgeLabel, usize>::from_file(
+            &path,
+            Some(format!("reopen_labels_{}", unique_run_tag())),
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            DiGraph::<VoidLabel, Weighted<usize>, usize>::open(
+                labels.cache_index_filename(),
+                None,
+                Some(1)
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The byte scanner reads messy files like clean ones: CRLF line ends, tabs, padding,
+    /// comments and blank lines between entries, and no final line end.
+    #[test]
+    fn mtx_scanner_tolerates_layout_but_not_bad_indices() {
+        use crate::graph::WeightParsing::Checked;
+        let dir = unique_test_dir("mtx_scanner");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let clean = write(
+            &dir,
+            "clean",
+            "%%MatrixMarket matrix coordinate integer general\n3 3 3\n1 2 7\n2 3 8\n3 1 9\n",
+        );
+        let messy = write(
+            &dir,
+            "messy",
+            "%%MatrixMarket matrix coordinate integer general\r\n% header comment\r\n3 3 3\r\n  1\t2   7  \r\n\r\n% between\r\n\t2 3\t8\n   \n3 1 9",
+        );
+        let want = weighted_arcs(&load_weighted::<u64>(&clean, "clean", Checked).unwrap());
+        let got = weighted_arcs(&load_weighted::<u64>(&messy, "messy", Checked).unwrap());
+        assert_eq!(got, want);
+        assert_eq!(want, vec![(0, 1, 7), (1, 2, 8), (2, 0, 9)]);
+
+        for (name, line, expected) in [
+            ("letter", "1x 2 3", "malformed index"),
+            ("negative", "-1 2 3", "malformed index"),
+            ("zero", "0 2 3", "1-based"),
+            ("huge", "99999999999999999999999 1 3", "malformed index"),
+        ] {
+            let path = write(
+                &dir,
+                name,
+                &format!("%%MatrixMarket matrix coordinate integer general\n3 3 1\n{line}\n"),
+            );
+            let err = load_weighted::<u64>(&path, name, Checked)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: loaded"));
+            assert!(err.contains(expected), "{name}: {err}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Many entries split over every parsing thread's byte range land once each, with their
+    /// weights, whichever range boundary they straddle.
+    #[test]
+    fn mtx_scanner_reads_each_entry_once_across_chunks() {
+        use crate::graph::WeightParsing::Fast;
+        let dir = unique_test_dir("mtx_scanner_chunks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        let n = 997;
+        let mut text = format!("%%MatrixMarket matrix coordinate integer general\n{n} {n} {n}\n");
+        // lines of varying length, so boundaries fall everywhere within them
+        for u in 1..=n {
+            let v = u % n + 1;
+            text += &format!("{u} {v} {}\n", u * 1_000_003 % 100_000);
+        }
+        let path = write(&dir, "ring", &text);
+        let g = load_weighted::<u32>(&path, "ring", Fast).unwrap();
+        let want: Vec<(usize, usize, u32)> = (1..=n)
+            .map(|u| (u - 1, u % n, (u * 1_000_003 % 100_000) as u32))
+            .collect();
+        assert_eq!(weighted_arcs(&g), want);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Formats carrying no weights refuse weighted labels instead of making them up.
+    #[test]
+    fn weightless_formats_refuse_weighted_labels() {
+        use crate::graph::Weighted;
+        assert!(GraphCache::<VoidLabel, VoidLabel, usize>::refuse_weights("GGCAT").is_ok());
+        assert!(
+            GraphCache::<VoidLabel, crate::graph::label::EdgeLabel, usize>::refuse_weights("GGCAT")
+                .is_ok()
+        );
+        let err = GraphCache::<VoidLabel, Weighted<f32>, usize>::refuse_weights("GGCAT")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("GGCAT") && err.contains("weight"), "{err}");
     }
 
     /// Files that aren't sparse square matrices are refused, saying why.

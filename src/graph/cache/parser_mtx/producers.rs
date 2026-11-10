@@ -1,14 +1,52 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Seek, SeekFrom},
+    io::{BufRead, BufReader, Seek},
     path::Path,
-    sync::Arc,
 };
 
 use crossbeam::thread;
 use portable_atomic::{AtomicUsize, Ordering};
 
 use super::{GraphCache, MtxField, MtxHeader, MtxSymmetry};
+
+/// Whitespace within a MatrixMarket line.
+#[inline(always)]
+fn is_blank(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | 0x0b | 0x0c)
+}
+
+/// Splits the next whitespace-separated token off `rest`.
+#[inline(always)]
+fn next_token<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
+    let from = rest.iter().position(|&b| !is_blank(b))?;
+    let len = rest[from..]
+        .iter()
+        .position(|&b| is_blank(b))
+        .unwrap_or(rest.len() - from);
+    let tok = &rest[from..from + len];
+    *rest = &rest[from + len..];
+    Some(tok)
+}
+
+/// The first token of `rest`, or nothing if it has none.
+#[inline(always)]
+fn first_token(mut rest: &[u8]) -> &[u8] {
+    next_token(&mut rest).unwrap_or(b"")
+}
+
+/// Parses a (non-empty) decimal index, failing on any non-digit or on overflow.
+#[inline(always)]
+fn parse_index(tok: &[u8]) -> Option<usize> {
+    let mut acc = 0usize;
+    for &b in tok {
+        let d = b.wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        acc = acc.checked_mul(10)?.checked_add(d as usize)?;
+    }
+    Some(acc)
+}
 
 #[allow(dead_code)]
 impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphCache<N, E, Ix> {
@@ -110,6 +148,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         })
     }
 
+    /// Parses every entry into `emit(i, j)` (0-based), mirrored entries both ways, returning how
+    /// many arcs were emitted.
     pub(super) fn parallel_no_labels_parse_mtx_with<F, P: AsRef<Path>>(
         path: P,
         emit: F,
@@ -118,292 +158,160 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
     where
         F: FnMut(usize, usize) + Send + Sync + Clone,
     {
-        let header = Self::parse_mtx_header(path.as_ref())?;
-        let file_len = std::fs::metadata(path.as_ref())?.len();
-        let (nrows, ncols, nnz_declared) = (header.nodes, header.nodes, header.entries);
-        let header_offset = header.data_offset;
-        // mirrored entries: each stands for an arc both ways
-        let symmetric = header.symmetry.mirrored();
-        let thread_load = file_len
-            .saturating_sub(header_offset)
-            .div_ceil(threads as u64);
-
-        let seen = Arc::new(AtomicUsize::new(0));
-        let edges_emitted = Arc::new(AtomicUsize::new(0));
-        thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
-            let mut handles = Vec::new();
-
-            for tid in 0..threads {
-                let mut local_seen = 0;
-                let mut local_edges_emitted = 0usize;
-                let begin_pos = std::cmp::min(header_offset + tid as u64 * thread_load, file_len);
-                let end_pos =
-                    std::cmp::min(header_offset + (tid + 1) as u64 * thread_load, file_len)
-                        as usize;
-                let p = path.as_ref();
-
-                let seen = seen.clone();
-                let edges_emitted = edges_emitted.clone();
-                let mut emit = emit.clone();
-
-                let handle = s.spawn(
-                    move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                        // open the file separately for each thread
-                        let file = File::open(p)?;
-                        let mut cur_pos = begin_pos as usize;
-
-                        // line up bufreader to next line start
-                        let mut rdr = BufReader::new(file);
-                        if tid == 0 {
-                            rdr.seek(SeekFrom::Start(begin_pos))?;
-                        } else {
-                            // this way we avoid the case where thread's bufreader startsoff
-                            // aligned and the first edge is skipped
-                            rdr.seek(SeekFrom::Start(begin_pos.saturating_sub(1)))?;
-                            cur_pos += rdr.skip_until(b'\n')?.saturating_sub(1);
-                        }
-
-                        let mut line = String::new();
-
-                        // the whole byte range, whatever the header declares: both passes over the
-                        // file must read the same entries (the total is checked against it after)
-                        while end_pos > cur_pos {
-                            line.clear();
-
-                            let n = rdr.read_line(&mut line)?;
-                            if n == 0 {
-                                break;
-                            } else {
-                                cur_pos += n;
-                            }
-
-                            let t = line.trim();
-                            if t.is_empty() || t.starts_with('%') {
-                                continue;
-                            }
-
-                            let mut it = t.split_whitespace();
-
-                            // 1st two tokens must be i j (1-based)
-                            let i1: usize = match it.next() {
-                                Some(s) => s.parse()?,
-                                None => continue, // malformed line; skip
-                            };
-
-                            let j1: usize = match it.next() {
-                                Some(s) => s.parse()?,
-                                None => continue, // malformed line; skip
-                            };
-
-                            // Convert to 0-based, also ensure in-bounds
-                            if i1 == 0 || j1 == 0 {
-                                return Err(format!(
-                                    "MatrixMarket indices are 1-based; found 0 ({line})"
-                                )
-                                .into());
-                            }
-
-                            let i = i1 - 1;
-                            let j = j1 - 1;
-
-                            if i >= nrows || j >= ncols {
-                                return Err(format!(
-                                    "Entry out of bounds: ({i},{j}) not in [{nrows}x{ncols}]"
-                                )
-                                .into());
-                            }
-
-                            // Emit edges:
-                            // first directed edge i --(w)--> j
-                            emit(i, j);
-                            local_edges_emitted += 1;
-
-                            // second directed edge (if symmetrical) j --(w)--> i
-                            if symmetric && i != j {
-                                emit(j, i);
-                                local_edges_emitted += 1;
-                            }
-
-                            local_seen += 1;
-                        }
-
-                        seen.add(local_seen, Ordering::Relaxed);
-                        edges_emitted.add(local_edges_emitted, Ordering::Relaxed);
-                        Ok(())
-                    },
-                );
-
-                handles.push(handle);
+        Self::parallel_scan_mtx_entries(path.as_ref(), threads, {
+            let mut emit = emit;
+            move |i, j, _, mirrored| {
+                emit(i, j);
+                if mirrored {
+                    emit(j, i);
+                }
+                Ok(())
             }
-
-            for (idx, handle) in handles.into_iter().enumerate() {
-                handle
-                    .join()
-                    .map_err(|e| -> Box<dyn std::error::Error> {
-                        format!("error joining thread {idx}: {:?}", e).into()
-                    })?
-                    .map_err(|e| -> Box<dyn std::error::Error> {
-                        format!("error in thread {idx}: {:?}", e).into()
-                    })?;
-            }
-            Ok(())
         })
-        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
-
-        let entries = seen.load(Ordering::Relaxed);
-        if entries != nnz_declared {
-            return Err(format!(
-                "error the MatrixMarket file declares {nnz_declared} entries, but has {entries}"
-            )
-            .into());
-        }
-
-        Ok(edges_emitted.load(Ordering::Relaxed))
     }
 
-    pub(super) fn parallel_edge_labels_parse_mtx_with<F, P: AsRef<Path>>(
+    /// Parses every entry into `emit(i, j, label)` (0-based), mirrored entries both ways. An
+    /// entry's label is `value(token)` of its value token (empty if missing), or `unit` for
+    /// `pattern` files, which have none; the reverse arc of a skew-symmetric entry gets the
+    /// label's [`negate_weight`](crate::graph::E::negate_weight). Which values `E` can hold must
+    /// already have been checked against the header (see `check_mtx_values`).
+    pub(super) fn parallel_edge_labels_parse_mtx_with<F, V, P: AsRef<Path>>(
         path: P,
         emit: F,
+        value: V,
+        unit: E,
         threads: usize,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(usize, usize, usize) + Send + Sync + Clone,
+        F: FnMut(usize, usize, E) + Send + Sync + Clone,
+        V: Fn(&[u8]) -> Result<E, Box<dyn std::error::Error + Send + Sync>> + Sync,
     {
         let header = Self::parse_mtx_header(path.as_ref())?;
-        let file_len = std::fs::metadata(path.as_ref())?.len();
-        let (nrows, ncols, nnz_declared) = (header.nodes, header.nodes, header.entries);
-        let header_offset = header.data_offset;
-        // mirrored entries: each stands for an arc both ways
+        let pattern = header.field == MtxField::Pattern;
+        let skew = header.symmetry == MtxSymmetry::SkewSymmetric;
+        let value = &value;
+        Self::parallel_scan_mtx_entries(path.as_ref(), threads, {
+            let mut emit = emit;
+            move |i, j, rest, mirrored| {
+                let w = if pattern {
+                    unit
+                } else {
+                    value(first_token(rest))?
+                };
+                emit(i, j, w);
+                if mirrored {
+                    emit(j, i, if skew { w.negate_weight() } else { w });
+                }
+                Ok(())
+            }
+        })?;
+        Ok(())
+    }
+
+    /// The scanner both passes share: memory maps the file, splits its body into one byte range
+    /// per thread (a line belongs to the range it starts in) and, for each entry `i j rest...`,
+    /// calls `entry(i, j, rest, mirrored)` with 0-based, bounds-checked `i` and `j`, the bytes
+    /// after them, and whether the entry also stands for the arc `j -> i`. Blank lines, comments
+    /// and lines of fewer than two tokens are skipped. Returns the number of arcs the entries
+    /// stand for, after checking their number against the header's.
+    ///
+    /// Works on raw bytes: no line buffers, no UTF-8 validation, indices parsed by a digit loop
+    /// (still validated: they index memory), and no shared counters touched per entry.
+    fn parallel_scan_mtx_entries<F>(
+        path: &Path,
+        threads: usize,
+        entry: F,
+    ) -> Result<usize, Box<dyn std::error::Error>>
+    where
+        F: FnMut(usize, usize, &[u8], bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+            + Send
+            + Clone,
+    {
+        let header = Self::parse_mtx_header(path)?;
+        let (nodes, nnz_declared) = (header.nodes, header.entries);
+        // mirrored entries: each (off-diagonal one) stands for an arc both ways
         let symmetric = header.symmetry.mirrored();
-        // labels are non-negative integers: they can hold integer values, or none
-        let pattern = match (header.field, header.symmetry) {
-            (MtxField::Pattern, _) => true,
-            (MtxField::Real | MtxField::Complex, _) => {
-                return Err(format!(
-                    "error edge labels are integers, so a MatrixMarket file of {} values can't be loaded with them: load it with unlabelled edges",
-                    header.field
-                )
-                .into());
-            }
-            (MtxField::Integer, MtxSymmetry::SkewSymmetric) => {
-                return Err("error edge labels are non-negative integers, so a skew-symmetric MatrixMarket file (whose mirrored values are negated) can't be loaded with them: load it with unlabelled edges".into());
-            }
-            (MtxField::Integer, _) => false,
-        };
-        let thread_load = file_len
-            .saturating_sub(header_offset)
-            .div_ceil(threads as u64);
+        let file = File::open(path)?;
+        // SAFETY: read only, and the input isn't expected to change while it's parsed (as for
+        // every memory mapped file of the cache)
+        let data = unsafe { memmap2::Mmap::map(&file)? };
+        let data: &[u8] = &data;
+        let body = (header.data_offset as usize).min(data.len());
+        let load = (data.len() - body).div_ceil(threads.max(1)).max(1);
 
-        let seen = Arc::new(AtomicUsize::new(0));
+        let (seen, arcs) = (AtomicUsize::new(0), AtomicUsize::new(0));
         thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
-            let mut handles = Vec::new();
-
+            let mut handles = Vec::with_capacity(threads);
             for tid in 0..threads {
-                let begin_pos = std::cmp::min(header_offset + tid as u64 * thread_load, file_len);
-                let end_pos =
-                    std::cmp::min(header_offset + (tid + 1) as u64 * thread_load, file_len)
-                        as usize;
-                let p = path.as_ref();
-
-                let seen = seen.clone();
-                let mut emit = emit.clone();
-
-                let handle = s.spawn(
+                let begin = (body + tid * load).min(data.len());
+                let end = (body + (tid + 1) * load).min(data.len());
+                let (seen, arcs) = (&seen, &arcs);
+                let mut entry = entry.clone();
+                handles.push(s.spawn(
                     move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                        // open the file separately for each thread
-                        let file = File::open(p)?;
-                        let mut cur_pos = begin_pos as usize;
-
-                        // line up bufreader to next line start
-                        let mut rdr = BufReader::new(file);
-                        if tid == 0 {
-                            rdr.seek(SeekFrom::Start(begin_pos))?;
+                        // the first line starting at or after `begin` (the body's first is at it)
+                        let mut start = if tid == 0 {
+                            begin
                         } else {
-                            // this way we avoid the case where thread's bufreader startsoff
-                            // aligned and the first edge is skipped
-                            rdr.seek(SeekFrom::Start(begin_pos.saturating_sub(1)))?;
-                            cur_pos += rdr.skip_until(b'\n')?.saturating_sub(1);
-                        }
+                            memchr::memchr(b'\n', &data[begin - 1..])
+                                .map_or(data.len(), |p| begin + p)
+                        };
+                        let (mut local_seen, mut local_arcs) = (0usize, 0usize);
+                        while start < end {
+                            let line_end = memchr::memchr(b'\n', &data[start..])
+                                .map_or(data.len(), |p| start + p);
+                            let line = &data[start..line_end];
+                            start = line_end + 1;
 
-                        let mut line = String::new();
-
-                        // the whole byte range, whatever the header declares: both passes over the
-                        // file must read the same entries (the total is checked against it after)
-                        while end_pos > cur_pos {
-                            line.clear();
-
-                            let n = rdr.read_line(&mut line)?;
-                            if n == 0 {
-                                break;
-                            } else {
-                                cur_pos += n;
-                            }
-
-                            let t = line.trim();
-                            if t.is_empty() || t.starts_with('%') {
-                                continue;
-                            }
-
-                            let mut it = t.split_whitespace();
-
-                            // 1st two tokens must be i j (1-based)
-                            let i1: usize = match it.next() {
-                                Some(s) => s.parse()?,
-                                None => continue, // malformed line; skip
+                            let mut rest = line;
+                            let Some(i1) = next_token(&mut rest) else {
+                                continue; // blank
                             };
-
-                            let j1: usize = match it.next() {
-                                Some(s) => s.parse()?,
-                                None => continue, // malformed line; skip
-                            };
-
-                            // Convert to 0-based, also ensure in-bounds
-                            if i1 == 0 || j1 == 0 {
-                                return Err(format!(
-                                    "MatrixMarket indices are 1-based; found 0 ({line})"
-                                )
-                                .into());
+                            if i1[0] == b'%' {
+                                continue; // comment
                             }
-
-                            let i = i1 - 1;
-                            let j = j1 - 1;
-
-                            let w: usize = if pattern {
-                                0
-                            } else {
-                                match it.next() {
-                                    Some(s) => s.parse().map_err(|_| {
-                                        format!("error entry {line:?}'s value {s:?} isn't a non-negative integer, which edge labels are")
-                                    })?,
-                                    None => 0, // malformed line; skip
+                            let Some(j1) = next_token(&mut rest) else {
+                                continue; // malformed: skipped (and then miscounted)
+                            };
+                            let (i, j) = match (parse_index(i1), parse_index(j1)) {
+                                (Some(i1), Some(j1)) if i1 > 0 && j1 > 0 => (i1 - 1, j1 - 1),
+                                (Some(0), _) | (_, Some(0)) => {
+                                    return Err(format!(
+                                        "MatrixMarket indices are 1-based; found 0 ({:?})",
+                                        String::from_utf8_lossy(line).trim()
+                                    )
+                                    .into());
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "error MatrixMarket entry {:?} has a malformed index",
+                                        String::from_utf8_lossy(line).trim()
+                                    )
+                                    .into());
                                 }
                             };
-
-                            if i >= nrows || j >= ncols {
+                            if i >= nodes || j >= nodes {
                                 return Err(format!(
-                                    "Entry out of bounds: ({i},{j}) not in [{nrows}x{ncols}]"
+                                    "Entry out of bounds: ({i},{j}) not in [{nodes}x{nodes}]"
                                 )
                                 .into());
                             }
-
-                            // Emit edges:
-                            // first directed edge i --(w)--> j
-                            emit(i, j, w);
-
-                            // second directed edge (if symmetrical) j --(w)--> i
-                            if symmetric && i != j {
-                                emit(j, i, w);
-                            }
-
-                            seen.add(1, Ordering::Relaxed);
+                            let mirrored = symmetric && i != j;
+                            entry(i, j, rest, mirrored).map_err(|e| {
+                                format!(
+                                    "error in entry {:?}: {e}",
+                                    String::from_utf8_lossy(line).trim()
+                                )
+                            })?;
+                            local_seen += 1;
+                            local_arcs += 1 + mirrored as usize;
                         }
+                        seen.add(local_seen, Ordering::Relaxed);
+                        arcs.add(local_arcs, Ordering::Relaxed);
                         Ok(())
                     },
-                );
-
-                handles.push(handle);
+                ));
             }
-
             for (idx, handle) in handles.into_iter().enumerate() {
                 handle
                     .join()
@@ -418,6 +326,8 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
 
+        // the whole byte range was read, whatever the header declares: both passes over the file
+        // read the same entries, and their total must be the declared one
         let entries = seen.load(Ordering::Relaxed);
         if entries != nnz_declared {
             return Err(format!(
@@ -425,8 +335,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
             )
             .into());
         }
-
-        Ok(())
+        Ok(arcs.load(Ordering::Relaxed))
     }
 
     #[deprecated]

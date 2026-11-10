@@ -41,6 +41,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         id: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
+        Self::refuse_weights("GGCAT")?;
 
         let path_str = path
             .as_ref()
@@ -92,6 +93,7 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
         in_fst: Option<fn(usize) -> bool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::guarantee_caching_dir()?;
+        Self::refuse_weights("GGCAT")?;
 
         let path_str = path
             .as_ref()

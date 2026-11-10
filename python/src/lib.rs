@@ -38,7 +38,8 @@ use sparx::components::{
     biconnected::Biconnectivity, strong::StronglyConnectedComponents, weak::ConnectedComponents,
 };
 use sparx::graph::{
-    CacheFile, Directed, Directedness, GraphMemoryMap, IndexType, Undirected, UndirectedMode,
+    CacheFile, Directed, Directedness, E, GraphMemoryMap, IndexType, Undirected, UndirectedMode,
+    WeightMerge, WeightParsing, Weighted,
 };
 use sparx::k_core::{
     batagelj_zaversnik::AlgoBatageljZaversnik,
@@ -54,7 +55,9 @@ use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
 use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
 use sparx::trails::bfs::BFSDists;
 
-type G<Ix, Dir> = GraphMemoryMap<(), (), Ix, Dir>;
+type G<Ix, Dir, L = ()> = GraphMemoryMap<(), L, Ix, Dir>;
+/// Weighted graphs' edge labels: `f64` weights.
+type W = Weighted<f64>;
 type Res<T> = Result<T, Box<dyn Error>>;
 
 /// A result, built into Python objects once the GIL is held again.
@@ -113,18 +116,35 @@ fn ix_array<I: Ix>(s: &[I]) -> Out {
     array(s.iter().map(|x| x.index() as i64).collect::<Vec<_>>())
 }
 
-/// A graph of either index type.
+/// A graph of either index type, unweighted or with `f64` edge weights.
 enum AnyG<Dir: Directedness> {
     U32(G<u32, Dir>),
     U64(G<usize, Dir>),
+    U32W(G<u32, Dir, W>),
+    U64W(G<usize, Dir, W>),
 }
 
-/// Runs `$body` on the graph, whatever its index type, as `$g: &G<Ix, Dir>`.
+impl<Dir: Directedness> AnyG<Dir> {
+    fn index(&self) -> &'static str {
+        match self {
+            AnyG::U32(_) | AnyG::U32W(_) => "u32",
+            AnyG::U64(_) | AnyG::U64W(_) => "u64",
+        }
+    }
+
+    fn weighted(&self) -> bool {
+        matches!(self, AnyG::U32W(_) | AnyG::U64W(_))
+    }
+}
+
+/// Runs `$body` on the graph, whatever its index type and weights, as `$g: &G<Ix, Dir, L>`.
 macro_rules! with_graph {
     ($any:expr, $g:ident => $body:expr) => {
         match $any {
             AnyG::U32($g) => $body,
             AnyG::U64($g) => $body,
+            AnyG::U32W($g) => $body,
+            AnyG::U64W($g) => $body,
         }
     };
 }
@@ -233,6 +253,27 @@ macro_rules! with_view {
     };
 }
 
+fn weight_parsing_of(name: &str) -> PyResult<WeightParsing> {
+    match name {
+        "fast" => Ok(WeightParsing::Fast),
+        "checked" => Ok(WeightParsing::Checked),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown weight parsing {name:?}: expected 'fast' or 'checked'"
+        ))),
+    }
+}
+
+fn weight_merge(name: &str) -> PyResult<WeightMerge> {
+    match name {
+        "sum" => Ok(WeightMerge::Sum),
+        "min" => Ok(WeightMerge::Min),
+        "max" => Ok(WeightMerge::Max),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown weight merge {name:?}: expected 'sum', 'min' or 'max'"
+        ))),
+    }
+}
+
 fn undirected_mode(name: &str) -> PyResult<UndirectedMode> {
     match name {
         "collapse" => Ok(UndirectedMode::Collapse),
@@ -299,7 +340,7 @@ fn component_kind(kind: &str) -> PyResult<bool> {
 /// The files in the cache named after `g`'s cache entry (`<kind>[_<seq>]_<hashed id>.<ext>`, in
 /// the cache directory or its subdirectories for some kinds): its own, and its algorithms'
 /// results and scratch files.
-fn files_of<I: Ix, Dir: Directedness>(g: &G<I, Dir>) -> Res<HashSet<PathBuf>> {
+fn files_of<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>) -> Res<HashSet<PathBuf>> {
     let mut files = HashSet::new();
     // a file of each directory algorithm files go to, named after the entry's hashed id
     for kind in [CacheFile::General, CacheFile::ExactCloseness] {
@@ -329,7 +370,10 @@ fn files_of<I: Ix, Dir: Directedness>(g: &G<I, Dir>) -> Res<HashSet<PathBuf>> {
 /// graph's own among them) and other graphs' (derived ones included, named after their own ids)
 /// are left alone. Algorithms on one graph run one at a time (see `Inner`), so the new files
 /// are this call's.
-fn cleaning<I: Ix, Dir: Directedness>(g: &G<I, Dir>, f: impl FnOnce() -> Res<Out>) -> Res<Out> {
+fn cleaning<I: Ix, L: E, Dir: Directedness>(
+    g: &G<I, Dir, L>,
+    f: impl FnOnce() -> Res<Out>,
+) -> Res<Out> {
     let before = files_of(g)?;
     let result = f();
     if result.is_err()
@@ -349,7 +393,7 @@ fn cleaning<I: Ix, Dir: Directedness>(g: &G<I, Dir>, f: impl FnOnce() -> Res<Out
     result
 }
 
-fn triangles<I: Ix, Tx: TriangleCount + Element>(g: &G<I, Undirected>) -> Res<Out> {
+fn triangles<I: Ix, L: E, Tx: TriangleCount + Element>(g: &G<I, Undirected, L>) -> Res<Out> {
     cleaning(g, || {
         let mut t = Triangles::<_, _, _, Tx>::new_tx(g)?;
         let v: Vec<Tx> = (0..g.width()).map(|e| t.triangles(e)).collect();
@@ -359,7 +403,7 @@ fn triangles<I: Ix, Tx: TriangleCount + Element>(g: &G<I, Undirected>) -> Res<Ou
 }
 
 #[cfg(feature = "gpu")]
-fn triangles_gpu<I: Ix, Tx: TriangleCount + Element>(g: &G<I, Undirected>) -> Res<Out> {
+fn triangles_gpu<I: Ix, L: E, Tx: TriangleCount + Element>(g: &G<I, Undirected, L>) -> Res<Out> {
     cleaning(g, || {
         use sparx::gpu::{GpuBackend, WgpuBackend};
         let backend = WgpuBackend::new()?;
@@ -371,8 +415,8 @@ fn triangles_gpu<I: Ix, Tx: TriangleCount + Element>(g: &G<I, Undirected>) -> Re
     })
 }
 
-fn directed_triangles<I: Ix, Tx: TriangleCount + Element>(
-    g: &G<I, Directed>,
+fn directed_triangles<I: Ix, L: E, Tx: TriangleCount + Element>(
+    g: &G<I, Directed, L>,
     kind: DirectedTriangleType,
 ) -> Res<Out> {
     cleaning(g, || {
@@ -383,7 +427,10 @@ fn directed_triangles<I: Ix, Tx: TriangleCount + Element>(
     })
 }
 
-fn k_truss<I: Ix, Tx: TriangleCount + Element>(g: &G<I, Undirected>, pkt: bool) -> Res<Out> {
+fn k_truss<I: Ix, L: E, Tx: TriangleCount + Element>(
+    g: &G<I, Undirected, L>,
+    pkt: bool,
+) -> Res<Out> {
     cleaning(g, || {
         let v = if pkt {
             let mut a = AlgoPKT::<_, _, _, Tx>::new_tx(g, g.thread_num())?;
@@ -400,8 +447,8 @@ fn k_truss<I: Ix, Tx: TriangleCount + Element>(g: &G<I, Undirected>, pkt: bool) 
     })
 }
 
-fn directed_k_truss<I: Ix, Tx: TriangleCount + Element>(
-    g: &G<I, Directed>,
+fn directed_k_truss<I: Ix, L: E, Tx: TriangleCount + Element>(
+    g: &G<I, Directed, L>,
     pkt: bool,
     kind: DirectedTriangleType,
 ) -> Res<Out> {
@@ -421,7 +468,7 @@ fn directed_k_truss<I: Ix, Tx: TriangleCount + Element>(
     })
 }
 
-fn k_core<I: Ix, Cx: CoreCount + Element>(g: &G<I, Undirected>, bz: bool) -> Res<Out> {
+fn k_core<I: Ix, L: E, Cx: CoreCount + Element>(g: &G<I, Undirected, L>, bz: bool) -> Res<Out> {
     cleaning(g, || {
         let v = if bz {
             let mut a = AlgoBatageljZaversnik::<_, _, _, Cx>::new_cx(g)?;
@@ -438,8 +485,8 @@ fn k_core<I: Ix, Cx: CoreCount + Element>(g: &G<I, Undirected>, bz: bool) -> Res
     })
 }
 
-fn directed_k_core<I: Ix, Cx: CoreCount + Element>(
-    g: &G<I, Directed>,
+fn directed_k_core<I: Ix, L: E, Cx: CoreCount + Element>(
+    g: &G<I, Directed, L>,
     degree: CoreDegree,
 ) -> Res<Out> {
     cleaning(g, || {
@@ -472,12 +519,12 @@ fn degree_type(name: &str) -> PyResult<DegreeType> {
     }
 }
 
-fn degree_assortativity_of<I: Ix>(g: &G<I, Undirected>, c: Correlation) -> Res<Out> {
+fn degree_assortativity_of<I: Ix, L: E>(g: &G<I, Undirected, L>, c: Correlation) -> Res<Out> {
     cleaning(g, || Ok(number(degree_assortativity(g, c)?)))
 }
 
 #[cfg(feature = "gpu")]
-fn degree_assortativity_gpu_of<I: Ix>(g: &G<I, Undirected>, c: Correlation) -> Res<Out> {
+fn degree_assortativity_gpu_of<I: Ix, L: E>(g: &G<I, Undirected, L>, c: Correlation) -> Res<Out> {
     cleaning(g, || {
         use sparx::gpu::{GpuBackend, WgpuBackend};
         let backend = WgpuBackend::new()?;
@@ -487,8 +534,8 @@ fn degree_assortativity_gpu_of<I: Ix>(g: &G<I, Undirected>, c: Correlation) -> R
     })
 }
 
-fn directed_degree_assortativity_of<I: Ix>(
-    g: &G<I, Directed>,
+fn directed_degree_assortativity_of<I: Ix, L: E>(
+    g: &G<I, Directed, L>,
     x: DegreeType,
     y: DegreeType,
     c: Correlation,
@@ -497,8 +544,8 @@ fn directed_degree_assortativity_of<I: Ix>(
 }
 
 #[cfg(feature = "gpu")]
-fn directed_degree_assortativity_gpu_of<I: Ix>(
-    g: &G<I, Directed>,
+fn directed_degree_assortativity_gpu_of<I: Ix, L: E>(
+    g: &G<I, Directed, L>,
     x: DegreeType,
     y: DegreeType,
     c: Correlation,
@@ -519,12 +566,15 @@ fn directed_degree_assortativity_gpu_of<I: Ix>(
     })
 }
 
-fn numeric_assortativity_of<I: Ix, Dir: Directedness>(g: &G<I, Dir>, values: &[f64]) -> Res<Out> {
+fn numeric_assortativity_of<I: Ix, L: E, Dir: Directedness>(
+    g: &G<I, Dir, L>,
+    values: &[f64],
+) -> Res<Out> {
     cleaning(g, || Ok(number(numeric_assortativity(g, values)?)))
 }
 
-fn attribute_assortativity_of<I: Ix, Dir: Directedness>(
-    g: &G<I, Dir>,
+fn attribute_assortativity_of<I: Ix, L: E, Dir: Directedness>(
+    g: &G<I, Dir, L>,
     labels: &[usize],
 ) -> Res<Out> {
     cleaning(g, || Ok(number(attribute_assortativity(g, labels)?)))
@@ -555,7 +605,7 @@ fn optional_ix_array<I: Ix>(s: &[I]) -> Out {
     )
 }
 
-fn biconnectivity<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
+fn biconnectivity<I: Ix, L: E>(g: &G<I, Undirected, L>) -> Res<Out> {
     cleaning(g, || {
         let mut b = Biconnectivity::new(g)?;
         let bridges = b
@@ -585,7 +635,7 @@ fn biconnectivity<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
 }
 
 /// Each biconnected component's nodes, sorted: those listed in it, and its head.
-fn biconnected_components<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
+fn biconnected_components<I: Ix, L: E>(g: &G<I, Undirected, L>) -> Res<Out> {
     cleaning(g, || {
         let mut b = Biconnectivity::new(g)?;
         let mut sets: Vec<Vec<i64>> = b.heads().iter().map(|h| vec![h.index() as i64]).collect();
@@ -603,7 +653,7 @@ fn biconnected_components<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
     })
 }
 
-fn components<I: Ix, Dir: Directedness>(g: &G<I, Dir>, strong: bool) -> Res<Out> {
+fn components<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>, strong: bool) -> Res<Out> {
     cleaning(g, || {
         let (components, count, sizes) = if strong {
             let mut c = StronglyConnectedComponents::new(g)?;
@@ -632,7 +682,7 @@ fn components<I: Ix, Dir: Directedness>(g: &G<I, Dir>, strong: bool) -> Res<Out>
     })
 }
 
-fn clustering<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
+fn clustering<I: Ix, L: E>(g: &G<I, Undirected, L>) -> Res<Out> {
     cleaning(g, || {
         let mut c = ClusteringCoefficient::new(g)?;
         let local: Vec<f64> = (0..g.size())
@@ -651,7 +701,7 @@ fn clustering<I: Ix>(g: &G<I, Undirected>) -> Res<Out> {
     })
 }
 
-fn directed_clustering<I: Ix>(g: &G<I, Directed>) -> Res<Out> {
+fn directed_clustering<I: Ix, L: E>(g: &G<I, Directed, L>) -> Res<Out> {
     cleaning(g, || {
         let mut c = DirectedClusteringCoefficient::new(g)?;
         let local = c.local_clustering_coefficients().to_vec();
@@ -664,7 +714,7 @@ fn directed_clustering<I: Ix>(g: &G<I, Directed>) -> Res<Out> {
     })
 }
 
-fn louvain<I: Ix>(g: &G<I, Undirected>, refinement: Refinement) -> Res<Out> {
+fn louvain<I: Ix, L: E>(g: &G<I, Undirected, L>, refinement: Refinement) -> Res<Out> {
     cleaning(g, || {
         let mut l =
             AlgoGVELouvain::<_, _, _, f64>::new_with_refinement(g, g.thread_num(), refinement)?;
@@ -679,7 +729,7 @@ fn louvain<I: Ix>(g: &G<I, Undirected>, refinement: Refinement) -> Res<Out> {
     })
 }
 
-fn directed_louvain<I: Ix>(g: &G<I, Directed>, refinement: Refinement) -> Res<Out> {
+fn directed_louvain<I: Ix, L: E>(g: &G<I, Directed, L>, refinement: Refinement) -> Res<Out> {
     cleaning(g, || {
         let mut l = DirectedLouvain::new_with_refinement(g, 256, 0.0, refinement)?;
         let communities = ix_array(l.communities());
@@ -693,8 +743,8 @@ fn directed_louvain<I: Ix>(g: &G<I, Directed>, refinement: Refinement) -> Res<Ou
     })
 }
 
-fn hyperball_results<I: Ix, P: Precision, Dir: Directedness>(
-    mut hb: HyperBallInner<'_, (), (), I, P, f64, Dir>,
+fn hyperball_results<I: Ix, L: E, P: Precision, Dir: Directedness>(
+    mut hb: HyperBallInner<'_, (), L, I, P, f64, Dir>,
     normalized: bool,
 ) -> Res<Out> {
     let distances = hb.geodesic_distances().to_vec();
@@ -712,15 +762,18 @@ fn hyperball_results<I: Ix, P: Precision, Dir: Directedness>(
     ]))
 }
 
-fn hyperball<I: Ix, P: Precision, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<Out> {
+fn hyperball<I: Ix, L: E, P: Precision, Dir: Directedness>(
+    g: &G<I, Dir, L>,
+    normalized: bool,
+) -> Res<Out> {
     cleaning(g, || {
         hyperball_results(HyperBallInner::<_, _, _, P, f64, _>::new(g)?, normalized)
     })
 }
 
 #[cfg(feature = "gpu")]
-fn hyperball_gpu<I: Ix, P: Precision, Dir: Directedness>(
-    g: &G<I, Dir>,
+fn hyperball_gpu<I: Ix, L: E, P: Precision, Dir: Directedness>(
+    g: &G<I, Dir, L>,
     normalized: bool,
 ) -> Res<Out> {
     cleaning(g, || {
@@ -732,7 +785,7 @@ fn hyperball_gpu<I: Ix, P: Precision, Dir: Directedness>(
     })
 }
 
-fn closeness<I: Ix, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<Out> {
+fn closeness<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>, normalized: bool) -> Res<Out> {
     cleaning(g, || {
         let mut c = ExactClosenessCentrality::<_, _, _, f64, _>::new(g, Some(normalized))?;
         let v = c.centralities().to_vec();
@@ -741,8 +794,8 @@ fn closeness<I: Ix, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<O
     })
 }
 
-fn pagerank<I: Ix, Dir: Directedness>(
-    g: &G<I, Dir>,
+fn pagerank<I: Ix, L: E, Dir: Directedness>(
+    g: &G<I, Dir, L>,
     alpha: f64,
     tol: f64,
     max_iter: usize,
@@ -789,7 +842,7 @@ fn pagerank_params(alpha: f64, tol: f64, max_iter: usize) -> PyResult<()> {
     Ok(())
 }
 
-fn harmonic<I: Ix, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<Out> {
+fn harmonic<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>, normalized: bool) -> Res<Out> {
     cleaning(g, || {
         let mut c = ExactHarmonicCentrality::<_, _, _, f64, _>::new(g, Some(normalized))?;
         let v = c.centralities().to_vec();
@@ -798,7 +851,7 @@ fn harmonic<I: Ix, Dir: Directedness>(g: &G<I, Dir>, normalized: bool) -> Res<Ou
     })
 }
 
-fn lin<I: Ix, Dir: Directedness>(g: &G<I, Dir>) -> Res<Out> {
+fn lin<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>) -> Res<Out> {
     cleaning(g, || {
         let mut c = ExactLinCentrality::<_, _, _, f64, _>::new(g)?;
         let v = c.centralities().to_vec();
@@ -807,7 +860,7 @@ fn lin<I: Ix, Dir: Directedness>(g: &G<I, Dir>) -> Res<Out> {
     })
 }
 
-fn bfs<I: Ix, Dir: Directedness>(g: &G<I, Dir>, source: usize) -> Res<Out> {
+fn bfs<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>, source: usize) -> Res<Out> {
     cleaning(g, || {
         let mut b = BFSDists::new(g, source)?;
         // unreachable nodes are left at distance 0, like the source
@@ -827,24 +880,31 @@ fn bfs<I: Ix, Dir: Directedness>(g: &G<I, Dir>, source: usize) -> Res<Out> {
 
 // --- graphs -----------------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn open_graph<Dir: Directedness>(
     path: &str,
     index: &str,
     threads: Option<u8>,
     id: Option<String>,
     reopen: bool,
+    weighted: bool,
+    parsing: WeightParsing,
 ) -> Res<AnyG<Dir>> {
     macro_rules! open {
-        ($I:ty) => {
+        ($I:ty, $L:ty) => {
             match reopen {
-                true => G::<$I, Dir>::open(path, None, threads)?,
-                false => G::<$I, Dir>::from_file(path, id, threads)?,
+                true => G::<$I, Dir, $L>::open(path, None, threads)?,
+                false => {
+                    G::<$I, Dir, $L>::from_file_with_weight_parsing(path, id, threads, parsing)?
+                }
             }
         };
     }
-    Ok(match index {
-        "u32" => AnyG::U32(open!(u32)),
-        "u64" => AnyG::U64(open!(usize)),
+    Ok(match (index, weighted) {
+        ("u32", false) => AnyG::U32(open!(u32, ())),
+        ("u64", false) => AnyG::U64(open!(usize, ())),
+        ("u32", true) => AnyG::U32W(open!(u32, W)),
+        ("u64", true) => AnyG::U64W(open!(usize, W)),
         _ => return Err(format!("unknown index type {index:?}: expected 'u32' or 'u64'").into()),
     })
 }
@@ -859,12 +919,14 @@ fn reopen_as<D2: Directedness, Dir: Directedness>(
     Ok(match g {
         AnyG::U32(_) => AnyG::U32(G::<u32, D2>::open(file, None, threads)?),
         AnyG::U64(_) => AnyG::U64(G::<usize, D2>::open(file, None, threads)?),
+        AnyG::U32W(_) => AnyG::U32W(G::<u32, D2, W>::open(file, None, threads)?),
+        AnyG::U64W(_) => AnyG::U64W(G::<usize, D2, W>::open(file, None, threads)?),
     })
 }
 
 /// Removes a graph's cache entry (with every file left in the cache under its id, and the graphs
 /// derived from it).
-fn drop_graph<I: Ix, Dir: Directedness>(mut g: G<I, Dir>) -> Res<()> {
+fn drop_graph<I: Ix, L: E, Dir: Directedness>(mut g: G<I, Dir, L>) -> Res<()> {
     g.drop_cache()
 }
 
@@ -958,6 +1020,7 @@ impl<Dir: Directedness> Inner<Dir> {
     }
 
     /// Builds or reopens a graph with the GIL released.
+    #[allow(clippy::too_many_arguments)]
     fn load(
         py: Python<'_>,
         path: &Path,
@@ -966,6 +1029,8 @@ impl<Dir: Directedness> Inner<Dir> {
         keep_cache: bool,
         id: Option<String>,
         reopen: bool,
+        weighted: bool,
+        parsing: WeightParsing,
     ) -> PyResult<Self> {
         check_index(index)?;
         let path = path.to_string_lossy().into_owned();
@@ -976,7 +1041,8 @@ impl<Dir: Directedness> Inner<Dir> {
         let threads = Some(threads.unwrap_or_else(default_threads));
         let g = py
             .detach(|| {
-                open_graph::<Dir>(&path, index, threads, id, reopen).map_err(|e| e.to_string())
+                open_graph::<Dir>(&path, index, threads, id, reopen, weighted, parsing)
+                    .map_err(|e| e.to_string())
             })
             .map_err(PyRuntimeError::new_err)?;
         Ok(Self::new(g, keep_cache || reopen))
@@ -1087,8 +1153,15 @@ macro_rules! graph_class {
             /// graphs with under 4 billion nodes and edges). The graph's cache is dropped when it
             /// is closed (or garbage collected), unless `keep_cache` is true: then
             /// `open(graph.cache_file)` reopens it later without parsing the dataset again.
+            ///
+            /// With `weighted=True`, edges carry `f64` weights, read from a MatrixMarket file's
+            /// values (`pattern` files' edges weigh one; other formats carry no weights, and
+            /// fail), which every weight-aware algorithm then uses. `weight_parsing` is `"fast"`
+            /// (no per-value validation: malformed values give unspecified weights) or
+            /// `"checked"` (malformed, out of range or non-finite values fail).
             #[new]
-            #[pyo3(signature = (path, *, index = "u64", threads = None, keep_cache = false, id = None))]
+            #[pyo3(signature = (path, *, index = "u64", threads = None, keep_cache = false, id = None, weighted = false, weight_parsing = "fast"))]
+            #[allow(clippy::too_many_arguments)]
             fn new(
                 py: Python<'_>,
                 path: std::path::PathBuf,
@@ -1096,22 +1169,32 @@ macro_rules! graph_class {
                 threads: Option<u8>,
                 keep_cache: bool,
                 id: Option<String>,
+                weighted: bool,
+                weight_parsing: &str,
             ) -> PyResult<Self> {
-                let inner = Inner::load(py, &path, index, threads, keep_cache, id, false)?;
+                let parsing = weight_parsing_of(weight_parsing)?;
+                let inner = Inner::load(
+                    py, &path, index, threads, keep_cache, id, false, weighted, parsing,
+                )?;
                 Ok(Self { inner })
             }
 
             /// Reopens a graph kept in the cache (see `keep_cache`), from its `cache_file`. The
             /// reopened graph keeps its cache too.
+            /// A weighted graph reopens with `weighted=True` (and an unweighted one without).
             #[staticmethod]
-            #[pyo3(signature = (cache_file, *, index = "u64", threads = None))]
+            #[pyo3(signature = (cache_file, *, index = "u64", threads = None, weighted = false))]
             fn open(
                 py: Python<'_>,
                 cache_file: std::path::PathBuf,
                 index: &str,
                 threads: Option<u8>,
+                weighted: bool,
             ) -> PyResult<Self> {
-                let inner = Inner::load(py, &cache_file, index, threads, true, None, true)?;
+                let inner = Inner::load(
+                    py, &cache_file, index, threads, true, None, true, weighted,
+                    WeightParsing::Fast,
+                )?;
                 Ok(Self { inner })
             }
 
@@ -1156,10 +1239,39 @@ macro_rules! graph_class {
             /// Width of node and edge indices, `"u32"` or `"u64"`.
             #[getter]
             fn index(&self) -> PyResult<&'static str> {
-                self.inner.with(|g| {
-                    Ok(match g {
-                        AnyG::U32(_) => "u32",
-                        AnyG::U64(_) => "u64",
+                self.inner.with(|g| Ok(g.index()))
+            }
+
+            /// Whether edges carry weights (see the constructor's `weighted`).
+            #[getter]
+            fn is_weighted(&self) -> PyResult<bool> {
+                self.inner.with(|g| Ok(g.weighted()))
+            }
+
+            /// Weights of node `u`'s arcs (out-arcs, on a `DiGraph`), in `neighbours(u)`'s order:
+            /// ones, for an unweighted graph.
+            fn weights<'py>(&self, py: Python<'py>, u: usize) -> PyResult<Bound<'py, PyAny>> {
+                self.inner.check_node(u)?;
+                self.inner.run(py, |g| {
+                    with_graph!(g, g => {
+                        let w: Vec<f64> = g
+                            .weighted_neighbours(u)?
+                            .map(|(_, label)| label.weight::<f64>())
+                            .collect();
+                        Ok(array(w))
+                    })
+                })
+            }
+
+            /// Every arc's weight, in `csr()` order: ones, for an unweighted graph.
+            fn edge_weights<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                self.inner.run(py, |g| {
+                    with_graph!(g, g => {
+                        let mut w = Vec::with_capacity(g.width());
+                        for u in 0..g.size() {
+                            w.extend(g.weighted_neighbours(u)?.map(|(_, l)| l.weight::<f64>()));
+                        }
+                        Ok(array(w))
                     })
                 })
             }
@@ -1311,7 +1423,7 @@ graph_class!(UGraph, "Graph", {
         }
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => triangles::<_, T>(g))),
+            |g| with_graph!(g, g => with_width!(w, T => triangles::<_, _, T>(g))),
         )
     }
 
@@ -1327,7 +1439,7 @@ graph_class!(UGraph, "Graph", {
         let (pkt, w) = (truss_algorithm(algorithm)?, self::width(width)?);
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => k_truss::<_, T>(g, pkt))),
+            |g| with_graph!(g, g => with_width!(w, T => k_truss::<_, _, T>(g, pkt))),
         )
     }
 
@@ -1353,7 +1465,7 @@ graph_class!(UGraph, "Graph", {
         };
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => k_core::<_, T>(g, bz))),
+            |g| with_graph!(g, g => with_width!(w, T => k_core::<_, _, T>(g, bz))),
         )
     }
 
@@ -1394,7 +1506,7 @@ graph_class!(UGraph, "Graph", {
             return self.hyperball_gpu(py, precision, normalized);
         }
         with_precision!(precision, P => self.inner.run(py, |g| {
-            with_graph!(g, g => hyperball::<_, P, _>(g, normalized))
+            with_graph!(g, g => hyperball::<_, _, P, _>(g, normalized))
         }))?
     }
 
@@ -1573,7 +1685,7 @@ graph_class!(DGraph, "DiGraph", {
         let (w, kind) = (self::width(width)?, triangle_type(kind)?);
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => directed_triangles::<_, T>(g, kind))),
+            |g| with_graph!(g, g => with_width!(w, T => directed_triangles::<_, _, T>(g, kind))),
         )
     }
 
@@ -1595,7 +1707,7 @@ graph_class!(DGraph, "DiGraph", {
         );
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => directed_k_truss::<_, T>(g, pkt, kind))),
+            |g| with_graph!(g, g => with_width!(w, T => directed_k_truss::<_, _, T>(g, pkt, kind))),
         )
     }
 
@@ -1613,7 +1725,7 @@ graph_class!(DGraph, "DiGraph", {
         let (degree, w) = (core_degree(degree)?, self::width(width)?);
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => directed_k_core::<_, T>(g, degree))),
+            |g| with_graph!(g, g => with_width!(w, T => directed_k_core::<_, _, T>(g, degree))),
         )
     }
 
@@ -1661,7 +1773,7 @@ graph_class!(DGraph, "DiGraph", {
             return self.hyperball_gpu(py, precision, normalized, d);
         }
         with_precision!(precision, P => self.inner.run(py, |g| {
-            with_graph!(g, g => with_view!(g, d, v => hyperball::<_, P, _>(v, normalized)))
+            with_graph!(g, g => with_view!(g, d, v => hyperball::<_, _, P, _>(v, normalized)))
         }))?
     }
 
@@ -1816,11 +1928,16 @@ graph_class!(DGraph, "DiGraph", {
     /// `to_undirected(reciprocal=True)`). Each is built once and cached alongside this graph,
     /// which owns it: the returned graph never drops it, and is only usable while this graph is
     /// open (it raises `RuntimeError` after).
-    #[pyo3(signature = (*, mode = "collapse"))]
-    fn to_undirected(&self, py: Python<'_>, mode: &str) -> PyResult<UGraph> {
+    ///
+    /// On a weighted graph, `merge` (`"sum"`, `"min"` or `"max"`) is how the arcs merged into one
+    /// edge (`"collapse"` and `"mutual"`: every arc between two nodes, both ways) are weighed:
+    /// the edge weighs the same from both ends. `"sum"` overflowing integer weights fails.
+    #[pyo3(signature = (*, mode = "collapse", merge = "sum"))]
+    fn to_undirected(&self, py: Python<'_>, mode: &str, merge: &str) -> PyResult<UGraph> {
         let mode = undirected_mode(mode)?;
+        let merge = weight_merge(merge)?;
         let inner = self.inner.convert::<Undirected>(py, move |g| {
-            Ok(with_graph!(g, g => g.to_undirected_with(mode)?.cache_filename()))
+            Ok(with_graph!(g, g => g.to_undirected_merging(mode, merge)?.cache_filename()))
         })?;
         Ok(UGraph { inner })
     }
@@ -1831,7 +1948,7 @@ impl UGraph {
     fn triangles_gpu<'py>(&self, py: Python<'py>, w: Width) -> PyResult<Bound<'py, PyAny>> {
         self.inner.run(
             py,
-            |g| with_graph!(g, g => with_width!(w, T => triangles_gpu::<_, T>(g))),
+            |g| with_graph!(g, g => with_width!(w, T => triangles_gpu::<_, _, T>(g))),
         )
     }
 
@@ -1848,7 +1965,7 @@ impl UGraph {
         normalized: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_precision!(precision, P => self.inner.run(py, |g| {
-            with_graph!(g, g => hyperball_gpu::<_, P, _>(g, normalized))
+            with_graph!(g, g => hyperball_gpu::<_, _, P, _>(g, normalized))
         }))?
     }
 
@@ -1873,7 +1990,7 @@ impl DGraph {
         d: Follow,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_precision!(precision, P => self.inner.run(py, |g| {
-            with_graph!(g, g => with_view!(g, d, v => hyperball_gpu::<_, P, _>(v, normalized)))
+            with_graph!(g, g => with_view!(g, d, v => hyperball_gpu::<_, _, P, _>(v, normalized)))
         }))?
     }
 
