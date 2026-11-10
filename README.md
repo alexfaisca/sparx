@@ -469,9 +469,96 @@ non-negative:
 | `ClusteringCoefficient`, `DirectedClusteringCoefficient` | Onnela's and Fagiolo's weighted local coefficients (transitivity stays unweighted, as networkx's) |
 | `degree_assortativity`, `directed_degree_assortativity` | correlation of strengths (weighted degrees), Pearson's or Spearman's |
 | `HKRelax`, `ApproxDirHKPR`, `sweep_cut` | weighted diffusion, walks and conductance (`Community::volume` is the weighted volume, `width` the arc count) |
+| `ExactClosenessCentrality`, `ExactHarmonicCentrality`, `ExactLinCentrality` | weighted distances (networkx's `distance="weight"`), by Dijkstra's algorithm from every node; nodes at distance zero count as reached but add nothing to harmonic sums |
+| `DijkstraDists` (`trails::dijkstra`) | single-source weighted distances (`f64::INFINITY` where unreachable), `BFSDists`' weighted counterpart: Dijkstra's algorithm, or Δ-stepping on many threads (see below) |
+| `astar`, `astar_many`, `Landmarks` (`trails::astar`) | point-to-point shortest paths (see below) |
 
-Traversals, distances and the centralities built on them, k-cores, k-trusses, triangles and
-components ignore weights.
+Unweighted graphs keep the batched multi-source BFSs: the choice is made at compile time, from
+the edge label type. `BFSDists` and the other traversals, HyperBall (whose counters count hops),
+k-cores, k-trusses, triangles and components ignore weights.
+
+### Shortest Paths & A*
+
+`DijkstraDists` picks its `ShortestPathEngine`: `Sequential` (Dijkstra's algorithm with an
+indexed 4-ary heap, at most `|V|` entries) or `DeltaStepping` (Meyer and Sanders, as GAP
+implements it, with GraphIt's bucket fusion): buckets of distances `Δ` wide (by default, the mean
+weight), emptied by every thread at once with atomic minima, no shared queue. Both find the same
+distances, bit for bit. `Auto` (the default) runs Δ-stepping from 2^16 nodes on more than one
+thread: on 32 threads, about 10 times as fast as Dijkstra's algorithm on random graphs, and 5
+times on road-like grids (whose narrow fronts leave threads less to share). It synchronizes
+threads at every bucket, so on a busy machine, fewer threads than cores may well be faster.
+
+Paths are optional: `DijkstraDists` keeps only distances until `predecessors()` (or
+`path_to(v)`) is first called, which then finds a shortest path tree in one more parallel pass
+(`size_of::<Ix>()` bytes per node): each node's parent is the least of its in-neighbours on
+shortest paths with the fewest arcs from the source, so the tree is the same whatever the engine
+and threads, and acyclic even through zero-weight cycles.
+
+`astar(g, source, target, &heuristic)` finds a shortest path (its length, nodes, and the nodes
+it expanded), and `astar_many(g, &queries, &heuristic)` many, in parallel, a whole query per
+thread. A query's memory grows with the nodes it explores, not with the graph. Any
+`Fn(v, target) -> f64` lower bound is a `Heuristic` (inconsistent ones too: nodes are expanded
+again where needed); without coordinates, `Landmarks::new(&g, k)` (ALT, Goldberg and
+Harrelson) picks `k` landmarks farthest first and keeps their distances from (and, on directed
+graphs, to) every node as `f32`s (`4k|V|` bytes, twice that directed), bounding distances by
+the triangle inequality. They're kept in the graph's cache: `Landmarks::open(&g)` maps them back,
+from any instance of the graph (another process's included), without finding them again.
+
+`astar_with` and `astar_many_with` take `AStarOptions`: `paths: false` finds distances only (8
+bytes less per node explored), and `bidirectional: true` searches from both ends at once. With a
+consistent heuristic (`Heuristic::consistent`, as `NoHeuristic`'s), bidirectional search shares
+an averaged potential between its directions and stops as soon as their frontiers' keys add up to
+the best path; otherwise it uses the symmetric stopping rule, correct for any admissible
+heuristic but slower. `Landmarks` are consistent only up to their `f32` rounding, so they use it.
+Expanded nodes per query (1M-node graphs):
+
+| | Dijkstra | bidirectional Dijkstra | A*, 8 landmarks |
+|---|---|---|---|
+| grid (long paths) | 531k | 365k | **35k** |
+| random, 8M arcs (short paths) | 547k | **2.8k** | 136k |
+
+`DijkstraVisit` and `astar_visit` run the searches with a `ShortestPathVisitor` (in
+`trails::shortest_path_visit`), as `BFSVisit` and `DFSVisit` do traversals: hooks
+`discover_vertex`, `examine_vertex`, `examine_edge`, `edge_relaxed`, `edge_not_relaxed` and
+`finish_vertex` (Boost's), any of which can stop the search by returning `ControlFlow::Break`.
+Hooks are called through generics: those a visitor doesn't override cost nothing, and the
+searches without a visitor run the same code, with a no-op one.
+
+```rust
+use sparx::graph::{DiGraph, Weighted, label::VoidLabel};
+use sparx::trails::astar::{AStarOptions, Landmarks, NoHeuristic, astar, astar_many_with};
+use sparx::trails::dijkstra::DijkstraDists;
+use sparx::trails::shortest_path_visit::{DijkstraVisit, ShortestPathVisitor};
+use std::ops::ControlFlow;
+
+/// Stops once a node farther than `radius` is reached.
+struct Within(f64);
+impl ShortestPathVisitor for Within {
+    fn examine_vertex(&mut self, _u: usize, d: f64) -> ControlFlow<()> {
+        if d > self.0 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g = DiGraph::<VoidLabel, Weighted<f64>, u32>::from_file("roads.mtx", None, None)?;
+    // landmarks found once, then reopened from the cache
+    let landmarks = Landmarks::open(&g).or_else(|_| Landmarks::new(&g, 8))?;
+    if let Some(path) = astar(&g, 0, 4_000_000, &landmarks)? {
+        println!("{} long, {} nodes", path.distance, path.nodes.len());
+    }
+    // distances only, bidirectional Dijkstra
+    let options = AStarOptions { bidirectional: true, paths: false };
+    let paths = astar_many_with(&g, &[(1, 2), (3, 4)], &NoHeuristic, options)?;
+    println!("{:?}", paths.iter().flatten().map(|p| p.distance).collect::<Vec<_>>());
+    // every distance from node 0, and a path, its tree found only now
+    let mut d = DijkstraDists::new(&g, 0)?;
+    println!("{:?}", d.path_to(42)?);
+    // the nodes within 1000 of node 0
+    let ball = DijkstraVisit::new(&g, 0, &mut Within(1000.))?;
+    println!("{}", ball.get_distances().iter().filter(|x| **x <= 1000.).count());
+    Ok(())
+}
+```
 
 `DiGraph::to_undirected_merging(mode, WeightMerge)` weighs an undirected edge merged from several
 arcs (`Collapse` and `Mutual`: every arc between two nodes, both ways) by their `Sum` (the

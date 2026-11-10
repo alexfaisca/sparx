@@ -4,6 +4,8 @@ use crate::graph;
 use crate::graph::*;
 use crate::shared_slice::*;
 
+use crate::trails::dijkstra::{DijkstraMemory, WeightedReach, dijkstra};
+
 use crossbeam::thread;
 
 /// What a BFS from a node finds: the nodes it reaches (itself included), and the sums of their
@@ -100,6 +102,90 @@ fn reach_of_every_node<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
     drop(order);
     let _ = std::fs::remove_file(&order_fn);
     result?
+}
+
+/// Runs Dijkstra's algorithm from every node of `g` (following its arcs, as long as their
+/// weights), passing what each finds to `store`, on `g`'s threads: [`reach_of_every_node`]'s
+/// counterpart on weighted graphs. Scratch files are `kind`'s.
+fn weighted_reach_of_every_node<
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness,
+>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    kind: CacheFile,
+    store: &(dyn Fn(usize, WeightedReach) + Sync),
+) -> Result<(), Box<dyn std::error::Error>> {
+    // checks the weights finite and non-negative
+    g.total_weight()?;
+    let node_count = g.size();
+    // sources taken a few at a time, as threads finish them (their costs vary widely)
+    const CHUNK: usize = 16;
+    let threads = g.thread_num().min(node_count.div_ceil(CHUNK)).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let mut handles = vec![];
+        for tid in 0..threads {
+            let next = &next;
+            let files: Vec<String> = (0..5)
+                .map(|k| g.build_cache_filename(kind.clone(), Some(6 * tid + k)))
+                .collect::<Result<_, _>>()?;
+            handles.push(scope.spawn(
+                move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    let memory = DijkstraMemory::<Ix>::new(&files, node_count).map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+                    );
+                    let result = memory.and_then(|mut memory| {
+                        loop {
+                            let first =
+                                CHUNK * next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if first >= node_count {
+                                break Ok(());
+                            }
+                            for source in first..(first + CHUNK).min(node_count) {
+                                store(source, dijkstra(g, source, &mut memory)?);
+                            }
+                        }
+                    });
+                    for f in &files {
+                        let _ = std::fs::remove_file(f);
+                    }
+                    result
+                },
+            ));
+        }
+        for (tid, handle) in handles.into_iter().enumerate() {
+            handle
+                .join()
+                .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("error in Dijkstra thread {tid}: {e}").into()
+                })?;
+        }
+        Ok(())
+    })
+    .map_err(|e| -> Box<dyn std::error::Error> {
+        format!("error exact centralities {:?}", e).into()
+    })?
+}
+
+/// Every node's centrality, by `set(u, reached, distances, inverse_distances)` from what BFSs
+/// from it find, or, on weighted graphs, Dijkstra's algorithm (see [`WeightedReach`]).
+fn every_node<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    kind: CacheFile,
+    set: &(dyn Fn(usize, usize, f64, f64) + Sync),
+) -> Result<(), Box<dyn std::error::Error>> {
+    if E::is_weighted() {
+        weighted_reach_of_every_node(g, kind, &|u, r| {
+            set(u, r.reached, r.distances, r.inverse_distances)
+        })
+    } else {
+        reach_of_every_node(g, kind, &|u, r| {
+            set(u, r.reached, r.distances as f64, r.inverse_distances)
+        })
+    }
 }
 
 /// The nodes of `g` in the order BFSs visit them (from node 0, then from the first node not
@@ -300,10 +386,16 @@ fn single_source_reach<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
     Ok(reach)
 }
 
-/// Exact closeness centrality of every node, by a BFS from every node.
+/// Exact closeness centrality of every node, by a BFS (or, weighted, Dijkstra) from every node.
 ///
 /// Computed by BFSs from every node, 256 at a time (multi-source BFSs, sharing their work): about
 /// `(96 + 3 * size_of::<Ix>()) * |V|` bytes of scratch memory per thread.
+///
+/// On weighted graphs (see [`E::is_weighted`]), distances are weighted
+/// (as networkx's with `distance="weight"`): by Dijkstra's algorithm from every node instead
+/// (see [`DijkstraDists`](crate::trails::dijkstra::DijkstraDists)), with about
+/// `(16 + 2 * size_of::<Ix>()) * |V|` bytes of scratch memory per thread. Nodes at distance zero
+/// (through zero-weight arcs) count as reached, but add nothing to harmonic sums.
 ///
 /// `normalized` selects the value computed for each node `u`, from the sum `d(u)` of its
 /// distances to the nodes it reaches and the number `r(u)` of nodes it reaches (`u` included):
@@ -485,29 +577,39 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         let index = Self::index_by_normalization(self.normalized);
         let norm = W::from_usize(self.g.size().saturating_sub(1));
         let e = self.centralities.shared_slice();
-        reach_of_every_node(self.g, CacheFile::ExactCloseness, &|u, reach| {
-            let mut e = e;
-            let total = W::from_f64(reach.distances as f64);
-            *e.get_mut(u) = if reach.reached <= 1 || reach.distances == 0 {
-                W::zero()
-            } else {
-                match index {
-                    0 => total,
-                    1 => norm / total,
-                    // reachable nodes other than `u` itself
-                    _ => W::from_usize(reach.reached - 1) / total,
-                }
-            };
-        })?;
+        every_node(
+            self.g,
+            CacheFile::ExactCloseness,
+            &|u, reached, distances, _| {
+                let mut e = e;
+                let total = W::from_f64(distances);
+                *e.get_mut(u) = if reached <= 1 || distances == 0. {
+                    W::zero()
+                } else {
+                    match index {
+                        0 => total,
+                        1 => norm / total,
+                        // reachable nodes other than `u` itself
+                        _ => W::from_usize(reached - 1) / total,
+                    }
+                };
+            },
+        )?;
         self.g.cleanup_cache(CacheFile::ExactCloseness)?;
         Ok(())
     }
 }
 
-/// Exact harmonic centrality of every node, by a BFS from every node.
+/// Exact harmonic centrality of every node, by a BFS (or, weighted, Dijkstra) from every node.
 ///
 /// Computed by BFSs from every node, 256 at a time (multi-source BFSs, sharing their work): about
 /// `(96 + 3 * size_of::<Ix>()) * |V|` bytes of scratch memory per thread.
+///
+/// On weighted graphs (see [`E::is_weighted`]), distances are weighted
+/// (as networkx's with `distance="weight"`): by Dijkstra's algorithm from every node instead
+/// (see [`DijkstraDists`](crate::trails::dijkstra::DijkstraDists)), with about
+/// `(16 + 2 * size_of::<Ix>()) * |V|` bytes of scratch memory per thread. Nodes at distance zero
+/// (through zero-weight arcs) count as reached, but add nothing to harmonic sums.
 ///
 /// `normalized` selects the value computed for each node `u`, from the sum `h(u)` of the inverses
 /// of its distances to the nodes it reaches and the number `r(u)` of nodes it reaches (`u`
@@ -689,31 +791,41 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         let index = Self::index_by_normalization(self.normalized);
         let norm = W::from_usize(self.g.size().saturating_sub(1));
         let e = self.centralities.shared_slice();
-        reach_of_every_node(self.g, CacheFile::ExactHarmonic, &|u, reach| {
-            let mut e = e;
-            let inverse = W::from_f64(reach.inverse_distances);
-            *e.get_mut(u) = if reach.reached <= 1 {
-                W::zero()
-            } else {
-                match index {
-                    0 => inverse,
-                    1 => inverse / norm,
-                    // reachable nodes other than `u` itself
-                    _ => inverse / W::from_usize(reach.reached - 1),
-                }
-            };
-        })?;
+        every_node(
+            self.g,
+            CacheFile::ExactHarmonic,
+            &|u, reached, _, inverse| {
+                let mut e = e;
+                let inverse = W::from_f64(inverse);
+                *e.get_mut(u) = if reached <= 1 {
+                    W::zero()
+                } else {
+                    match index {
+                        0 => inverse,
+                        1 => inverse / norm,
+                        // reachable nodes other than `u` itself
+                        _ => inverse / W::from_usize(reached - 1),
+                    }
+                };
+            },
+        )?;
         self.g.cleanup_cache(CacheFile::ExactHarmonic)?;
         Ok(())
     }
 }
 
-/// Exact Lin's centrality of every node, by a BFS from every node: `r(u)^2 / d(u)`, where `r(u)` is the
+/// Exact Lin's centrality of every node, by a BFS (or, weighted, Dijkstra) from every node: `r(u)^2 / d(u)`, where `r(u)` is the
 /// number of nodes `u` reaches (`u` included) and `d(u)` the sum of its distances to them, or 1
 /// if `u` reaches no other node.
 ///
 /// Computed by BFSs from every node, 256 at a time (multi-source BFSs, sharing their work): about
 /// `(96 + 3 * size_of::<Ix>()) * |V|` bytes of scratch memory per thread.
+///
+/// On weighted graphs (see [`E::is_weighted`]), distances are weighted
+/// (as networkx's with `distance="weight"`): by Dijkstra's algorithm from every node instead
+/// (see [`DijkstraDists`](crate::trails::dijkstra::DijkstraDists)), with about
+/// `(16 + 2 * size_of::<Ix>()) * |V|` bytes of scratch memory per thread. Nodes at distance zero
+/// (through zero-weight arcs) count as reached, but add nothing to harmonic sums.
 ///
 /// Works on any graph, following arcs out of nodes ([`Direction::Out`], the default): a node's distances are to the nodes it reaches.
 /// On a [`DiGraph`], [`new_directed`](Self::new_directed) follows them in another [`Direction`]:
@@ -875,15 +987,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         _proc_mem: (),
     ) -> Result<(), Box<dyn std::error::Error>> {
         let e = self.centralities.shared_slice();
-        reach_of_every_node(self.g, CacheFile::ExactLin, &|u, reach| {
+        every_node(self.g, CacheFile::ExactLin, &|u, reached, distances, _| {
             let mut e = e;
             // as defined by Boldi P. and Vigna S., a node reaching no other node has Lin's
             // centrality 1, and reachable nodes include the node itself
-            *e.get_mut(u) = if reach.distances == 0 {
+            *e.get_mut(u) = if distances == 0. {
                 W::one()
             } else {
-                let r = W::from_usize(reach.reached);
-                (r * r) / W::from_f64(reach.distances as f64)
+                let r = W::from_usize(reached);
+                (r * r) / W::from_f64(distances)
             };
         })?;
         self.g.cleanup_cache(CacheFile::ExactLin)?;

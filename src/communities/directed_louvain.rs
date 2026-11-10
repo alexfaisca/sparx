@@ -1495,42 +1495,6 @@ fn prefetch<T>(p: &T) {
     let _ = p;
 }
 
-/// A barrier threads spin at (yielding after a while): color classes take microseconds each,
-/// less than putting threads to sleep and waking them up, hundreds of times a sweep.
-struct SpinBarrier {
-    threads: usize,
-    arrived: AtomicUsize,
-    generation: AtomicUsize,
-}
-
-impl SpinBarrier {
-    fn new(threads: usize) -> Self {
-        Self {
-            threads,
-            arrived: AtomicUsize::new(0),
-            generation: AtomicUsize::new(0),
-        }
-    }
-
-    fn wait(&self) {
-        let generation = self.generation.load(Ordering::Acquire);
-        if self.arrived.fetch_add(1, Ordering::AcqRel) + 1 == self.threads {
-            self.arrived.store(0, Ordering::Relaxed);
-            self.generation.fetch_add(1, Ordering::Release);
-            return;
-        }
-        let mut spins = 0u32;
-        while self.generation.load(Ordering::Acquire) == generation {
-            if spins < 1 << 12 {
-                std::hint::spin_loop();
-                spins += 1;
-            } else {
-                std::thread::yield_now();
-            }
-        }
-    }
-}
-
 /// A graph's nodes by color, no two linked nodes of the same: nodes of a color can be moved
 /// at once without any of them joining another's community as it leaves it (Lu, Halappanavar
 /// and Kalyanaraman's ["Parallel heuristics for scalable community detection"](https://doi.org/10.1016/j.parco.2015.03.003)).
@@ -1561,7 +1525,7 @@ impl ColorClasses {
         let threads = self.threads;
         let colors = self.starts.len() - 1;
         let next: Vec<AtomicUsize> = (0..colors).map(|_| AtomicUsize::new(0)).collect();
-        let barrier = SpinBarrier::new(threads);
+        let barrier = crate::utils::SpinBarrier::new(threads);
         crossbeam::thread::scope(|scope| {
             let handles: Vec<_> = (0..threads)
                 .map(|_| {

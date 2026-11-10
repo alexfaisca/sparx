@@ -270,6 +270,8 @@ pub enum FileType {
     MetaLabel(H),
     Helper(H),
     BFS(H),
+    Dijkstra(H),
+    Landmarks(H),
     DFS(H),
     DfsVisitor(H),
     BfsVisitor(H),
@@ -373,6 +375,8 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
     static SUFFIX_FOR_META_LABEL: &str = "fst";
     static SUFFIX_FOR_HELPER: &str = "helper";
     static SUFFIX_FOR_BFS: &str = "bfs";
+    static SUFFIX_FOR_DIJKSTRA: &str = "dijkstra";
+    static SUFFIX_FOR_LANDMARKS: &str = "landmarks";
     static SUFFIX_FOR_DFS: &str = "dfs";
     static SUFFIX_FOR_DFS_VISITOR: &str = "dfsvisitor";
     static SUFFIX_FOR_BFS_VISITOR: &str = "bfsvisitor";
@@ -409,6 +413,8 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::MetaLabel(_) => SUFFIX_FOR_META_LABEL,
         FileType::Helper(_) => SUFFIX_FOR_HELPER,
         FileType::BFS(_) => SUFFIX_FOR_BFS,
+        FileType::Dijkstra(_) => SUFFIX_FOR_DIJKSTRA,
+        FileType::Landmarks(_) => SUFFIX_FOR_LANDMARKS,
         FileType::DFS(_) => SUFFIX_FOR_DFS,
         FileType::DfsVisitor(_) => SUFFIX_FOR_DFS_VISITOR,
         FileType::BfsVisitor(_) => SUFFIX_FOR_BFS_VISITOR,
@@ -515,6 +521,8 @@ impl std::fmt::Display for FileType {
             FileType::MetaLabel(_) => "MetaLabel",
             FileType::Helper(_) => "Helper",
             FileType::BFS(_) => "BFS",
+            FileType::Dijkstra(_) => "Dijkstra",
+            FileType::Landmarks(_) => "Landmarks",
             FileType::DFS(_) => "DFS",
             FileType::DfsVisitor(_) => "DfsVisitor",
             FileType::BfsVisitor(_) => "BfsVisitor",

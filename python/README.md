@@ -76,9 +76,24 @@ with sparx.DiGraph("web.mtx") as d:            # directed
 * On weighted graphs, algorithms follow networkx's `weight="weight"`: PageRank (transitions in
   proportion to weight), Louvain and Leiden (weighted modularity), clustering (Onnela's and
   Fagiolo's weighted coefficients; transitivity stays unweighted, as networkx's) and degree
-  assortativity (of strengths). Weights must be finite and non-negative, and a `DiGraph`'s
-  Louvain needs integer weights (it compares gains exactly). Traversals, distances,
-  centralities, k-cores, k-trusses and components ignore weights.
+  assortativity (of strengths), and exact `closeness`, `harmonic` and `lin` (weighted
+  distances, networkx's `distance="weight"`; with `direction="both"`, two nodes are as far
+  apart as their lightest arc). `dijkstra(source)` gives weighted distances (`inf` where
+  unreachable; hop counts on unweighted graphs), while `bfs` always counts hops. Weights must be
+  finite and non-negative, and a `DiGraph`'s Louvain needs integer weights (it compares gains
+  exactly). HyperBall (it counts hops), k-cores, k-trusses and components ignore weights.
+* Shortest paths: `dijkstra(source, engine=..., predecessors=False)` runs Dijkstra's algorithm
+  (`"sequential"`) or Δ-stepping on the graph's threads (`"delta"`, `delta=` its bucket width;
+  `"auto"` picks it on large graphs), with the same distances bit for bit. With
+  `predecessors=True` it also returns each node's parent in a shortest path tree (`-1` for the
+  source and unreachable nodes), found only then, the same for every engine.
+  `shortest_path(s, t)` and `shortest_paths(sources, targets)` (in parallel) give
+  `{"distance", "nodes", "expanded"}` dicts (`None` without a path; no `"nodes"` with
+  `paths=False`, which keeps less memory), by A*: guided by landmarks once `build_landmarks(k)`
+  has kept some in the graph's cache (they persist with `keep_cache=True`; `landmarks` lists
+  them, `drop_landmarks()` removes them), else bidirectional Dijkstra. `heuristic=` and
+  `bidirectional=` override that: bidirectional search pays without landmarks (hundreds of
+  times fewer nodes on small-world graphs), one-directional with them (on road-like graphs).
 * `DiGraph.to_undirected(merge=...)` weighs an edge merged from several arcs (`"collapse"` and
   `"mutual"`: every arc between two nodes, both ways) by their `"sum"` (the default), `"min"` or
   `"max"`, the same from both ends.

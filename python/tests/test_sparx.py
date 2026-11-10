@@ -1113,3 +1113,193 @@ def test_weight_parsing_and_formats(cache_dir):
         sparx.DiGraph.open(cache_file, weighted=True)
     for f in cache_dir.iterdir():
         f.unlink()
+
+
+# --- weighted shortest paths --------------------------------------------------------------------
+
+
+def with_zero_and_real_weights(G, seed):
+    rng = np.random.default_rng(seed)
+    for u, v in G.edges():
+        # a few zero-weight edges: nodes at distance zero
+        G[u][v]["weight"] = 0.0 if rng.random() < 0.05 else float(rng.uniform(0.1, 5))
+    return G
+
+
+def path_lengths(G, source):
+    return nx.single_source_dijkstra_path_length(G, source, weight="weight")
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_weighted_shortest_paths_against_networkx(seed, index):
+    G = with_zero_and_real_weights(nx.gnp_random_graph(80, 0.05, seed=seed), seed)
+    n = len(G)
+    with sparx.Graph(weighted_undirected(G), index=index, weighted=True) as g:
+        for source in [0, 17, 79]:
+            want = path_lengths(G, source)
+            got = g.dijkstra(source)
+            assert got.dtype == np.float64
+            np.testing.assert_allclose(got, [want.get(u, np.inf) for u in range(n)], rtol=1e-12)
+        closeness = nx.closeness_centrality(G, distance="weight")
+        reach = np.array([len(path_lengths(G, u)) for u in range(n)])
+        np.testing.assert_allclose(
+            g.closeness() * (reach - 1) / (n - 1), [closeness[u] for u in range(n)], rtol=1e-9
+        )
+        harmonic = nx.harmonic_centrality(G, distance="weight")
+        np.testing.assert_allclose(
+            g.harmonic(normalized=False) * (n - 1), [harmonic[u] for u in range(n)], rtol=1e-9
+        )
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_weighted_directed_shortest_paths_against_networkx(seed):
+    D = with_zero_and_real_weights(nx.gnp_random_graph(60, 0.06, seed=seed, directed=True), seed)
+    n = len(D)
+    with sparx.DiGraph(weighted_directed(D), weighted=True) as g:
+        R = D.reverse()
+        # "both": an edge either way, as long as the lightest arc between its ends
+        U = nx.Graph()
+        U.add_nodes_from(D)
+        for u, v, w in D.edges(data="weight"):
+            if not U.has_edge(u, v) or w < U[u][v]["weight"]:
+                U.add_edge(u, v, weight=w)
+        for source in [0, 31]:
+            for direction, H in [("out", D), ("in", R), ("both", U)]:
+                want = path_lengths(H, source)
+                got = g.dijkstra(source, direction=direction)
+                np.testing.assert_allclose(got, [want.get(u, np.inf) for u in range(n)], rtol=1e-12)
+        # networkx's closeness and harmonic centralities of digraphs use distances into nodes
+        closeness = nx.closeness_centrality(D, distance="weight")
+        reach = np.array([len(path_lengths(R, u)) for u in range(n)])
+        np.testing.assert_allclose(
+            g.closeness(direction="in") * (reach - 1) / (n - 1),
+            [closeness[u] for u in range(n)],
+            rtol=1e-9,
+        )
+        harmonic = nx.harmonic_centrality(D, distance="weight")
+        np.testing.assert_allclose(
+            g.harmonic(normalized=False, direction="in") * (n - 1),
+            [harmonic[u] for u in range(n)],
+            rtol=1e-9,
+        )
+
+
+def test_dijkstra_on_unweighted_graphs_counts_hops():
+    G = nx.gnp_random_graph(50, 0.06, seed=4)
+    with sparx.Graph(undirected(G)) as g:
+        hops = g.bfs(3)
+        assert g.dijkstra(3).tolist() == [float(h) if h >= 0 else np.inf for h in hops.tolist()]
+
+
+def test_negative_weights_fail_shortest_paths():
+    path = write_weighted_mtx("neg.mtx", 3, [(0, 1, 1.0), (1, 2, -2.0)], False)
+    with sparx.DiGraph(path, weighted=True) as g:
+        with pytest.raises(RuntimeError, match="non-negative"):
+            g.dijkstra(0)
+        with pytest.raises(RuntimeError, match="non-negative"):
+            g.closeness()
+
+
+# --- shortest paths -------------------------------------------------------------------------
+
+
+def path_length(G, nodes):
+    # the lightest arc between consecutive nodes
+    return sum(
+        min(d["weight"] for d in G.get_edge_data(u, v, default={}).values())
+        if G.is_multigraph()
+        else G[u][v]["weight"]
+        for u, v in zip(nodes, nodes[1:])
+    )
+
+
+@pytest.mark.parametrize("directed", [False, True])
+def test_dijkstra_engines_and_predecessors(directed):
+    G = with_random_weights(nx.gnp_random_graph(300, 0.02, seed=3, directed=directed), 5)
+    make = sparx.DiGraph if directed else sparx.Graph
+    path = weighted_directed(G) if directed else weighted_undirected(G)
+    with make(path, weighted=True, threads=4) as g:
+        for source in [0, 17]:
+            want = nx.single_source_dijkstra_path_length(G, source)
+            got = g.dijkstra(source)
+            np.testing.assert_allclose(got, [want.get(v, np.inf) for v in range(len(g))], rtol=1e-12)
+            for engine, delta in [("sequential", None), ("delta", None), ("delta", 0.3), ("delta", 50.0)]:
+                d, p = g.dijkstra(source, engine=engine, delta=delta, predecessors=True)
+                assert np.array_equal(d, got)
+                if engine == "sequential":
+                    first = p
+                # the same tree, whatever the engine
+                assert np.array_equal(p, first)
+            assert p[source] == -1
+            for v in range(len(g)):
+                if v == source or np.isinf(got[v]):
+                    assert p[v] == -1
+                    continue
+                nodes = [v]
+                while nodes[-1] != source:
+                    nodes.append(int(p[nodes[-1]]))
+                assert path_length(G, nodes[::-1]) == pytest.approx(got[v], rel=1e-12)
+    with pytest.raises(ValueError, match="delta"):
+        sparx.Graph(weighted_undirected(G if not directed else G.to_undirected(), "x.mtx"), weighted=True).dijkstra(0, delta=1.0)
+
+
+@pytest.mark.parametrize("directed", [False, True])
+def test_shortest_paths_against_networkx(directed):
+    G = with_random_weights(nx.gnp_random_graph(200, 0.03, seed=8, directed=directed), 9)
+    make = sparx.DiGraph if directed else sparx.Graph
+    path = weighted_directed(G) if directed else weighted_undirected(G)
+    rng = np.random.default_rng(1)
+    sources, targets = rng.integers(0, 200, 60), rng.integers(0, 200, 60)
+    with make(path, weighted=True) as g:
+        assert g.landmarks is None
+        with pytest.raises(RuntimeError, match="no landmarks"):
+            g.shortest_path(0, 1, heuristic="landmarks")
+        for built in [False, True]:
+            if built:
+                landmarks = g.build_landmarks(4)
+                assert len(landmarks) == 4 and np.array_equal(g.landmarks, landmarks)
+            for heuristic in ["auto", "none"] + (["landmarks"] if built else []):
+                for bidirectional in [None, False, True]:
+                    for paths in [True, False]:
+                        kw = dict(heuristic=heuristic, bidirectional=bidirectional, paths=paths)
+                        many = g.shortest_paths(sources, targets, **kw)
+                        for s, t, got in zip(sources.tolist(), targets.tolist(), many):
+                            one = g.shortest_path(s, t, **kw)
+                            try:
+                                want = nx.shortest_path_length(G, s, t, weight="weight")
+                            except nx.NetworkXNoPath:
+                                assert got is None and one is None
+                                continue
+                            assert got["distance"] == pytest.approx(want, rel=1e-12)
+                            assert one["distance"] == got["distance"]
+                            if paths:
+                                nodes = got["nodes"].tolist()
+                                assert (nodes[0], nodes[-1]) == (s, t)
+                                assert path_length(G, nodes) == pytest.approx(want, rel=1e-12)
+                            else:
+                                assert "nodes" not in got
+        g.drop_landmarks()
+        assert g.landmarks is None
+        with pytest.raises(ValueError, match="out of range"):
+            g.shortest_paths([0, 1], [2, 200])
+        with pytest.raises(ValueError, match="as many"):
+            g.shortest_paths([0, 1], [2])
+        with pytest.raises(ValueError, match="heuristic"):
+            g.shortest_path(0, 1, heuristic="euclid")
+
+
+def test_landmarks_are_kept_with_the_cache(cache_dir):
+    D = with_random_weights(nx.gnp_random_graph(80, 0.06, seed=4, directed=True), 2, True)
+    with sparx.DiGraph(weighted_directed(D), weighted=True, keep_cache=True) as g:
+        landmarks = g.build_landmarks(3)
+        cache_file = g.cache_file
+    with sparx.DiGraph.open(cache_file, weighted=True) as g:
+        assert np.array_equal(g.landmarks, landmarks)
+        got = g.shortest_path(0, 5, heuristic="landmarks")
+        assert (got is None) == (not nx.has_path(D, 0, 5))
+    # an unweighted graph of the same entry isn't theirs
+    with sparx.DiGraph.open(cache_file) as g:
+        with pytest.raises(RuntimeError, match="another graph"):
+            g.shortest_path(0, 5, heuristic="landmarks")
+    for f in cache_dir.iterdir():
+        f.unlink()

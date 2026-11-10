@@ -1,8 +1,12 @@
+pub mod astar;
 pub mod bfs;
 pub mod bfs_visit;
+pub(crate) mod delta_stepping;
 pub mod dfs;
 pub mod dfs_visit;
+pub mod dijkstra;
 pub mod hierholzer;
+pub mod shortest_path_visit;
 
 #[cfg(test)]
 use _verify::verify_trails;

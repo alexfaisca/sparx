@@ -1,4 +1,5 @@
 use std::any::type_name;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[allow(dead_code)]
 pub fn type_of<T>() -> &'static str {
@@ -90,6 +91,43 @@ pub fn spearman_rho(a: &[f64], b: &[f64]) -> f64 {
         })
         .sum::<f64>();
     1.0 - (6.0 * ssd) / (n * (n * n - 1.0).max(1.0))
+}
+
+/// A barrier threads spin at (yielding after a while): for phases taking microseconds each,
+/// less than putting threads to sleep and waking them up, hundreds of times a run (directed
+/// Louvain's color classes, Δ-stepping's buckets).
+pub(crate) struct SpinBarrier {
+    threads: usize,
+    arrived: AtomicUsize,
+    generation: AtomicUsize,
+}
+
+impl SpinBarrier {
+    pub(crate) fn new(threads: usize) -> Self {
+        Self {
+            threads,
+            arrived: AtomicUsize::new(0),
+            generation: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn wait(&self) {
+        let generation = self.generation.load(Ordering::Acquire);
+        if self.arrived.fetch_add(1, Ordering::AcqRel) + 1 == self.threads {
+            self.arrived.store(0, Ordering::Relaxed);
+            self.generation.fetch_add(1, Ordering::Release);
+            return;
+        }
+        let mut spins = 0u32;
+        while self.generation.load(Ordering::Acquire) == generation {
+            if spins < 1 << 12 {
+                std::hint::spin_loop();
+                spins += 1;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

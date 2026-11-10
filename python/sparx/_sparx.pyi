@@ -1,5 +1,5 @@
 from os import PathLike
-from typing import Literal, Optional, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -11,9 +11,17 @@ CoreDegree = Literal["in", "out", "total"]
 UndirectedMode = Literal["collapse", "each", "mutual"]
 WeightParsing = Literal["fast", "checked"]
 WeightMerge = Literal["sum", "min", "max"]
+Engine = Literal["auto", "sequential", "delta"]
+Guide = Literal["auto", "landmarks", "none"]
+NodeIds = Union[npt.ArrayLike, list[int]]
 
 DIRECTED_TRIANGLE_TYPES: list[str]
 GPU: bool
+
+class Path(TypedDict, total=False):
+    distance: float
+    nodes: npt.NDArray[np.int64]  # left out with paths=False
+    expanded: int
 
 class Clustering(TypedDict):
     local: npt.NDArray[np.float64]
@@ -130,6 +138,39 @@ class Graph:
     def numeric_assortativity(self, values: npt.ArrayLike) -> float: ...
     def attribute_assortativity(self, labels: npt.ArrayLike) -> float: ...
     def bfs(self, source: int) -> npt.NDArray[np.int64]: ...
+    @overload
+    def dijkstra(
+        self, source: int, *, engine: Engine = "auto", delta: Optional[float] = None,
+        predecessors: Literal[False] = False,
+    ) -> npt.NDArray[np.float64]: ...
+    @overload
+    def dijkstra(
+        self, source: int, *, engine: Engine = "auto", delta: Optional[float] = None,
+        predecessors: Literal[True],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]]: ...
+    def build_landmarks(self, k: int = 8) -> npt.NDArray[np.int64]: ...
+    @property
+    def landmarks(self) -> Optional[npt.NDArray[np.int64]]: ...
+    def drop_landmarks(self) -> None: ...
+    def shortest_path(
+        self,
+        source: int,
+        target: int,
+        *,
+        heuristic: Guide = "auto",
+        bidirectional: Optional[bool] = None,
+        paths: bool = True,
+    ) -> Optional[Path]: ...
+    def shortest_paths(
+        self,
+        sources: NodeIds,
+        targets: NodeIds,
+        *,
+        heuristic: Guide = "auto",
+        bidirectional: Optional[bool] = None,
+        paths: bool = True,
+    ) -> list[Optional[Path]]: ...
+
     def to_directed(self) -> DiGraph:
         """The graph as a `DiGraph` mapping this graph's cache entry: usable while this graph is open."""
 
@@ -219,6 +260,39 @@ class DiGraph:
     def numeric_assortativity(self, values: npt.ArrayLike) -> float: ...
     def attribute_assortativity(self, labels: npt.ArrayLike) -> float: ...
     def bfs(self, source: int, *, direction: Direction = "out") -> npt.NDArray[np.int64]: ...
+    @overload
+    def dijkstra(
+        self, source: int, *, direction: Direction = "out", engine: Engine = "auto",
+        delta: Optional[float] = None, predecessors: Literal[False] = False,
+    ) -> npt.NDArray[np.float64]: ...
+    @overload
+    def dijkstra(
+        self, source: int, *, direction: Direction = "out", engine: Engine = "auto",
+        delta: Optional[float] = None, predecessors: Literal[True],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]]: ...
+    def build_landmarks(self, k: int = 8) -> npt.NDArray[np.int64]: ...
+    @property
+    def landmarks(self) -> Optional[npt.NDArray[np.int64]]: ...
+    def drop_landmarks(self) -> None: ...
+    def shortest_path(
+        self,
+        source: int,
+        target: int,
+        *,
+        heuristic: Guide = "auto",
+        bidirectional: Optional[bool] = None,
+        paths: bool = True,
+    ) -> Optional[Path]: ...
+    def shortest_paths(
+        self,
+        sources: NodeIds,
+        targets: NodeIds,
+        *,
+        heuristic: Guide = "auto",
+        bidirectional: Optional[bool] = None,
+        paths: bool = True,
+    ) -> list[Optional[Path]]: ...
+
     def to_undirected(self, *, mode: UndirectedMode = "collapse", merge: WeightMerge = "sum") -> Graph:
         """The underlying undirected graph: "collapse" one edge per linked pair, "each" one per arc,
         "mutual" one per pair linked both ways; on a weighted graph, merged edges weigh their

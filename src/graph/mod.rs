@@ -382,6 +382,8 @@ pub trait GenericEdge<T: GenericEdgeType>:
 pub enum CacheFile {
     General,
     BFS,
+    Dijkstra,
+    Landmarks,
     DFS,
     DfsVisitor,
     BfsVisitor,

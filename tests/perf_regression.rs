@@ -17,6 +17,7 @@ use sparx::components::weak::ConnectedComponents;
 use sparx::graph::{DiGraph, Graph};
 use sparx::k_truss::clustering_coefficient::ClusteringCoefficient;
 use sparx::k_truss::triangles::Triangles;
+use sparx::trails::dijkstra::{DijkstraDists, ShortestPathEngine};
 use std::hint::black_box;
 use std::io::Write;
 use std::path::PathBuf;
@@ -377,5 +378,38 @@ fn degree_assortativity_is_one_parallel_pass() {
     assert!(
         ratio <= 1.,
         "degree assortativity takes {ratio:.2}x as long as connected components: is it still one parallel pass?"
+    );
+}
+
+/// Δ-stepping spreads one source's shortest paths over threads: on a random graph, with 4
+/// threads or more, at least twice as fast as Dijkstra's algorithm on one (6 to 12 times, on
+/// 16 to 32 threads).
+#[test]
+#[ignore]
+fn delta_stepping_is_parallel() {
+    let threads = threads(16);
+    if threads < 4 {
+        println!("delta stepping: skipped, {threads} threads");
+        return;
+    }
+    let (mut g, dir) = random_digraph("delta", 1 << 19, 8, threads);
+    let time = |engine| {
+        fastest(3, || {
+            let mut d = DijkstraDists::with_engine(&g, 0, engine).unwrap();
+            black_box(d.total_distances());
+            d.drop_cache().unwrap();
+        })
+    };
+    let sequential = time(ShortestPathEngine::Sequential);
+    let parallel = time(ShortestPathEngine::DeltaStepping { delta: None });
+    let speedup = sequential.as_secs_f64() / parallel.as_secs_f64();
+    println!(
+        "delta stepping: {parallel:?}, dijkstra: {sequential:?} ({speedup:.1}x on {threads} threads)"
+    );
+    g.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        speedup >= 2.,
+        "Δ-stepping is only {speedup:.1}x as fast as Dijkstra's algorithm on {threads} threads"
     );
 }

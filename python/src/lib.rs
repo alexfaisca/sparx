@@ -53,7 +53,11 @@ use sparx::k_truss::clustering_coefficient::{
 use sparx::k_truss::count::TriangleCount;
 use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
 use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
+use sparx::trails::astar::{
+    AStarOptions, Heuristic, Landmarks, NoHeuristic, Reversible, ShortestPath, astar_many_with,
+};
 use sparx::trails::bfs::BFSDists;
+use sparx::trails::dijkstra::{DijkstraDists, ShortestPathEngine};
 
 type G<Ix, Dir, L = ()> = GraphMemoryMap<(), L, Ix, Dir>;
 /// Weighted graphs' edge labels: `f64` weights.
@@ -246,7 +250,9 @@ macro_rules! with_view {
                 $body
             }
             Follow::Both => {
-                let $v = $g.to_undirected()?;
+                // on weighted graphs, a pair's edge is as long as its lightest arc (unweighted
+                // graphs' merges are all the same graph)
+                let $v = $g.to_undirected_merging(UndirectedMode::Collapse, WeightMerge::Min)?;
                 $body
             }
         }
@@ -878,6 +884,170 @@ fn bfs<I: Ix, L: E, Dir: Directedness>(g: &G<I, Dir, L>, source: usize) -> Res<O
     })
 }
 
+/// Weighted distances from `source` (`inf` for nodes it doesn't reach), and, if asked for, each
+/// node's parent in a shortest path tree (`-1` for the source and nodes it doesn't reach).
+fn dijkstra<I: Ix, L: E, Dir: Directedness>(
+    g: &G<I, Dir, L>,
+    source: usize,
+    engine: ShortestPathEngine,
+    predecessors: bool,
+) -> Res<Out> {
+    cleaning(g, || {
+        let mut d = DijkstraDists::with_engine(g, source, engine)?;
+        let distances = array(d.get_distances().to_vec());
+        let out = if predecessors {
+            let parents: Vec<i64> = d
+                .predecessors()?
+                .iter()
+                .enumerate()
+                .map(|(v, p)| if p.index() == v { -1 } else { p.index() as i64 })
+                .collect();
+            pair(distances, array(parents))
+        } else {
+            distances
+        };
+        d.drop_cache()?;
+        Ok(out)
+    })
+}
+
+fn shortest_path_engine(name: &str, delta: Option<f64>) -> PyResult<ShortestPathEngine> {
+    match (name, delta) {
+        ("auto", None) => Ok(ShortestPathEngine::Auto),
+        ("sequential", None) => Ok(ShortestPathEngine::Sequential),
+        ("delta", delta) => {
+            if let Some(d) = delta
+                && !(d.is_finite() && d > 0.)
+            {
+                return Err(PyValueError::new_err(format!(
+                    "delta must be positive and finite, not {d}"
+                )));
+            }
+            Ok(ShortestPathEngine::DeltaStepping { delta })
+        }
+        ("auto" | "sequential", Some(_)) => {
+            Err(PyValueError::new_err("delta is only for engine='delta'"))
+        }
+        _ => Err(PyValueError::new_err(format!(
+            "unknown engine {name:?}: expected 'auto', 'sequential' or 'delta'"
+        ))),
+    }
+}
+
+/// How a shortest path query is guided.
+#[derive(Clone, Copy)]
+enum Guide {
+    /// Landmarks if kept, else none.
+    Auto,
+    Landmarks,
+    None,
+}
+
+fn guide(name: &str) -> PyResult<Guide> {
+    match name {
+        "auto" => Ok(Guide::Auto),
+        "landmarks" => Ok(Guide::Landmarks),
+        "none" => Ok(Guide::None),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown heuristic {name:?}: expected 'auto', 'landmarks' or 'none'"
+        ))),
+    }
+}
+
+/// Whether `g` has landmarks kept in its cache.
+fn has_landmarks<I: Ix, L: E, Dir: Reversible>(g: &G<I, Dir, L>) -> Res<bool> {
+    let meta = g.build_pers_cache_filename(CacheFile::Landmarks, Some(8))?;
+    Ok(Path::new(&meta).exists())
+}
+
+/// Shortest paths for `queries`, A* guided by `guide` (landmarks one-directional, by default;
+/// with no landmarks, bidirectional Dijkstra), with or without paths' nodes.
+fn shortest_paths<I: Ix, L: E, Dir: Reversible>(
+    g: &G<I, Dir, L>,
+    queries: &[(usize, usize)],
+    guide: Guide,
+    bidirectional: Option<bool>,
+    paths: bool,
+) -> Res<Vec<Option<ShortestPath>>> {
+    let landmarks = match guide {
+        Guide::None => None,
+        Guide::Landmarks => Some(Landmarks::open(g)?),
+        Guide::Auto if has_landmarks(g)? => Some(Landmarks::open(g)?),
+        Guide::Auto => None,
+    };
+    let h: &dyn Heuristic = match &landmarks {
+        Some(l) => l,
+        None => &NoHeuristic,
+    };
+    let options = AStarOptions {
+        bidirectional: bidirectional.unwrap_or(landmarks.is_none()),
+        paths,
+    };
+    astar_many_with(g, queries, h, options)
+}
+
+/// Python's `None`.
+fn none_out() -> Out {
+    Box::new(|py| Ok(py.None().into_bound(py)))
+}
+
+/// A list of results.
+fn list_out(outs: Vec<Out>) -> Out {
+    Box::new(move |py| {
+        let items = outs
+            .into_iter()
+            .map(|o| o(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(pyo3::types::PyList::new(py, items)?.into_any())
+    })
+}
+
+/// A path as a dictionary (`None` if there's none).
+fn path_out(path: Option<ShortestPath>, with_nodes: bool) -> Out {
+    Box::new(move |py| match path {
+        None => Ok(py.None().into_bound(py)),
+        Some(p) => {
+            let d = PyDict::new(py);
+            d.set_item("distance", p.distance)?;
+            if with_nodes {
+                let nodes: Vec<i64> = p.nodes.iter().map(|&v| v as i64).collect();
+                d.set_item("nodes", nodes.into_pyarray(py))?;
+            }
+            d.set_item("expanded", p.expanded)?;
+            Ok(d.into_any())
+        }
+    })
+}
+
+/// `(sources, targets)` as queries, checked against `n` nodes.
+fn query_pairs(
+    sources: PyArrayLike1<'_, i64, AllowTypeChange>,
+    targets: PyArrayLike1<'_, i64, AllowTypeChange>,
+    n: usize,
+) -> PyResult<Vec<(usize, usize)>> {
+    let (s, t) = (sources.as_array(), targets.as_array());
+    if s.len() != t.len() {
+        return Err(PyValueError::new_err(format!(
+            "sources and targets must be as many: {} and {}",
+            s.len(),
+            t.len()
+        )));
+    }
+    s.iter()
+        .zip(t.iter())
+        .map(|(&a, &b)| {
+            for x in [a, b] {
+                if x < 0 || x as u64 >= n as u64 {
+                    return Err(PyValueError::new_err(format!(
+                        "node {x} out of range: the graph has {n} nodes"
+                    )));
+                }
+            }
+            Ok((a as usize, b as usize))
+        })
+        .collect()
+}
+
 // --- graphs -----------------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -1370,6 +1540,97 @@ macro_rules! graph_class {
                 self.inner.run(py, |g| with_graph!(g, g => components(g, strong)))
             }
 
+            /// Chooses `k` landmarks (fewer on graphs of fewer nodes, farthest first) and finds
+            /// their distances from (on a `DiGraph`, and to) every node, kept in the graph's
+            /// cache (`4 * k` bytes per node, twice that on a `DiGraph`; with `keep_cache=True`,
+            /// they're there when the graph is reopened), replacing any kept: `shortest_path`'s
+            /// heuristic. Returns them, as `int64`s.
+            #[pyo3(signature = (k = 8))]
+            fn build_landmarks<'py>(&self, py: Python<'py>, k: usize) -> PyResult<Bound<'py, PyAny>> {
+                if k == 0 {
+                    return Err(PyValueError::new_err("k must be at least 1"));
+                }
+                self.inner.run(py, |g| with_graph!(g, g => cleaning(g, || {
+                    let l = Landmarks::new(g, k)?;
+                    Ok(array(l.landmarks().iter().map(|&v| v as i64).collect::<Vec<_>>()))
+                })))
+            }
+
+            /// The landmarks kept in the graph's cache (see `build_landmarks`), as `int64`s, or
+            /// `None`.
+            #[getter]
+            fn landmarks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                self.inner.run(py, |g| with_graph!(g, g => {
+                    if !has_landmarks(g)? {
+                        return Ok(none_out());
+                    }
+                    let l = Landmarks::open(g)?;
+                    Ok(array(l.landmarks().iter().map(|&v| v as i64).collect::<Vec<_>>()))
+                }))
+            }
+
+            /// Removes the landmarks kept in the graph's cache, if any.
+            fn drop_landmarks(&self, py: Python<'_>) -> PyResult<()> {
+                self.inner.with_detached(py, |g| with_graph!(g, g => {
+                    if has_landmarks(g)? {
+                        Landmarks::open(g)?.drop_cache()?;
+                    }
+                    Ok(())
+                }))
+            }
+
+            /// A shortest path from `source` to `target` (arcs as long as their weights):
+            /// `{"distance", "nodes" (int64s, from source to target; left out with
+            /// `paths=False`, which keeps less memory), "expanded" (nodes the search expanded)}`,
+            /// or `None` if there's none.
+            ///
+            /// `heuristic` is `"landmarks"` (the kept ones, see `build_landmarks`), `"none"`, or
+            /// `"auto"` (landmarks if kept). `bidirectional` searches from both ends at once:
+            /// by default, only without landmarks (it's then bidirectional Dijkstra, far faster
+            /// on graphs of short paths; with landmarks, one-directional search expands fewer
+            /// nodes).
+            #[pyo3(signature = (source, target, *, heuristic = "auto", bidirectional = None, paths = true))]
+            fn shortest_path<'py>(
+                &self,
+                py: Python<'py>,
+                source: usize,
+                target: usize,
+                heuristic: &str,
+                bidirectional: Option<bool>,
+                paths: bool,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let guide = guide(heuristic)?;
+                self.inner.check_node(source)?;
+                self.inner.check_node(target)?;
+                self.inner.run(py, |g| with_graph!(g, g => {
+                    let mut found = shortest_paths(g, &[(source, target)], guide, bidirectional, paths)?;
+                    Ok(path_out(found.pop().flatten(), paths))
+                }))
+            }
+
+            /// `shortest_path` from each of `sources` to the matching one of `targets`, in
+            /// parallel on the graph's threads: a list of the paths (or `None`s).
+            #[pyo3(signature = (sources, targets, *, heuristic = "auto", bidirectional = None, paths = true))]
+            #[allow(clippy::too_many_arguments)]
+            fn shortest_paths<'py>(
+                &self,
+                py: Python<'py>,
+                sources: PyArrayLike1<'py, i64, AllowTypeChange>,
+                targets: PyArrayLike1<'py, i64, AllowTypeChange>,
+                heuristic: &str,
+                bidirectional: Option<bool>,
+                paths: bool,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let guide = guide(heuristic)?;
+                let n = self.inner.with(|g| Ok(with_graph!(g, g => g.size())))?;
+                let queries = query_pairs(sources, targets, n)?;
+                self.inner.run(py, |g| with_graph!(g, g => {
+                    let found = shortest_paths(g, &queries, guide, bidirectional, paths)?;
+                    let outs: Vec<Out> = found.into_iter().map(|p| path_out(p, paths)).collect();
+                    Ok(list_out(outs))
+                }))
+            }
+
             $($own)*
         }
     };
@@ -1639,6 +1900,34 @@ graph_class!(UGraph, "Graph", {
     fn bfs<'py>(&self, py: Python<'py>, source: usize) -> PyResult<Bound<'py, PyAny>> {
         self.inner.check_node(source)?;
         self.inner.run(py, |g| with_graph!(g, g => bfs(g, source)))
+    }
+
+    /// Shortest-path distance of each node from `source`, edges being as long as their weights
+    /// (one, on unweighted graphs), as `float64` (`inf` for nodes it doesn't reach): networkx's
+    /// `single_source_dijkstra_path_length`. Weights must be finite and non-negative.
+    ///
+    /// `engine` is `"sequential"` (Dijkstra's algorithm), `"delta"` (Δ-stepping, on the graph's
+    /// threads, with buckets `delta` wide: by default the mean weight) or `"auto"` (Δ-stepping
+    /// on large graphs); they find the same distances, bit for bit. With
+    /// `predecessors=True`, returns `(distances, predecessors)`: each node's parent in a
+    /// shortest path tree (`-1` for the source and nodes it doesn't reach), the same whatever
+    /// the engine; it takes a pass more, and memory for them, so they're only found if asked
+    /// for.
+    #[pyo3(signature = (source, *, engine = "auto", delta = None, predecessors = false))]
+    fn dijkstra<'py>(
+        &self,
+        py: Python<'py>,
+        source: usize,
+        engine: &str,
+        delta: Option<f64>,
+        predecessors: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let engine = shortest_path_engine(engine, delta)?;
+        self.inner.check_node(source)?;
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => dijkstra(g, source, engine, predecessors)),
+        )
     }
 
     /// The graph as a `DiGraph`, each edge an arc each way: for directed algorithms. It maps
@@ -1917,6 +2206,30 @@ graph_class!(DGraph, "DiGraph", {
         self.inner.run(
             py,
             |g| with_graph!(g, g => with_view!(g, d, v => bfs(v, source))),
+        )
+    }
+
+    /// Shortest-path distance of each node, arcs being as long as their weights (one, on
+    /// unweighted graphs), following them in `direction` (as `bfs`; with `"both"`, two nodes
+    /// are as far apart as their lightest arc either way), as `float64` (`inf` for nodes not
+    /// reached). Weights must be finite and non-negative. `engine`, `delta` and
+    /// `predecessors` are as `Graph.dijkstra`'s.
+    #[pyo3(signature = (source, *, direction = "out", engine = "auto", delta = None, predecessors = false))]
+    fn dijkstra<'py>(
+        &self,
+        py: Python<'py>,
+        source: usize,
+        direction: &str,
+        engine: &str,
+        delta: Option<f64>,
+        predecessors: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let engine = shortest_path_engine(engine, delta)?;
+        self.inner.check_node(source)?;
+        let d = follow(direction)?;
+        self.inner.run(
+            py,
+            |g| with_graph!(g, g => with_view!(g, d, v => dijkstra(v, source, engine, predecessors))),
         )
     }
 

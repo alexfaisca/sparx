@@ -1684,6 +1684,8 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         match file_type {
             CacheFile::General => FileType::General,
             CacheFile::BFS => FileType::BFS(H::H),
+            CacheFile::Dijkstra => FileType::Dijkstra(H::H),
+            CacheFile::Landmarks => FileType::Landmarks(H::H),
             CacheFile::DFS => FileType::DFS(H::H),
             CacheFile::DfsVisitor => FileType::DfsVisitor(H::H),
             CacheFile::BfsVisitor => FileType::BfsVisitor(H::H),
