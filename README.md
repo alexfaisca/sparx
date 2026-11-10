@@ -36,6 +36,8 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Biconnectivity](#biconnectivity)
   - [Assortativity](#assortativity)
   - [Louvain & Leiden](#louvain--leiden)
+  - [Spectral clustering](#spectral-clustering)
+  - [Label propagation](#label-propagation)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -890,6 +892,86 @@ without nodes going back and forth, by color classes (Lu, Halappanavar and Kalya
 Grappolo): colored so that no two linked nodes share a color, a color's nodes are moved at once.
 Its partitions are within a fraction of a percent of sequential Louvain's modularity, or above it,
 40 to 60 times faster on 32 cores (graph_8_15: 31 seconds, against 32 minutes).
+
+## Spectral Clustering
+
+`SpectralClustering` (in `communities::spectral`) clusters an undirected graph, weighted or not,
+into `k` clusters without computing eigenvectors, by *compressive spectral clustering* (Tremblay
+et al., ICML 2016). A Jackson-damped Chebyshev low-pass filter, cut at the `k`-th least
+eigenvalue, is applied to `O(log k)` random signals, so that each node gets features whose
+distances approximate the spectral embedding's. k-means clusters a sample of the nodes, and every
+node then joins its nearest centroid, refined by a few Lloyd's iterations over all of them. Every
+step is a product of the graph with a block of vectors, memory-mapped, in parallel; the results
+are the same whatever the threads.
+
+- `λ_k` is found by the kernel polynomial method: Chebyshev moments of random `±1` signals give
+  the eigenvalue count below any `λ`, with the spectrum's bounds tightened first by Lanczos.
+- `SpectralMatrix::RegularizedLaplacian` (the default) is `I - D_τ^-1/2 A D_τ^-1/2`, with `τ` the
+  mean degree (Qin and Rohe), so that tiny components and dangling trees don't take over the low
+  eigenvectors of sparse graphs.
+- `SpectralMatrix::BetheHessian` (Saade, Krzakala and Zdeborová; unweighted graphs) finds
+  clusters down to the detectability threshold, past the Laplacian's, given a higher
+  `filter_degree` and more `moments`. Its negative eigenvalues' count estimates `k` (`k: None`),
+  roughly: `k_estimate()` gives the count and its standard error.
+- Memory: three blocks of `d ≈ 4 ln(sample)` features per node, `f32` or `f64` (`W`).
+
+On a planted partition of a million nodes (mean degree 16, 64 blocks), against GVE-Leiden (32
+threads):
+
+| arcs across blocks | spectral (Laplacian, k = 64) | Leiden |
+|---|---|---|
+| 40% | NMI 0.98, 21 s | NMI 0.13, 3.4 s |
+| 50% | NMI 0.95, 22 s | NMI 0.01, 3.4 s |
+| 60% | NMI 0.83 (Bethe Hessian, degree 384), 194 s | NMI 0.00 |
+
+It needs `k`, and clusters must be what the low eigenvectors show: on a compacted de Bruijn
+graph (half a million nodes), Leiden's communities had modularity 0.69 to its 0.47.
+
+```rust
+use sparx::communities::spectral::{SpectralClustering, SpectralOptions};
+use sparx::graph::Graph;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g: Graph<(), (), u32> = Graph::from_file("graph.mtx", None, None)?;
+    // f32 blocks: half the memory
+    let s = SpectralClustering::<_, _, _, f32>::new(&g, SpectralOptions::new(64))?;
+    println!("{} clusters, modularity {}", s.community_count(), s.partition_modularity());
+    Ok(())
+}
+```
+
+## Label Propagation
+
+`LabelPropagation` (in `communities::label_propagation`) is label propagation run
+*semi-synchronously* (Cordasco and Gargano): nodes are colored so that no two neighbours share a
+color (Jones and Plassmann's coloring, in parallel), and the colors take turns, each's nodes
+moving at once. No neighbour of a node moves while it does, so the communities are the same
+whatever the threads, unlike asynchronous LPA's, and they don't oscillate, unlike synchronous
+LPA's. From GVE-LPA (Sahu) it takes pruning (only nodes with a neighbour that moved are looked
+at again) and its tolerance (it stops once a pass moves 5% of the nodes or fewer). For the first
+20 passes, ties are broken by a hash, the node's own label included (Raghavan et al.'s rule):
+keeping the own label on ties, as the semi-synchronous rule does to converge, freezes sparse
+graphs into tiny communities (316 thousand, on the planted partition below). Communities are
+split into their connected parts and numbered by their least node.
+
+| graph (32 threads) | label propagation | GVE-Leiden |
+|---|---|---|
+| planted partition, 1M nodes, 64 blocks, 20% of arcs across | modularity 0.770, NMI 0.955, 2.2 s | 0.466, NMI 0.478, 2.4 s |
+| same, 40% across | 0.137, NMI 0.31, 2.7 s | 0.257, NMI 0.17, 3.2 s |
+| compacted de Bruijn graph, 0.5M nodes | 0.468, 0.54 s | 0.685, 1.3 s |
+| de Bruijn graph, 4M nodes, 33.5M edges | 0.467, 2.4 s (12.4 s on 1 thread) | 0.725, 5.8 s |
+
+```rust
+use sparx::communities::label_propagation::LabelPropagation;
+use sparx::graph::Graph;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g: Graph<(), (), u32> = Graph::from_file("graph.mtx", None, None)?;
+    let lpa = LabelPropagation::new(&g)?;
+    println!("{} communities, modularity {}", lpa.community_count(), lpa.partition_modularity());
+    Ok(())
+}
+```
 
 ## Python
 

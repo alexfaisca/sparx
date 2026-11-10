@@ -34,6 +34,8 @@ use sparx::centralities::pagerank::{PageRank, PageRankEngine};
 use sparx::communities::Refinement;
 use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
+use sparx::communities::label_propagation::{LabelPropagation, LpaOptions};
+use sparx::communities::spectral::{SpectralClustering, SpectralMatrix, SpectralOptions};
 use sparx::components::{
     biconnected::Biconnectivity, strong::StronglyConnectedComponents, weak::ConnectedComponents,
 };
@@ -717,6 +719,46 @@ fn directed_clustering<I: Ix, L: E>(g: &G<I, Directed, L>) -> Res<Out> {
             ("local", array(local)),
             ("average", number(average)),
         ]))
+    })
+}
+
+/// Spectral clusters, with `W` blocks.
+fn spectral<I: Ix, L: E, W: sparx::graph::Weight>(
+    g: &G<I, Undirected, L>,
+    options: SpectralOptions,
+) -> Res<Out> {
+    cleaning(g, || {
+        let mut s = SpectralClustering::<_, _, _, W>::new(g, options)?;
+        let communities = ix_array(s.communities());
+        let mut entries = vec![
+            ("communities", communities),
+            ("count", number(s.community_count())),
+            ("modularity", number(s.partition_modularity())),
+            ("lambda_k", number(s.lambda_k())),
+        ];
+        if let Some((estimate, error)) = s.k_estimate() {
+            entries.push(("k_estimate", number(estimate)));
+            entries.push(("k_error", number(error)));
+        }
+        s.drop_cache()?;
+        Ok(dict(entries))
+    })
+}
+
+fn label_propagation<I: Ix, L: E>(g: &G<I, Undirected, L>, options: LpaOptions) -> Res<Out> {
+    cleaning(g, || {
+        let mut l = LabelPropagation::with_options(g, options)?;
+        let communities = ix_array(l.communities());
+        let moves: Vec<i64> = l.moves().iter().map(|&m| m as i64).collect();
+        let entries = vec![
+            ("communities", communities),
+            ("count", number(l.community_count())),
+            ("modularity", number(l.partition_modularity())),
+            ("moves", array(moves)),
+            ("colors", number(l.colors())),
+        ];
+        l.drop_cache()?;
+        Ok(dict(entries))
     })
 }
 
@@ -1748,6 +1790,98 @@ graph_class!(UGraph, "Graph", {
     fn leiden<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.inner
             .run(py, |g| with_graph!(g, g => louvain(g, Refinement::Leiden)))
+    }
+
+    /// Label propagation communities, semi-synchronous (nodes colored so that no neighbours
+    /// share a color, the colors moving in turn, in parallel): the same whatever the threads.
+    /// `{"communities" (numbered by their least node, connected), "count", "modularity",
+    /// "moves" (the nodes each pass moved), "colors"}`. The first `exploration` passes break ties
+    /// at random (a hash), the node's own label included; then it's kept, until a pass moves at
+    /// most `tolerance` of the nodes, `max_iterations` passes at most. Fast, and good on clear
+    /// structure; `leiden` finds higher modularity on graphs without it.
+    #[pyo3(signature = (*, max_iterations = 40, tolerance = 0.05, exploration = 20))]
+    fn label_propagation<'py>(
+        &self,
+        py: Python<'py>,
+        max_iterations: usize,
+        tolerance: f64,
+        exploration: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = LpaOptions {
+            max_iterations,
+            tolerance,
+            exploration,
+        };
+        self.inner
+            .run(py, |g| with_graph!(g, g => label_propagation(g, options)))
+    }
+
+    /// Spectral clusters, by compressive spectral clustering (a low-pass graph filter on random
+    /// signals, then k-means): `{"communities" (numbered by their least node), "count",
+    /// "modularity", "lambda_k" (the filter's cut-off eigenvalue)}`.
+    ///
+    /// `matrix` is `"laplacian"` (the regularized normalized Laplacian: any graph, weighted or
+    /// not; `regularization` is its `τ`, the mean degree by default) or `"bethe"` (the Bethe
+    /// Hessian: unweighted graphs; it finds weaker clusters, with a higher `filter_degree` and
+    /// more `moments`). With `"bethe"`, `k=None` estimates the number of clusters, roughly (the
+    /// dict then has `"k_estimate"` and its standard error, `"k_error"`). `precision` is the
+    /// blocks' (`"f32"` halves their memory). The rest are `SpectralOptions`' (see the crate's
+    /// docs). The same whatever the threads.
+    #[pyo3(signature = (k, *, matrix = "laplacian", regularization = None, filter_degree = 64, moments = 128, probes = 16, features = None, sample = None, restarts = 4, refine = 3, seed = 0x5eed, max_k = 4096, precision = "f32"))]
+    #[allow(clippy::too_many_arguments)]
+    fn spectral_clustering<'py>(
+        &self,
+        py: Python<'py>,
+        k: Option<usize>,
+        matrix: &str,
+        regularization: Option<f64>,
+        filter_degree: usize,
+        moments: usize,
+        probes: usize,
+        features: Option<usize>,
+        sample: Option<usize>,
+        restarts: usize,
+        refine: usize,
+        seed: u64,
+        max_k: usize,
+        precision: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let matrix = match matrix {
+            "laplacian" => SpectralMatrix::RegularizedLaplacian,
+            "bethe" => SpectralMatrix::BetheHessian,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown matrix {matrix:?}: expected 'laplacian' or 'bethe'"
+                )));
+            }
+        };
+        let options = SpectralOptions {
+            k,
+            matrix,
+            max_k,
+            regularization,
+            filter_degree,
+            moments,
+            probes,
+            features,
+            sample,
+            restarts,
+            refine,
+            seed,
+        };
+        match precision {
+            "f32" => self.inner.run(
+                py,
+                |g| with_graph!(g, g => spectral::<_, _, f32>(g, options)),
+            ),
+            "f64" => self.inner.run(
+                py,
+                |g| with_graph!(g, g => spectral::<_, _, f64>(g, options)),
+            ),
+            _ => Err(PyValueError::new_err(format!(
+                "unknown precision {precision:?}: expected 'f32' or 'f64'"
+            ))),
+        }
     }
 
     /// HyperBall estimates (per node): `distances` and `harmonic_distances` (sums of distances

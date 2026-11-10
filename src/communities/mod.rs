@@ -2,6 +2,8 @@ pub mod approx_dirichlet_hkpr;
 pub mod directed_louvain;
 pub mod gve_louvain;
 pub mod hk_relax;
+pub mod label_propagation;
+pub mod spectral;
 
 use crate::graph;
 use portable_atomic::{AtomicUsize, Ordering};

@@ -23,6 +23,21 @@ class Path(TypedDict, total=False):
     nodes: npt.NDArray[np.int64]  # left out with paths=False
     expanded: int
 
+class Spectral(TypedDict, total=False):
+    communities: npt.NDArray[np.int64]
+    count: int
+    modularity: float
+    lambda_k: float
+    k_estimate: float  # only when k was estimated
+    k_error: float
+
+class LabelPropagation(TypedDict):
+    communities: npt.NDArray[np.int64]
+    count: int
+    modularity: float
+    moves: npt.NDArray[np.int64]
+    colors: int
+
 class Clustering(TypedDict):
     local: npt.NDArray[np.float64]
     average: float
@@ -117,6 +132,26 @@ class Graph:
     ) -> npt.NDArray[np.unsignedinteger]: ...
     def clustering(self) -> Clustering: ...
     def louvain(self) -> Louvain: ...
+    def label_propagation(
+        self, *, max_iterations: int = 40, tolerance: float = 0.05, exploration: int = 20
+    ) -> LabelPropagation: ...
+    def spectral_clustering(
+        self,
+        k: Optional[int],
+        *,
+        matrix: Literal["laplacian", "bethe"] = "laplacian",
+        regularization: Optional[float] = None,
+        filter_degree: int = 64,
+        moments: int = 128,
+        probes: int = 16,
+        features: Optional[int] = None,
+        sample: Optional[int] = None,
+        restarts: int = 4,
+        refine: int = 3,
+        seed: int = 0x5EED,
+        max_k: int = 4096,
+        precision: Literal["f32", "f64"] = "f32",
+    ) -> Spectral: ...
     def leiden(self) -> Louvain: ...
     def hyperball(self, *, precision: int = 8, normalized: bool = True, gpu: bool = False) -> HyperBall: ...
     def closeness(self, *, normalized: bool = True) -> npt.NDArray[np.float64]: ...

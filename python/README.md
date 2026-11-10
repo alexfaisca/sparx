@@ -113,6 +113,19 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   attribute coefficients are exact, and the same whatever the number of threads; a coefficient
   is `NaN` where it's undefined (for example, all degrees equal). `attribute_assortativity`
   takes integer labels: for others, pass `numpy.unique(labels, return_inverse=True)[1]`.
+* `Graph.label_propagation()` finds communities by semi-synchronous label propagation (colors
+  of non-adjacent nodes moving in turn): `{"communities", "count", "modularity", "moves",
+  "colors"}`, the same whatever the threads, connected and numbered by their least node.
+  Faster than `leiden()`, and as good or better on clear structure; `leiden()`'s modularity is
+  higher on graphs without it.
+* `Graph.spectral_clustering(k)` clusters by compressive spectral clustering (a low-pass graph
+  filter on random signals, then k-means), into `{"communities", "count", "modularity",
+  "lambda_k"}`, the same whatever the threads. `matrix="laplacian"` (the default, regularized
+  by the mean degree; any graph) or `"bethe"` (the Bethe Hessian: unweighted graphs, weaker
+  clusters, with a higher `filter_degree` and more `moments`; with `k=None` it estimates `k`,
+  roughly, as `"k_estimate"` ± `"k_error"`). On planted partitions it finds clusters Leiden
+  misses; on graphs without a few clear clusters (de Bruijn graphs), Leiden's modularity is
+  higher. For a `DiGraph`, cluster its `to_undirected()`.
 * `louvain()` and `leiden()` communities are connected: any community Louvain leaves
   internally disconnected is split into its parts, which only raises modularity. `leiden()`
   refines each pass's communities into connected sub-communities before aggregating them

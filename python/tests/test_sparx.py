@@ -1303,3 +1303,85 @@ def test_landmarks_are_kept_with_the_cache(cache_dir):
             g.shortest_path(0, 5, heuristic="landmarks")
     for f in cache_dir.iterdir():
         f.unlink()
+
+
+# --- spectral clustering --------------------------------------------------------------------
+
+
+def nmi(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    n = len(a)
+    _, ia = np.unique(a, return_inverse=True)
+    _, ib = np.unique(b, return_inverse=True)
+    joint = np.zeros((ia.max() + 1, ib.max() + 1))
+    np.add.at(joint, (ia, ib), 1)
+    p = joint / n
+    pa, pb = p.sum(1), p.sum(0)
+    nz = p > 0
+    mi = (p[nz] * np.log(p[nz] / np.outer(pa, pb)[nz])).sum()
+    h = lambda q: -(q[q > 0] * np.log(q[q > 0])).sum()
+    return 2 * mi / (h(pa) + h(pb))
+
+
+def test_spectral_clustering_finds_planted_partitions():
+    G = nx.planted_partition_graph(6, 120, 0.12, 0.006, seed=2)
+    truth = [u // 120 for u in range(len(G))]
+    with sparx.Graph(undirected(G), threads=4) as g:
+        for precision in ["f32", "f64"]:
+            s = g.spectral_clustering(6, precision=precision)
+            assert s["communities"].dtype == np.int64 and s["count"] == 6
+            assert nmi(s["communities"], truth) > 0.95
+            parts = [set(np.flatnonzero(s["communities"] == c).tolist()) for c in range(s["count"])]
+            assert s["modularity"] == pytest.approx(nx.community.modularity(G, parts), abs=1e-9)
+            # numbered by their least node
+            firsts = [int(np.flatnonzero(s["communities"] == c)[0]) for c in range(s["count"])]
+            assert firsts == sorted(firsts)
+        bethe = g.spectral_clustering(6, matrix="bethe")
+        assert nmi(bethe["communities"], truth) > 0.95
+        counted = g.spectral_clustering(None, matrix="bethe", moments=512, probes=64)
+        assert abs(counted["k_estimate"] - 6) <= 3 * counted["k_error"]
+    # the same whatever the threads
+    with sparx.Graph(undirected(G, "again.mtx"), threads=1) as g1:
+        with sparx.Graph(undirected(G, "again2.mtx"), threads=7) as g7:
+            assert np.array_equal(g1.spectral_clustering(6)["communities"], g7.spectral_clustering(6)["communities"])
+
+
+def test_spectral_clustering_of_weighted_graphs_and_errors():
+    G = nx.gnp_random_graph(300, 0.05, seed=5)
+    for u, v in G.edges():
+        G[u][v]["weight"] = 10.0 if u // 100 == v // 100 else 0.3
+    with sparx.Graph(weighted_undirected(G), weighted=True) as g:
+        s = g.spectral_clustering(3)
+        assert nmi(s["communities"], [u // 100 for u in range(300)]) > 0.9
+        with pytest.raises(RuntimeError, match="unweighted"):
+            g.spectral_clustering(3, matrix="bethe")
+        with pytest.raises(RuntimeError, match="needs k"):
+            g.spectral_clustering(None)
+        with pytest.raises(ValueError, match="matrix"):
+            g.spectral_clustering(3, matrix="adjacency")
+        with pytest.raises(ValueError, match="precision"):
+            g.spectral_clustering(3, precision="f16")
+        with pytest.raises(RuntimeError, match="k must be"):
+            g.spectral_clustering(301)
+    assert not hasattr(sparx.DiGraph, "spectral_clustering")
+
+
+def test_label_propagation():
+    G = nx.planted_partition_graph(5, 150, 0.15, 0.004, seed=6)
+    truth = [u // 150 for u in range(len(G))]
+    found = []
+    for threads in [1, 6]:
+        with sparx.Graph(undirected(G, f"lpa{threads}.mtx"), threads=threads) as g:
+            lp = g.label_propagation()
+            assert lp["communities"].dtype == np.int64 and lp["count"] == len(np.unique(lp["communities"]))
+            assert nmi(lp["communities"], truth) > 0.95
+            parts = [set(np.flatnonzero(lp["communities"] == c).tolist()) for c in range(lp["count"])]
+            assert lp["modularity"] == pytest.approx(nx.community.modularity(G, parts), abs=1e-9)
+            assert all(nx.is_connected(G.subgraph(p)) for p in parts)
+            assert lp["moves"][-1] <= 0.05 * len(G) and lp["colors"] >= 2
+            found.append(lp["communities"])
+    assert np.array_equal(found[0], found[1])
+    with sparx.Graph(undirected(G, "lpa_bad.mtx")) as g:
+        with pytest.raises(RuntimeError, match="tolerance"):
+            g.label_propagation(tolerance=2.0)
+    assert not hasattr(sparx.DiGraph, "label_propagation")

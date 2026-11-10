@@ -384,6 +384,8 @@ pub enum CacheFile {
     BFS,
     Dijkstra,
     Landmarks,
+    Spectral,
+    LabelPropagation,
     DFS,
     DfsVisitor,
     BfsVisitor,

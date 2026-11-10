@@ -272,6 +272,8 @@ pub enum FileType {
     BFS(H),
     Dijkstra(H),
     Landmarks(H),
+    Spectral(H),
+    LabelPropagation(H),
     DFS(H),
     DfsVisitor(H),
     BfsVisitor(H),
@@ -377,6 +379,8 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
     static SUFFIX_FOR_BFS: &str = "bfs";
     static SUFFIX_FOR_DIJKSTRA: &str = "dijkstra";
     static SUFFIX_FOR_LANDMARKS: &str = "landmarks";
+    static SUFFIX_FOR_SPECTRAL: &str = "spectral";
+    static SUFFIX_FOR_LABEL_PROPAGATION: &str = "lpa";
     static SUFFIX_FOR_DFS: &str = "dfs";
     static SUFFIX_FOR_DFS_VISITOR: &str = "dfsvisitor";
     static SUFFIX_FOR_BFS_VISITOR: &str = "bfsvisitor";
@@ -415,6 +419,8 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::BFS(_) => SUFFIX_FOR_BFS,
         FileType::Dijkstra(_) => SUFFIX_FOR_DIJKSTRA,
         FileType::Landmarks(_) => SUFFIX_FOR_LANDMARKS,
+        FileType::Spectral(_) => SUFFIX_FOR_SPECTRAL,
+        FileType::LabelPropagation(_) => SUFFIX_FOR_LABEL_PROPAGATION,
         FileType::DFS(_) => SUFFIX_FOR_DFS,
         FileType::DfsVisitor(_) => SUFFIX_FOR_DFS_VISITOR,
         FileType::BfsVisitor(_) => SUFFIX_FOR_BFS_VISITOR,
@@ -523,6 +529,8 @@ impl std::fmt::Display for FileType {
             FileType::BFS(_) => "BFS",
             FileType::Dijkstra(_) => "Dijkstra",
             FileType::Landmarks(_) => "Landmarks",
+            FileType::Spectral(_) => "Spectral",
+            FileType::LabelPropagation(_) => "LabelPropagation",
             FileType::DFS(_) => "DFS",
             FileType::DfsVisitor(_) => "DfsVisitor",
             FileType::BfsVisitor(_) => "BfsVisitor",
