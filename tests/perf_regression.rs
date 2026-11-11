@@ -577,8 +577,11 @@ fn kadabra_is_parallel() {
 }
 
 /// Directed k-cores and clustering coefficients run on all threads: on a random directed graph of
-/// 2^20 nodes, many threads must be at least twice as fast as one at both (measured on a de
-/// Bruijn graph of 21.9M nodes: k-cores 3.4x, clustering 9.2x, 1 to 32 threads).
+/// 2^20 nodes, many threads must be at least twice as fast as one at clustering, and at k-cores
+/// on 8 threads or more; on fewer (CI runners' 4, often 2 cores with hyperthreads), k-cores,
+/// whose peeling synchronizes the threads at every subround, 1.4x (a sequential peeling would be
+/// 1x). Measured: k-cores 4.0x on 16 threads, 1.7x on a 4-thread runner; clustering 6.1x and
+/// 3.5x; on a de Bruijn graph of 21.9M nodes, 1 to 32 threads, 3.4x and 9.2x.
 #[test]
 #[ignore]
 fn directed_cores_and_clustering_are_parallel() {
@@ -618,8 +621,9 @@ fn directed_cores_and_clustering_are_parallel() {
         "directed k-cores: {cores_many:?} on {threads} threads ({cores:.1}x); clustering: \
          {clustering_many:?} ({clustering:.1}x)"
     );
+    let cores_floor = if threads >= 8 { 2. } else { 1.4 };
     assert!(
-        cores >= 2.,
+        cores >= cores_floor,
         "directed k-cores are only {cores:.1}x as fast on {threads} threads"
     );
     assert!(
