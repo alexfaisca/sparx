@@ -93,8 +93,11 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                                         .into()
                                 },
                             )?;
-                            // idx[k]: the edge that goes to position k
-                            idx.sort_by_key(|&i| node_edges[i]);
+                            // idx[k]: the edge that goes to position k; parallel arcs by their
+                            // labels, as they're filled in whatever order the parsing threads
+                            // reach them (so that their order, and anything summed over them,
+                            // doesn't depend on the threads' timing)
+                            idx.sort_by_key(|&i| (node_edges[i], edge_labels[i]));
                             apply_order_in_place(&idx, &mut destination, node_edges, edge_labels);
                         }
                         Ok(())

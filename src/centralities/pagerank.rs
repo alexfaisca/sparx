@@ -1024,6 +1024,40 @@ mod test {
         assert_eq!(ranks[0], ranks[2]);
     }
 
+    /// Parallel arcs come out of parsing ordered by their labels, not in the order the parsing
+    /// threads happened to reach them: weighted graphs, and what's summed over their arcs (the
+    /// ranks above), are the same whatever the threads' number and timing.
+    #[test]
+    fn parallel_arcs_are_ordered_by_their_labels() {
+        let arcs = random_weights(&random_arcs(3000, 12_000, 21), 22);
+        let rows = |t: u8| {
+            let g = weighted::<Directed>(&format!("parallel_{t}"), "general", 3000, &arcs, t);
+            (0..3000)
+                .map(|u| {
+                    g.weighted_neighbours(u)
+                        .unwrap()
+                        .map(|(v, l)| (v, l.weight::<f64>().to_bits()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let one = rows(1);
+        let parallel = one
+            .iter()
+            .flat_map(|row| row.windows(2).filter(|w| w[0].0 == w[1].0))
+            .count();
+        assert!(parallel > 0, "the test graph has no parallel arcs");
+        for row in &one {
+            assert!(
+                row.windows(2)
+                    .all(|w| w[0].0 < w[1].0 || f64::from_bits(w[0].1) <= f64::from_bits(w[1].1))
+            );
+        }
+        for t in [3, 8, 3] {
+            assert_eq!(rows(t), one, "{t} threads");
+        }
+    }
+
     /// Weights that aren't finite and non-negative are refused, saying so.
     #[test]
     fn weighted_pagerank_rejects_bad_weights() {

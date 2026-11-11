@@ -76,6 +76,10 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 ### Fixed
 
+* Parallel arcs of a labeled (or weighted) graph came out of parallel parsing in whatever order
+  the threads reached them, so that their labels' order, and sums over them (weighted
+  PageRank's ranks, for one), could differ from run to run in their last bits: they're ordered
+  by their labels now.
 * GGCAT graphs with edge labels: neighbour lists were permuted by the inverse of their sort order,
   so they came out unsorted (labels stayed paired with their neighbours).
 * Thread-safety and cache-naming bugs in exact centralities; a data race in PKT; contention on
