@@ -39,6 +39,24 @@ pub(super) fn apply_permutation_in_place<T, U>(
     }
 }
 
+/// Reorders `data1` and `data2` alike by `order` (`order[k]`: the index of the element to put at
+/// position `k`, as sorting indices by a key gives), in place: by the destinations it implies
+/// (`destination`, scratch), which [`apply_permutation_in_place`] takes. Passing `order` to it
+/// directly would apply its inverse.
+pub(super) fn apply_order_in_place<T, U>(
+    order: &[usize],
+    destination: &mut Vec<usize>,
+    data1: &mut [T],
+    data2: &mut [U],
+) {
+    destination.clear();
+    destination.resize(order.len(), 0);
+    for (position, &element) in order.iter().enumerate() {
+        destination[element] = position;
+    }
+    apply_permutation_in_place(destination.as_mut_slice(), data1, data2);
+}
+
 /// Create a stable 256-bit hex id from a filename (path & extension are ignored).
 ///
 /// - Deterministic across runs and machines.
@@ -274,6 +292,7 @@ pub enum FileType {
     Landmarks(H),
     Spectral(H),
     LabelPropagation(H),
+    Betweenness(H),
     DFS(H),
     DfsVisitor(H),
     BfsVisitor(H),
@@ -299,6 +318,7 @@ pub enum FileType {
     HyperBallLinCentrality(H),
     GVELouvain(H),
     ExactClosenessCentrality(H),
+    ExactBetweennessCentrality(H),
     ExactHarmonicCentrality(H),
     ExactLinCentrality(H),
     ConnectedComponents(H),
@@ -381,6 +401,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
     static SUFFIX_FOR_LANDMARKS: &str = "landmarks";
     static SUFFIX_FOR_SPECTRAL: &str = "spectral";
     static SUFFIX_FOR_LABEL_PROPAGATION: &str = "lpa";
+    static SUFFIX_FOR_BETWEENNESS: &str = "betweenness";
     static SUFFIX_FOR_DFS: &str = "dfs";
     static SUFFIX_FOR_DFS_VISITOR: &str = "dfsvisitor";
     static SUFFIX_FOR_BFS_VISITOR: &str = "bfsvisitor";
@@ -402,6 +423,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
     static SUFFIX_FOR_HYPERBALL_LIN_CENTRALITY: &str = "hyperballlin";
     static SUFFIX_FOR_GVE_LOUVAIN: &str = "louvain";
     static SUFFIX_FOR_EXACT_CLOSENESS_CENTRALITY: &str = "exactclosenesscentrality";
+    static SUFFIX_FOR_EXACT_BETWEENNESS_CENTRALITY: &str = "exactbetweennesscentrality";
     static SUFFIX_FOR_EXACT_HARMONIC_CENTRALITY: &str = "exactharmoniccentrality";
     static SUFFIX_FOR_EXACT_LIN_CENTRALITY: &str = "exactlincentrality";
     #[cfg(any(test, feature = "bench"))]
@@ -421,6 +443,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::Landmarks(_) => SUFFIX_FOR_LANDMARKS,
         FileType::Spectral(_) => SUFFIX_FOR_SPECTRAL,
         FileType::LabelPropagation(_) => SUFFIX_FOR_LABEL_PROPAGATION,
+        FileType::Betweenness(_) => SUFFIX_FOR_BETWEENNESS,
         FileType::DFS(_) => SUFFIX_FOR_DFS,
         FileType::DfsVisitor(_) => SUFFIX_FOR_DFS_VISITOR,
         FileType::BfsVisitor(_) => SUFFIX_FOR_BFS_VISITOR,
@@ -446,6 +469,7 @@ fn suffix_for_file_type(target_type: &FileType) -> &'static str {
         FileType::HyperBallLinCentrality(_) => SUFFIX_FOR_HYPERBALL_LIN_CENTRALITY,
         FileType::GVELouvain(_) => SUFFIX_FOR_GVE_LOUVAIN,
         FileType::ExactClosenessCentrality(_) => SUFFIX_FOR_EXACT_CLOSENESS_CENTRALITY,
+        FileType::ExactBetweennessCentrality(_) => SUFFIX_FOR_EXACT_BETWEENNESS_CENTRALITY,
         FileType::ExactHarmonicCentrality(_) => SUFFIX_FOR_EXACT_HARMONIC_CENTRALITY,
         FileType::ExactLinCentrality(_) => SUFFIX_FOR_EXACT_LIN_CENTRALITY,
         FileType::ConnectedComponents(_) => "components",
@@ -531,6 +555,7 @@ impl std::fmt::Display for FileType {
             FileType::Landmarks(_) => "Landmarks",
             FileType::Spectral(_) => "Spectral",
             FileType::LabelPropagation(_) => "LabelPropagation",
+            FileType::Betweenness(_) => "Betweenness",
             FileType::DFS(_) => "DFS",
             FileType::DfsVisitor(_) => "DfsVisitor",
             FileType::BfsVisitor(_) => "BfsVisitor",
@@ -556,6 +581,7 @@ impl std::fmt::Display for FileType {
             FileType::HyperBallLinCentrality(_) => "HyperBallLinCentrality",
             FileType::GVELouvain(_) => "Louvain",
             FileType::ExactClosenessCentrality(_) => "ExactClosenessCentrality",
+            FileType::ExactBetweennessCentrality(_) => "ExactBetweennessCentrality",
             FileType::ExactHarmonicCentrality(_) => "ExactHarmonicCentrality",
             FileType::ExactLinCentrality(_) => "ExactLinCentrality",
             FileType::ConnectedComponents(_) => "ConnectedComponents",

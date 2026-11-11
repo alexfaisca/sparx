@@ -9,7 +9,7 @@ use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
-type ProceduralMemoryLiuEtAL<Ix, Cx> = (
+pub(crate) type ProceduralMemoryLiuEtAL<Ix, Cx> = (
     AbstractedProceduralMemoryMut<<Cx as CoreCount>::Atomic>,
     AbstractedProceduralMemoryMut<Ix>,
     AbstractedProceduralMemoryMut<AtomicBool>,
@@ -266,215 +266,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
             return Ok(());
         }
 
-        let threads = self.threads;
-        let thread_load = node_count.div_ceil(threads);
-
         let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
         let neighbour_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
-
-        let (degree, _node_index, alive, frontier, swap) = proc_mem;
-        let mut coreness = self.k_cores.shared_slice();
-
-        // Initialize
-        let total_dead_nodes = thread::scope(
-            |s| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-                let mut dead_nodes = vec![];
-                for tid in 0..threads {
-                    let mut degree = degree.shared_slice();
-                    let mut alive = alive.shared_slice();
-
-                    let start = std::cmp::min(tid * thread_load, node_count);
-                    let end = std::cmp::min(start + thread_load, node_count);
-
-                    dead_nodes.push(s.spawn(
-                        move |_| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-                            let mut dead_nodes = 0;
-
-                            for u in start..end {
-                                let deg_u = index_ptr.get(u + 1).index() - index_ptr.get(u).index();
-                                check_degree::<Cx>(u, deg_u)?;
-                                degree.get_mut(u).set_count(deg_u);
-
-                                if deg_u == 0 {
-                                    dead_nodes += 1;
-                                    *alive.get_mut(u) = AtomicBool::new(false);
-                                } else {
-                                    *alive.get_mut(u) = AtomicBool::new(true);
-                                }
-                            }
-
-                            Ok(dead_nodes)
-                        },
-                    ));
-                }
-                let mut total_dead_nodes = 0;
-                for handle in dead_nodes {
-                    total_dead_nodes += handle.join().map_err(
-                        |e| -> Box<dyn std::error::Error + Send + Sync> {
-                            format!("{:?}", e).into()
-                        },
-                    )??;
-                }
-                let _ = degree.flush_async();
-                let _ = alive.flush_async();
-                Ok(total_dead_nodes)
-            },
-        )
-        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-
-        // ditch node sampling as graphs are inherintely sparse
-        // use veertical granularity control:
-        // When peeling a low-degree vertex 𝑣, we
-        // place all its active neighbors in a FIFO queue, referred to as the local
-        // queue of 𝑣, and process all vertices in the local queue sequentially.
-        // When we decrementing the induced degree of a neighbor 𝑢, if 𝑑˜ [𝑢]
-        // drops to 𝑘 (line 6 in Alg. 3), instead of adding 𝑢 to Fnext , we add 𝑢 to
-        // the local queue. This allows 𝑢 to be processed in the same subround
-        // as 𝑣, rather than waiting for the next subround. We refer to this
-        // process as a local search at 𝑣.
-
-        // --- core-peeling loop (Liu et al. algorithm) ---
-        // for nodes with degree <= 16 no bucketing is used
-        let mut k = 1usize;
-        // number of vertices not yet peeled
-        let remaining_global = Arc::new(AtomicUsize::new(node_count - total_dead_nodes));
-        let frontier = SharedQueueMut::<Ix>::from_shared_slice(frontier.shared_slice());
-        let swap = SharedQueueMut::<Ix>::from_shared_slice(swap.shared_slice());
-        let synchronize = Arc::new(Barrier::new(threads));
-
-        thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
-            for tid in 0..threads {
-                let degree = &degree;
-                let alive = alive.shared_slice();
-                let mut frontier = frontier.clone();
-                let mut swap = swap.clone();
-
-                let remaining_global = Arc::clone(&remaining_global);
-                let synchronize = Arc::clone(&synchronize);
-
-                let start = std::cmp::min(tid * thread_load, node_count);
-                let end = std::cmp::min(start + thread_load, node_count);
-
-                s.spawn(
-                    move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                        let mut local_stack: Vec<Ix> = vec![];
-                        let max_len = 256;
-
-                        while remaining_global.load(Ordering::Relaxed) > 0 {
-                            synchronize.wait();
-                            // build initial frontier = all vertices with degree <= k that are still active.
-                            for u in start..end {
-                                if alive.get(u).load(Ordering::Relaxed)
-                                    && degree.get(u).count() <= k
-                                {
-                                    alive.get(u).store(false, Ordering::Relaxed);
-                                    let _ = frontier.push(Ix::new(u));
-                                }
-                            }
-
-                            synchronize.wait();
-
-                            if frontier.is_empty() {
-                                // past the largest degree, which fits a `Cx`, all are peeled
-                                if k == Cx::MAX {
-                                    return Err(format!(
-                                        "error overflow when adding to k ({k} + 1)"
-                                    )
-                                    .into());
-                                }
-                                k += 1;
-                                continue;
-                            }
-
-                            // process subrounds for current k: peel all vertices with degree k.
-                            while !frontier.is_empty() {
-                                if tid == 0 {
-                                    remaining_global.fetch_sub(frontier.len(), Ordering::Relaxed);
-                                }
-
-                                let chunk_size = frontier.len().div_ceil(threads);
-                                let start = std::cmp::min(tid * chunk_size, frontier.len());
-                                let end = std::cmp::min(start + chunk_size, frontier.len());
-
-                                if let Some(chunk) = frontier.slice(start, end) {
-                                    for i in 0..end - start {
-                                        // set coreness and decrement neighbour degrees
-                                        let u = chunk.get(i).index();
-                                        *coreness.get_mut(u) = Cx::from_usize(k);
-
-                                        // for each neighbor v of u:
-                                        for idx in
-                                            index_ptr.get(u).index()..index_ptr.get(u + 1).index()
-                                        {
-                                            let v = neighbour_ptr.get(idx).index();
-                                            if let Some(old) = degree.get(v).decrement_above(k)
-                                                && old == k + 1
-                                            {
-                                                let life =
-                                                    alive.get(v).swap(false, Ordering::Relaxed);
-                                                if life {
-                                                    if local_stack.len() < max_len {
-                                                        local_stack.push(Ix::new(v));
-                                                    } else {
-                                                        let _ = swap.push(Ix::new(v));
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // process local stack
-                                        let mut read_in_stack: usize = 0;
-                                        while let Some(u) = local_stack.pop() {
-                                            // set coreness and decrement neighbour degrees
-                                            read_in_stack += 1;
-                                            let u = u.index();
-                                            *coreness.get_mut(u) = Cx::from_usize(k);
-
-                                            for idx in index_ptr.get(u).index()
-                                                ..index_ptr.get(u + 1).index()
-                                            {
-                                                let v = neighbour_ptr.get(idx).index();
-                                                if let Some(old) = degree.get(v).decrement_above(k)
-                                                    && old == k + 1
-                                                {
-                                                    let life =
-                                                        alive.get(v).swap(false, Ordering::Relaxed);
-                                                    if life {
-                                                        if local_stack.len() < max_len {
-                                                            local_stack.push(Ix::new(v));
-                                                        } else {
-                                                            let _ = swap.push(Ix::new(v));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        remaining_global
-                                            .fetch_sub(read_in_stack, Ordering::Relaxed);
-                                    }
-                                }
-
-                                synchronize.wait();
-
-                                swap = std::mem::replace(&mut frontier, swap).clear();
-
-                                synchronize.wait();
-                            }
-                            if k == Cx::MAX && remaining_global.load(Ordering::Relaxed) > 0 {
-                                return Err(
-                                    format!("error overflow when adding to k ({k} + 1)").into()
-                                );
-                            }
-                            k += 1;
-                        }
-                        Ok(())
-                    },
-                );
-            }
-            Ok(())
-        })
-        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
+        let coreness = self.k_cores.shared_slice();
+        liu_peel(
+            index_ptr,
+            neighbour_ptr,
+            node_count,
+            self.threads,
+            &|u| index_ptr.get(u + 1).index() - index_ptr.get(u).index(),
+            proc_mem,
+            coreness,
+        )?;
 
         let env_verbose_val = std::env::var("BRUIJNX_VERBOSE").unwrap_or_else(|_| "0".to_string());
         let verbose: bool = env_verbose_val == "1";
@@ -498,6 +301,231 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
 
         Ok(())
     }
+}
+
+/// Liu et al.'s parallel peeling (see [`AlgoLiuEtAl`]) of a graph given by its arcs (`index_ptr`
+/// and `neighbour_ptr`, a CSR of `node_count` nodes) on `threads` threads: peeling a node lowers
+/// the degree of the heads of its arcs, each node's starting at `initial_degree(node)`. Each
+/// node's coreness is set in `coreness`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
+    index_ptr: SharedSlice<Ix>,
+    neighbour_ptr: SharedSlice<Ix>,
+    node_count: usize,
+    threads: usize,
+    initial_degree: &(dyn Fn(usize) -> usize + Sync),
+    proc_mem: ProceduralMemoryLiuEtAL<Ix, Cx>,
+    coreness: SharedSliceMut<Cx>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if node_count == 0 {
+        return Ok(());
+    }
+    let threads = threads.max(1);
+    let thread_load = node_count.div_ceil(threads);
+
+    let (degree, _node_index, alive, frontier, swap) = proc_mem;
+    let mut coreness = coreness;
+
+    // Initialize
+    let total_dead_nodes = thread::scope(
+        |s| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            let mut dead_nodes = vec![];
+            for tid in 0..threads {
+                let mut degree = degree.shared_slice();
+                let mut alive = alive.shared_slice();
+
+                let start = std::cmp::min(tid * thread_load, node_count);
+                let end = std::cmp::min(start + thread_load, node_count);
+
+                dead_nodes.push(s.spawn(
+                    move |_| -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+                        let mut dead_nodes = 0;
+
+                        for u in start..end {
+                            let deg_u = initial_degree(u);
+                            check_degree::<Cx>(u, deg_u)?;
+                            degree.get_mut(u).set_count(deg_u);
+
+                            // nodes of degree 0 lowering no other's (no arcs out)
+                            // are peeled already; others, at k = 0
+                            if deg_u == 0
+                                && index_ptr.get(u + 1).index() == index_ptr.get(u).index()
+                            {
+                                dead_nodes += 1;
+                                *alive.get_mut(u) = AtomicBool::new(false);
+                            } else {
+                                *alive.get_mut(u) = AtomicBool::new(true);
+                            }
+                        }
+
+                        Ok(dead_nodes)
+                    },
+                ));
+            }
+            let mut total_dead_nodes = 0;
+            for handle in dead_nodes {
+                total_dead_nodes +=
+                    handle
+                        .join()
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("{:?}", e).into()
+                        })??;
+            }
+            let _ = degree.flush_async();
+            let _ = alive.flush_async();
+            Ok(total_dead_nodes)
+        },
+    )
+    .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
+    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+
+    // ditch node sampling as graphs are inherintely sparse
+    // use veertical granularity control:
+    // When peeling a low-degree vertex 𝑣, we
+    // place all its active neighbors in a FIFO queue, referred to as the local
+    // queue of 𝑣, and process all vertices in the local queue sequentially.
+    // When we decrementing the induced degree of a neighbor 𝑢, if 𝑑˜ [𝑢]
+    // drops to 𝑘 (line 6 in Alg. 3), instead of adding 𝑢 to Fnext , we add 𝑢 to
+    // the local queue. This allows 𝑢 to be processed in the same subround
+    // as 𝑣, rather than waiting for the next subround. We refer to this
+    // process as a local search at 𝑣.
+
+    // --- core-peeling loop (Liu et al. algorithm) ---
+    // for nodes with degree <= 16 no bucketing is used
+    let mut k = 0usize;
+    // number of vertices not yet peeled
+    let remaining_global = Arc::new(AtomicUsize::new(node_count - total_dead_nodes));
+    let frontier = SharedQueueMut::<Ix>::from_shared_slice(frontier.shared_slice());
+    let swap = SharedQueueMut::<Ix>::from_shared_slice(swap.shared_slice());
+    let synchronize = Arc::new(Barrier::new(threads));
+
+    thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
+        for tid in 0..threads {
+            let degree = &degree;
+            let alive = alive.shared_slice();
+            let mut frontier = frontier.clone();
+            let mut swap = swap.clone();
+
+            let remaining_global = Arc::clone(&remaining_global);
+            let synchronize = Arc::clone(&synchronize);
+
+            let start = std::cmp::min(tid * thread_load, node_count);
+            let end = std::cmp::min(start + thread_load, node_count);
+
+            s.spawn(
+                move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    let mut local_stack: Vec<Ix> = vec![];
+                    let max_len = 256;
+
+                    while remaining_global.load(Ordering::Relaxed) > 0 {
+                        synchronize.wait();
+                        // build initial frontier = all vertices with degree <= k that are still active.
+                        for u in start..end {
+                            if alive.get(u).load(Ordering::Relaxed) && degree.get(u).count() <= k {
+                                alive.get(u).store(false, Ordering::Relaxed);
+                                let _ = frontier.push(Ix::new(u));
+                            }
+                        }
+
+                        synchronize.wait();
+
+                        if frontier.is_empty() {
+                            // past the largest degree, which fits a `Cx`, all are peeled
+                            if k == Cx::MAX {
+                                return Err(
+                                    format!("error overflow when adding to k ({k} + 1)").into()
+                                );
+                            }
+                            k += 1;
+                            continue;
+                        }
+
+                        // process subrounds for current k: peel all vertices with degree k.
+                        while !frontier.is_empty() {
+                            if tid == 0 {
+                                remaining_global.fetch_sub(frontier.len(), Ordering::Relaxed);
+                            }
+
+                            let chunk_size = frontier.len().div_ceil(threads);
+                            let start = std::cmp::min(tid * chunk_size, frontier.len());
+                            let end = std::cmp::min(start + chunk_size, frontier.len());
+
+                            if let Some(chunk) = frontier.slice(start, end) {
+                                for i in 0..end - start {
+                                    // set coreness and decrement neighbour degrees
+                                    let u = chunk.get(i).index();
+                                    *coreness.get_mut(u) = Cx::from_usize(k);
+
+                                    // for each neighbor v of u:
+                                    for idx in
+                                        index_ptr.get(u).index()..index_ptr.get(u + 1).index()
+                                    {
+                                        let v = neighbour_ptr.get(idx).index();
+                                        if let Some(old) = degree.get(v).decrement_above(k)
+                                            && old == k + 1
+                                        {
+                                            let life = alive.get(v).swap(false, Ordering::Relaxed);
+                                            if life {
+                                                if local_stack.len() < max_len {
+                                                    local_stack.push(Ix::new(v));
+                                                } else {
+                                                    let _ = swap.push(Ix::new(v));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // process local stack
+                                    let mut read_in_stack: usize = 0;
+                                    while let Some(u) = local_stack.pop() {
+                                        // set coreness and decrement neighbour degrees
+                                        read_in_stack += 1;
+                                        let u = u.index();
+                                        *coreness.get_mut(u) = Cx::from_usize(k);
+
+                                        for idx in
+                                            index_ptr.get(u).index()..index_ptr.get(u + 1).index()
+                                        {
+                                            let v = neighbour_ptr.get(idx).index();
+                                            if let Some(old) = degree.get(v).decrement_above(k)
+                                                && old == k + 1
+                                            {
+                                                let life =
+                                                    alive.get(v).swap(false, Ordering::Relaxed);
+                                                if life {
+                                                    if local_stack.len() < max_len {
+                                                        local_stack.push(Ix::new(v));
+                                                    } else {
+                                                        let _ = swap.push(Ix::new(v));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    remaining_global.fetch_sub(read_in_stack, Ordering::Relaxed);
+                                }
+                            }
+
+                            synchronize.wait();
+
+                            swap = std::mem::replace(&mut frontier, swap).clear();
+
+                            synchronize.wait();
+                        }
+                        if k == Cx::MAX && remaining_global.load(Ordering::Relaxed) > 0 {
+                            return Err(format!("error overflow when adding to k ({k} + 1)").into());
+                        }
+                        k += 1;
+                    }
+                    Ok(())
+                },
+            );
+        }
+        Ok(())
+    })
+    .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })??;
+
+    Ok(())
 }
 
 #[cfg(test)]

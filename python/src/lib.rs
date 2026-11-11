@@ -25,6 +25,7 @@ use sparx::assortativity::{
     Correlation, DegreeType, attribute_assortativity, degree_assortativity,
     directed_degree_assortativity, numeric_assortativity,
 };
+use sparx::centralities::betweenness::{Betweenness, BetweennessEngine, BetweennessOptions};
 use sparx::centralities::exact::{
     ExactClosenessCentrality, ExactHarmonicCentrality, ExactLinCentrality,
 };
@@ -867,6 +868,28 @@ fn precision_error(name: &str) -> PyErr {
     PyValueError::new_err(format!(
         "unknown precision {name:?}: expected 'f32' or 'f64'"
     ))
+}
+
+/// Betweenness centralities, as `options` say.
+fn betweenness<I: Ix, L: E, Dir: Reversible>(
+    g: &G<I, Dir, L>,
+    options: BetweennessOptions,
+) -> Res<Out> {
+    cleaning(g, || {
+        let mut b = Betweenness::with_options(g, options)?;
+        let mut entries = vec![
+            ("betweenness", array(b.centralities().to_vec())),
+            ("exact", number(b.is_exact())),
+            ("samples", number(b.samples())),
+            ("sample_cap", number(b.sample_cap())),
+        ];
+        if options.top_k.is_some() {
+            let top: Vec<i64> = b.top().iter().map(|&u| u as i64).collect();
+            entries.push(("top", array(top)));
+        }
+        b.drop_cache()?;
+        Ok(dict(entries))
+    })
 }
 
 fn label_propagation<I: Ix, L: E, Dir: Reversible>(
@@ -1889,6 +1912,50 @@ macro_rules! graph_class {
                 };
                 self.inner
                     .run(py, |g| with_graph!(g, g => label_propagation(g, options)))
+            }
+
+            /// Betweenness centrality (networkx's `betweenness_centrality`, `endpoints=False`):
+            /// `{"betweenness", "exact", "samples", "sample_cap"}`, and `"top"` with `k`.
+            /// `engine="exact"` is Brandes' algorithm, on the graph's threads; `"kadabra"`
+            /// estimates it by KADABRA's adaptive sampling, every node within `epsilon` (as a
+            /// fraction of ordered pairs; `epsilon * n / (n - 2)` normalized) with probability
+            /// `1 - delta`, or, with `k`, until the `k` most central nodes (`"top"`) are told
+            /// apart; `"auto"` (the default) is exact when `|V| |E| <= 1e10`. The same whatever
+            /// the threads (KADABRA, seeded by `seed`); weights must be positive.
+            #[pyo3(signature = (*, engine = "auto", epsilon = 0.01, delta = 0.1, k = None, normalized = true, seed = 0x5eed))]
+            #[allow(clippy::too_many_arguments)]
+            fn betweenness<'py>(
+                &self,
+                py: Python<'py>,
+                engine: &str,
+                epsilon: f64,
+                delta: f64,
+                k: Option<usize>,
+                normalized: bool,
+                seed: u64,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let engine = match engine {
+                    "auto" => BetweennessEngine::Auto,
+                    "exact" => BetweennessEngine::Exact,
+                    "kadabra" => BetweennessEngine::Kadabra,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown engine {engine:?}: expected 'auto', 'exact' or 'kadabra'"
+                        )));
+                    }
+                };
+                let options = BetweennessOptions {
+                    engine,
+                    epsilon,
+                    delta,
+                    top_k: k,
+                    normalized,
+                    seed,
+                };
+                // the crate's own rules, as a ValueError
+                options.validate().map_err(PyValueError::new_err)?;
+                self.inner
+                    .run(py, |g| with_graph!(g, g => betweenness(g, options)))
             }
 
             /// The modularity of a partition given as each node's community label (integers

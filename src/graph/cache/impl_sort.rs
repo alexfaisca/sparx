@@ -1,6 +1,6 @@
 use crate::shared_slice::SharedSliceMut;
 
-use super::{AccumulatorAtomic, GraphCache, utils::apply_permutation_in_place};
+use super::{AccumulatorAtomic, GraphCache, utils::apply_order_in_place};
 
 use crossbeam::thread;
 
@@ -93,15 +93,9 @@ impl<N: super::N, E: super::E, Ix: super::IndexType> GraphCache<N, E, Ix> {
                                         .into()
                                 },
                             )?;
-                            // idx[k]: the edge that goes to position k; applying it needs each edge's
-                            // position instead
+                            // idx[k]: the edge that goes to position k
                             idx.sort_by_key(|&i| node_edges[i]);
-                            destination.clear();
-                            destination.resize(idx.len(), 0);
-                            for (position, &edge) in idx.iter().enumerate() {
-                                destination[edge] = position;
-                            }
-                            apply_permutation_in_place(destination.as_mut_slice(), node_edges, edge_labels);
+                            apply_order_in_place(&idx, &mut destination, node_edges, edge_labels);
                         }
                         Ok(())
                 });

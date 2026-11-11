@@ -38,6 +38,21 @@ with sparx.Graph("graph.mtx", index="u32") as g:  # undirected
     g.numeric_assortativity(values)            # a number per node
     g.attribute_assortativity(labels)          # an integer category per node
 
+    lpa = g.label_propagation()                # {"communities", "count", "modularity", ...}
+    sc = g.spectral_clustering(16)             # 16 clusters (engine="exact", k=None: chosen)
+    emb = g.spectral_embedding(8)              # {"eigenvalues", "vectors", "residuals", ...}
+    q = g.modularity(lpa["communities"])       # of any partition
+    local = g.hk_relax([0])                    # a local community: {"nodes", "conductance", ...}
+    bc = g.betweenness()                       # {"betweenness", "exact", "samples", ...}
+    hubs = g.betweenness(engine="kadabra", epsilon=0.001, k=10)["top"]  # sampled, top 10
+
+with sparx.Graph("roads.mtx", weighted=True, weight_type="f32") as w:  # Matrix Market values
+    w.edge_weights()                           # in csr() order
+    far = w.dijkstra(0, engine="delta")        # weighted distances, in parallel (Δ-stepping)
+    w.build_landmarks(8)                       # for A*
+    path = w.shortest_path(0, 9)               # {"distance", "nodes", "expanded"}
+    paths = w.shortest_paths([0, 1], [9, 5], paths=False)  # distances only, in parallel
+
 with sparx.DiGraph("web.mtx") as d:            # directed
     d.in_degree(0), d.in_neighbours(0)         # and degree/neighbours: out-arcs
     cycles = d.directed_triangles("cycle")     # per arc, directed cycles only
@@ -46,6 +61,7 @@ with sparx.DiGraph("web.mtx") as d:            # directed
     cc = d.clustering()                        # Fagiolo's: {"local", "average"}
     communities = d.louvain()                  # by directed modularity
     refined = d.leiden()                       # the same, with Leiden's refinement
+    spread = d.label_propagation(direction="in")  # labels spreading along arcs
     reach = d.bfs(0, direction="in")           # "out", "in" or "both" (ignoring directions)
     r = d.degree_assortativity(x="out", y="in")  # any of "out" and "in" at either end
     scc = d.components(kind="strong")          # {"components", "count", "sizes"}
@@ -137,6 +153,13 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   `{"eigenvalues", "vectors" (n × count), "residuals", "iterations", "converged"}`. On planted
   partitions it finds clusters Leiden misses; on graphs without a few clear clusters (de Bruijn
   graphs), Leiden's modularity is higher.
+* `betweenness()` is networkx's `betweenness_centrality` (`normalized=True` by default,
+  `endpoints=False`): exact by Brandes' algorithm (`engine="exact"`), or estimated by KADABRA's
+  adaptive sampling (`engine="kadabra"`): every node within `epsilon` (a fraction of ordered
+  pairs: `epsilon * n / (n - 2)` normalized) with probability `1 - delta`, or, with `k`, until
+  the `k` most central nodes (`"top"`) are told apart, which takes far fewer samples. `"auto"`
+  (the default) is exact when `|V| |E| <= 1e10`. Results are the same whatever the threads
+  (`seed` seeds KADABRA); weights must be positive.
 * `louvain()` and `leiden()` communities are connected: any community Louvain leaves
   internally disconnected is split into its parts, which only raises modularity. `leiden()`
   refines each pass's communities into connected sub-communities before aggregating them

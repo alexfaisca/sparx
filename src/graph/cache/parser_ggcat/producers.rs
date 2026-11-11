@@ -1,5 +1,5 @@
 use crate::graph::cache::{
-    GraphCache, MultithreadedParserIndexBounds, utils::apply_permutation_in_place,
+    GraphCache, MultithreadedParserIndexBounds, utils::apply_order_in_place,
 };
 
 use crossbeam::thread;
@@ -392,6 +392,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                     let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
+                    let mut destination: Vec<usize> = Vec::new();
 
                     while let Some(line) = lines.next() {
                         if line.is_empty() {
@@ -429,9 +430,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                             }
                         }
 
-                        // FIXME: test sort e_labels
+                        // neighbours sorted, each edge label following its own (see
+                        // `edge_labels_follow_their_sorted_neighbours`)
                         idx.sort_by_key(|&i| node_neighbors[i]);
-                        apply_permutation_in_place(idx.as_mut_slice(), node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
+                        apply_order_in_place(&idx, &mut destination, node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
 
                         emit(id, node_neighbors.as_slice(), edge_labels.as_slice());
                         node_neighbors.clear();
@@ -481,6 +483,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                     let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
+                    let mut destination: Vec<usize> = Vec::new();
 
                     while let Some(line) = lines.next() {
                         if line.is_empty() {
@@ -524,9 +527,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                             }
                         }
 
-                        // FIXME: test sort e_labels
+                        // neighbours sorted, each edge label following its own (see
+                        // `edge_labels_follow_their_sorted_neighbours`)
                         idx.sort_by_key(|&i| node_neighbors[i]);
-                        apply_permutation_in_place(idx.as_mut_slice(), node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
+                        apply_order_in_place(&idx, &mut destination, node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
 
                         emit(id, node_neighbors.as_slice(), color, edge_labels.as_slice());
                         node_neighbors.clear();
@@ -683,6 +687,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                     let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
+                    let mut destination: Vec<usize> = Vec::new();
 
                     let mut current_batch: Vec<(&[u8], u64)> = Vec::with_capacity(batch_size);
 
@@ -731,9 +736,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                             }
                         }
 
-                        // FIXME: test sort e_labels
+                        // neighbours sorted, each edge label following its own (see
+                        // `edge_labels_follow_their_sorted_neighbours`)
                         idx.sort_by_key(|&i| node_neighbors[i]);
-                        apply_permutation_in_place(idx.as_mut_slice(), node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
+                        apply_order_in_place(&idx, &mut destination, node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
 
                         emit(id, node_neighbors.as_slice(), edge_labels.as_slice());
                         node_neighbors.clear();
@@ -903,6 +909,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                     let mut node_neighbors: Vec<Ix> = Vec::with_capacity(u16::MAX as usize);
                     let mut edge_labels = Vec::with_capacity(u16::MAX as usize);
                     let mut idx = Vec::with_capacity(u16::MAX as usize);
+                    let mut destination: Vec<usize> = Vec::new();
 
                     let mut current_batch: Vec<(&'a [u8], u64)> = Vec::with_capacity(batch_size);
 
@@ -957,9 +964,10 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphC
                             }
                         }
 
-                        // FIXME: test sort e_labels
+                        // neighbours sorted, each edge label following its own (see
+                        // `edge_labels_follow_their_sorted_neighbours`)
                         idx.sort_by_key(|&i| node_neighbors[i]);
-                        apply_permutation_in_place(idx.as_mut_slice(), node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
+                        apply_order_in_place(&idx, &mut destination, node_neighbors.as_mut_slice(), edge_labels.as_mut_slice());
 
                         emit(id, node_neighbors.as_slice(), color, edge_labels.as_slice());
                         node_neighbors.clear();

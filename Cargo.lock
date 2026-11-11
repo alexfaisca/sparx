@@ -1665,7 +1665,7 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "sparx-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitfield",
  "bytemuck",
@@ -1692,25 +1692,14 @@ dependencies = [
  "rustworkx-core",
  "sha2",
  "smallvec",
- "sparx-graph-derive",
  "static_assertions",
  "sys-info",
  "wgpu",
 ]
 
 [[package]]
-name = "sparx-graph-derive"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "sparx-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "numpy",
  "pyo3",

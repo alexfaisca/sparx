@@ -34,6 +34,7 @@
 //! linking them), numbered by their least node.
 
 use crate::graph;
+use crate::graph::csr::Csr;
 use crate::graph::*;
 use crate::shared_slice::*;
 use crate::trails::astar::Reversible;
@@ -163,45 +164,6 @@ fn chunked<T: Send, S>(
     });
     parts.sort_unstable_by_key(|p| p.0);
     parts.into_iter().map(|p| p.1).collect()
-}
-
-/// A graph's arcs, compressed by row (a graph's own, or its transpose's).
-#[derive(Clone, Copy)]
-struct Csr<'g, Ix, E> {
-    offsets: &'g [Ix],
-    targets: &'g [Ix],
-    weights: &'g [E],
-}
-
-impl<'g, Ix: graph::IndexType, E: graph::E> Csr<'g, Ix, E> {
-    fn of<N: graph::N, Dir: Directedness>(g: &'g GraphMemoryMap<N, E, Ix, Dir>) -> Self {
-        let offsets = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
-        let targets = SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width());
-        let weights = SharedSlice::<E>::new(g.edge_labels_ptr(), g.width());
-        // the slices live as long as `g`'s maps
-        unsafe {
-            Self {
-                offsets: std::slice::from_raw_parts(
-                    offsets.as_slice().as_ptr(),
-                    offsets.as_slice().len(),
-                ),
-                targets: std::slice::from_raw_parts(
-                    targets.as_slice().as_ptr(),
-                    targets.as_slice().len(),
-                ),
-                weights: std::slice::from_raw_parts(
-                    weights.as_slice().as_ptr(),
-                    weights.as_slice().len(),
-                ),
-            }
-        }
-    }
-
-    /// `u`'s arcs' range.
-    #[inline(always)]
-    fn range(&self, u: usize) -> std::ops::Range<usize> {
-        self.offsets[u].index()..self.offsets[u + 1].index()
-    }
 }
 
 /// The nodes by color (Jones and Plassmann's, see the [module docs](self)), no two nodes linked

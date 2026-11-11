@@ -1511,3 +1511,218 @@ def test_local_communities():
         with pytest.raises(ValueError, match="out of range"):
             g.sweep_cut([0, 500], [1.0, 0.5])
     assert not hasattr(sparx.DiGraph, "hk_relax")
+
+
+@pytest.mark.parametrize("G", list(weighted_graphs()))
+def test_f32_weights(G):
+    with sparx.Graph(weighted_undirected(G), weighted=True, weight_type="f32") as g:
+        assert g.weight_type == "f32"
+        src, dst = edge_list(g)
+        want = [np.float32(G[u][v]["weight"]) for u, v in zip(src.tolist(), dst.tolist())]
+        np.testing.assert_array_equal(g.edge_weights(), np.array(want, dtype=np.float64))
+    with sparx.Graph(weighted_undirected(G), weighted=True) as g:
+        assert g.weight_type == "f64"
+    with sparx.Graph(undirected(G)) as g:
+        assert g.weight_type is None
+    with pytest.raises(ValueError):
+        sparx.Graph(weighted_undirected(G), weighted=True, weight_type="f16")
+
+
+def test_f32_weighted_graphs_reopen(cache_dir):
+    G = with_random_weights(nx.gnp_random_graph(30, 0.2, seed=4), 4)
+    with sparx.Graph(weighted_undirected(G), weighted=True, weight_type="f32", keep_cache=True) as g:
+        cache_file, weights = g.cache_file, g.edge_weights()
+    with sparx.Graph.open(cache_file, weighted=True, weight_type="f32") as g:
+        assert g.weight_type == "f32"
+        np.testing.assert_array_equal(g.edge_weights(), weights)
+    for f in os.listdir(cache_dir):
+        os.remove(cache_dir / f)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_modularity_of_given_partitions_against_networkx(weighted):
+    G = with_random_weights(nx.gnp_random_graph(50, 0.1, seed=3), 3)
+    D = with_random_weights(nx.gnp_random_graph(40, 0.12, seed=3, directed=True), 3, True)
+    labels = np.random.default_rng(0).integers(0, 5, 50)
+    weight = "weight" if weighted else None
+    path = weighted_undirected(G) if weighted else undirected(G)
+    with sparx.Graph(path, weighted=weighted) as g:
+        parts = [set(np.flatnonzero(labels == c).tolist()) for c in np.unique(labels)]
+        assert g.modularity(labels) == pytest.approx(
+            nx.community.modularity(G, parts, weight=weight), abs=1e-12
+        )
+        with pytest.raises(ValueError):
+            g.modularity(labels[:-1])
+        with pytest.raises(ValueError):
+            g.modularity(np.full(50, -1))
+    path = weighted_directed(D) if weighted else directed(D)
+    with sparx.DiGraph(path, weighted=weighted) as d:
+        labels = labels[:40]
+        parts = [set(np.flatnonzero(labels == c).tolist()) for c in np.unique(labels)]
+        assert d.modularity(labels) == pytest.approx(
+            nx.community.modularity(D, parts, weight=weight), abs=1e-12
+        )
+
+
+def conductance(G, nodes):
+    nodes = set(nodes)
+    cut = nx.cut_size(G, nodes)
+    return cut / min(nx.volume(G, nodes), nx.volume(G, set(G) - nodes))
+
+
+def two_cliques():
+    # two 8-cliques joined by one edge: the community around a node is its clique
+    G = nx.disjoint_union(nx.complete_graph(8), nx.complete_graph(8))
+    G.add_edge(0, 8)
+    return G
+
+
+def test_local_communities():
+    G = two_cliques()
+    with sparx.Graph(undirected(G)) as g:
+        for community in [g.hk_relax([3]), g.hkpr(3), g.hkpr(3, random_seed=7)]:
+            assert set(community["nodes"].tolist()) == set(range(8))
+            assert community["size"] == 8
+            assert community["volume"] == nx.volume(G, range(8))
+            assert community["conductance"] == pytest.approx(conductance(G, range(8)))
+            assert np.all(np.diff(community["heat"]) <= 0)
+        # the same seed, the same community
+        assert g.hkpr(12)["nodes"].tolist() == g.hkpr(12)["nodes"].tolist()
+        with pytest.raises(ValueError):
+            g.hk_relax([16])
+        with pytest.raises(ValueError):
+            g.hkpr(16)
+
+
+def test_sweep_cut_finds_the_best_prefix():
+    G = two_cliques()
+    rng = np.random.default_rng(5)
+    with sparx.Graph(undirected(G)) as g:
+        nodes = rng.permutation(16)
+        heat = rng.uniform(0, 1, 16)
+        order = sorted(range(16), key=lambda i: (-heat[i], nodes[i]))
+        prefixes = [nodes[order[: k + 1]].tolist() for k in range(15)]
+        best = min(conductance(G, p) for p in prefixes)
+        assert g.sweep_cut(nodes, heat)["conductance"] == pytest.approx(best)
+        # heat that's high on one clique cuts it out
+        heat = np.where(np.arange(16) < 8, 1.0, 0.0) + rng.uniform(0, 0.1, 16)
+        assert set(g.sweep_cut(np.arange(16), heat)["nodes"].tolist()) == set(range(8))
+        with pytest.raises(ValueError):
+            g.sweep_cut([0, 1], [1.0])
+        with pytest.raises(ValueError):
+            g.sweep_cut([0, 16], [1.0, 0.5])
+        with pytest.raises(ValueError):
+            g.sweep_cut([0, 1], [1.0, np.nan])
+
+
+def test_betweenness_against_networkx(nx_graph, index):
+    want = nx.betweenness_centrality(nx_graph)
+    raw = nx.betweenness_centrality(nx_graph, normalized=False)
+    with sparx.Graph(undirected(nx_graph), index=index) as g:
+        b = g.betweenness(engine="exact")
+        assert b["exact"] and b["samples"] == 0 and "top" not in b
+        np.testing.assert_allclose(b["betweenness"], [want[u] for u in range(len(nx_graph))], atol=1e-12)
+        b = g.betweenness(engine="exact", normalized=False)["betweenness"]
+        np.testing.assert_allclose(b, [raw[u] for u in range(len(nx_graph))], atol=1e-9)
+        # small graphs are exact by default
+        assert g.betweenness()["exact"]
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_directed_betweenness_against_networkx(seed):
+    D = nx.gnp_random_graph(40, 0.08, seed=seed, directed=True)
+    want = nx.betweenness_centrality(D)
+    with sparx.DiGraph(directed(D)) as d:
+        b = d.betweenness(engine="exact")["betweenness"]
+        np.testing.assert_allclose(b, [want[u] for u in range(40)], atol=1e-12)
+
+
+@pytest.mark.parametrize("G", list(weighted_graphs()))
+def test_weighted_betweenness_against_networkx(G):
+    want = nx.betweenness_centrality(G, weight="weight")
+    with sparx.Graph(weighted_undirected(G), weighted=True) as g:
+        b = g.betweenness(engine="exact")["betweenness"]
+        np.testing.assert_allclose(b, [want[u] for u in range(len(G))], atol=1e-12)
+        approx = g.betweenness(engine="kadabra", epsilon=0.02)
+        n = len(G)
+        assert np.max(np.abs(approx["betweenness"] - b)) <= 0.02 * n / (n - 2)
+
+
+@pytest.mark.parametrize("D", list(weighted_digraphs()))
+def test_weighted_directed_betweenness_against_networkx(D):
+    want = nx.betweenness_centrality(D, weight="weight")
+    with sparx.DiGraph(weighted_directed(D), weighted=True) as d:
+        b = d.betweenness(engine="exact")["betweenness"]
+        np.testing.assert_allclose(b, [want[u] for u in range(len(D))], atol=1e-12)
+
+
+def test_kadabra_betweenness():
+    G = nx.barabasi_albert_graph(400, 3, seed=2)
+    D = nx.gnp_random_graph(200, 0.03, seed=2, directed=True)
+    for graph, cls, path in [(G, sparx.Graph, undirected(G)), (D, sparx.DiGraph, directed(D))]:
+        n = len(graph)
+        want = nx.betweenness_centrality(graph)
+        want = np.array([want[u] for u in range(n)])
+        runs = []
+        for threads in [1, 4]:
+            with cls(path, threads=threads) as g:
+                b = g.betweenness(engine="kadabra", epsilon=0.01)
+                assert not b["exact"] and 0 < b["samples"] <= b["sample_cap"]
+                assert np.max(np.abs(b["betweenness"] - want)) <= 0.01 * n / (n - 2)
+                runs.append(b)
+                other = g.betweenness(engine="kadabra", epsilon=0.01, seed=1)["betweenness"]
+                assert not np.array_equal(other, b["betweenness"])
+        # the same whatever the threads
+        assert runs[0]["samples"] == runs[1]["samples"]
+        np.testing.assert_array_equal(runs[0]["betweenness"], runs[1]["betweenness"])
+
+
+def test_betweenness_top_k():
+    G = nx.barabasi_albert_graph(500, 2, seed=5)
+    want = nx.betweenness_centrality(G)
+    best = max(want, key=want.get)
+    with sparx.Graph(undirected(G)) as g:
+        exact = g.betweenness(engine="exact", k=5)
+        assert exact["top"].tolist() == sorted(want, key=lambda u: (-want[u], u))[:5]
+        top = g.betweenness(engine="kadabra", epsilon=0.001, k=1)
+        assert top["top"].tolist() == [best]
+        assert top["samples"] < top["sample_cap"]
+
+
+def test_betweenness_invalid_arguments():
+    G = nx.path_graph(4)
+    with sparx.Graph(undirected(G)) as g:
+        for kwargs in [
+            {"engine": "fast"},
+            {"epsilon": 0},
+            {"epsilon": 1.5},
+            {"delta": 0},
+            {"k": 0},
+        ]:
+            with pytest.raises(ValueError):
+                g.betweenness(**kwargs)
+    G = nx.path_graph(4)
+    for u, v in G.edges():
+        G[u][v]["weight"] = 0.0 if u == 1 else 1.0
+    with sparx.Graph(weighted_undirected(G), weighted=True) as g:
+        with pytest.raises(Exception):
+            g.betweenness()
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_betweenness_on_graphs_with_articulation_points(seed):
+    # trees joined into a few cycles, and cliques chained by paths: many biconnected components
+    G = nx.random_labeled_tree(60, seed=seed) if hasattr(nx, "random_labeled_tree") else nx.random_tree(60, seed=seed)
+    rng = np.random.default_rng(seed)
+    for _ in range(6):
+        u, v = rng.integers(0, 60, 2)
+        if u != v:
+            G.add_edge(int(u), int(v))
+    G = nx.disjoint_union_all([G, nx.barbell_graph(5, 4), nx.lollipop_graph(4, 3), nx.empty_graph(2)])
+    want = nx.betweenness_centrality(G)
+    raw = nx.betweenness_centrality(G, normalized=False)
+    with sparx.Graph(undirected(G), threads=4) as g:
+        b = g.betweenness(engine="exact")["betweenness"]
+        np.testing.assert_allclose(b, [want[u] for u in range(len(G))], atol=1e-12)
+        b = g.betweenness(engine="exact", normalized=False)["betweenness"]
+        np.testing.assert_allclose(b, [raw[u] for u in range(len(G))], atol=1e-9)

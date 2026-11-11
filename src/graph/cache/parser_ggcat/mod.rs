@@ -835,4 +835,89 @@ mod test {
         assert!(graphs[0].1 > 0);
         assert!(graphs.iter().all(|g| *g == graphs[0]));
     }
+
+    crate::label! {
+        struct Direction(usize): E;
+        struct Color(usize): N;
+    }
+
+    /// A node's links: (neighbour, own end's sign, neighbour's end's sign).
+    type Links = Vec<(usize, &'static str, &'static str)>;
+
+    /// Each node's links, in an order whose sort isn't its own inverse (so that applying the
+    /// sort's permutation the wrong way round leaves them unsorted), each its own direction.
+    fn links() -> Vec<(usize, Links)> {
+        let dirs = [("+", "+"), ("+", "-"), ("-", "+"), ("-", "-")];
+        (0..12)
+            .map(|u| {
+                let dests = [
+                    (u + 5) % 12,
+                    (u + 3) % 12,
+                    (u + 9) % 12,
+                    (u + 1) % 12,
+                    (u + 7) % 12,
+                ];
+                let links = dests
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &d)| (d, dirs[(u + i) % 4].0, dirs[(u + i) % 4].1))
+                    .collect();
+                (u, links)
+            })
+            .collect()
+    }
+
+    /// Edge labels (GGCAT links' directions) follow their neighbours as each node's neighbours are
+    /// sorted: neighbours come out sorted, each with its own link's direction, by the edge-labels
+    /// and the node-and-edge-labels parses alike.
+    #[test]
+    fn edge_labels_follow_their_sorted_neighbours() {
+        let dir = unique_test_dir("ggcat_edge_labels");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("labelled.txt");
+        let mut text = String::new();
+        let mut want: Vec<Vec<(usize, usize)>> = vec![];
+        for (u, links) in links() {
+            text += &format!(">{u} 31 C:{}", u + 1);
+            let mut expected = vec![];
+            for &(d, a, b) in &links {
+                text += &format!(" L:{a}:{d}:{b}");
+                expected.push((
+                    d,
+                    super::GraphCache::<VoidLabel, Direction, usize>::parse_ggcat_direction(a, b)
+                        .unwrap(),
+                ));
+            }
+            text += "\nACGT\n";
+            expected.sort();
+            want.push(expected);
+        }
+        std::fs::write(&path, text).unwrap();
+        let tag = unique_run_tag();
+        macro_rules! check {
+            ($N:ty, $name:expr) => {{
+                let cache = GraphCache::<$N, Direction, usize>::from_file(
+                    &path,
+                    Some(format!("ggcat_labels_{}_{tag}", $name)),
+                    None,
+                    None,
+                )
+                .unwrap();
+                let g =
+                    crate::graph::DiGraph::<$N, Direction, usize>::init_from_cache(cache, Some(3))
+                        .unwrap();
+                for (u, expected) in want.iter().enumerate() {
+                    let got: Vec<(usize, usize)> = g
+                        .weighted_neighbours(u)
+                        .unwrap()
+                        .map(|(v, l)| (v, l.0))
+                        .collect();
+                    assert_eq!(&got, expected, "{}: node {u}", $name);
+                }
+            }};
+        }
+        check!(VoidLabel, "edges");
+        check!(Color, "nodes_and_edges");
+    }
 }

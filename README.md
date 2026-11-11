@@ -38,6 +38,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Louvain & Leiden](#louvain--leiden)
   - [Spectral clustering](#spectral-clustering)
   - [Label propagation](#label-propagation)
+  - [Betweenness centrality](#betweenness-centrality)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -182,9 +183,9 @@ parentdir/
 ```toml
  [dependencies]
   # commit or tag of the version you want to use should be in rev
-  sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", rev = "v0.1.0" }
+  sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", rev = "v0.2.0" }
   # optionally, select features to be enabled:
-  # sparx = { package = "sparx-graph", git = "...", tag = "v0.1.0", features = ["mtx","ggcat","rayon"] }
+  # sparx = { package = "sparx-graph", git = "...", tag = "v0.2.0", features = ["mtx","ggcat","rayon"] }
 ```
 
 #### 2. Installing and linking *SparX* directly inside a Rust project.
@@ -268,6 +269,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+```
+
+### Custom labels
+
+Nodes and edges may carry labels (GGCAT links' orientations, k-mers' colors...), stored in
+memory-mapped files of their own: `sparx::label!` declares label types, integer newtypes with all
+the traits graphs need.
+
+```rust
+use sparx::graph::GraphMemoryMap;
+
+sparx::label! {
+    /// A k-mer's color.
+    pub struct Color(u32): N;
+    /// A link's orientation.
+    pub struct Orientation(u8): E;
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g = GraphMemoryMap::<Color, Orientation, u32>::from_file("graph.lz4", None, None)?;
+    println!("{:?}", g.weighted_neighbours(0)?.collect::<Vec<_>>());
+    Ok(())
+}
 ```
 
 ## Running Algorithms
@@ -741,7 +765,7 @@ parallel edges, which triangle based algorithms count separately. `Graph::into_d
 | Takes | Algorithms |
 |---|---|
 | `Graph` | Degree assortativity, biconnectivity (biconnected components, articulation points, bridges, 2-edge-connected components), triangles, k-truss (PKT, Burkhardt et al.), clustering coefficient, k-core (Batagelj–Zaversnik, Liu et al.), GVE-Louvain and GVE-Leiden, `modularity`, HK-relax, approximate Dirichlet HKPR, sweep cut, GPU triangles |
-| `DiGraph` | Directed degree assortativity (any of in- and out-degree at either end), `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs; parallel and asynchronous, as GVE-Louvain; with Leiden's refinement too) |
+| `DiGraph` | Directed degree assortativity (any of in- and out-degree at either end), `DirectedTriangles` and PKT/Burkhardt et al.'s `new_directed*` (directed triangles of any combination of roles: cycle, out, in, middleman), `DirectedClusteringCoefficient` (Fagiolo's, networkx's `clustering` on directed graphs), `DirectedKCores` (by `CoreDegree::{In, Out, Total}`; `Total` is networkx's `core_number`; in parallel, by Liu et al.'s peeling: 2.0 s on graph_8_15, 21.9M nodes, against 17.5 s by sequential bucket peeling), `DirectedLouvain` (Leicht and Newman's directed modularity, networkx's `modularity` on directed graphs; parallel and asynchronous, as GVE-Louvain; with Leiden's refinement too) |
 | either | Numeric and attribute assortativity, BFS, DFS, `DFSVisit`, `BFSVisit`, HyperBall (CPU and GPU), exact closeness/harmonic/Lin centralities, `ConnectedComponents` (weak), `StronglyConnectedComponents`, `directed_modularity`, Hierholzer's Euler trails (on a directed graph, every node needs as many arcs in as out) |
 
 The algorithms that work on either follow arcs out of nodes (`Direction::Out`: distances *from*
@@ -890,8 +914,8 @@ communities into supergraphs, pass after pass.
 
 | Graph | Louvain | Leiden |
 |---|---|---|
-| de Bruijn graph (`graph_8_15`, 21.9M nodes), undirected | 15.5–16.4 s, modularity 0.839 | 22.0–23.8 s, modularity 0.854 |
-| the same, as a `DiGraph` | 29.7 s, 0.879 | 49.1 s, 0.892 |
+| de Bruijn graph (`graph_8_15`, 21.9M nodes), undirected | 15.9–16.5 s, modularity 0.840–0.841 | 20.7–22.8 s, modularity 0.854–0.856 |
+| the same, as a `DiGraph` | 30.0–32.2 s, 0.880 | 47.8–50.3 s, 0.891–0.892 |
 | random graph (8.4M nodes), undirected | 26.3–27.1 s, 0.2190 | 30.2–30.9 s, 0.2190 |
 | planted directed communities (4M nodes) | 3.4 s, 0.850107 | 6.2 s, 0.850106 |
 
@@ -1020,6 +1044,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let g: Graph<(), (), u32> = Graph::from_file("graph.mtx", None, None)?;
     let lpa = LabelPropagation::new(&g)?;
     println!("{} communities, modularity {}", lpa.community_count(), lpa.partition_modularity());
+    Ok(())
+}
+```
+
+## Betweenness Centrality
+
+`Betweenness` (in `centralities::betweenness`) is how many of the shortest paths between other
+nodes run through each node, as networkx's `betweenness_centrality` (`endpoints=False`):
+normalized by the `(|V| - 1)(|V| - 2)` ordered pairs of other nodes, or not. Two engines:
+
+* **Exact** (`BetweennessEngine::Exact`, or `centralities::exact::ExactBetweennessCentrality`):
+  Brandes' algorithm, a BFS (Dijkstra's algorithm, on weighted graphs) from every node, sources
+  shared out among the threads, each with its own memory, mapped in the cache. On undirected
+  graphs it runs within each biconnected component (Puzis et al.; Sariyüce et al.'s BADIOS): a
+  shortest path between two nodes of a component never leaves it, so each component is searched
+  alone, on a compact copy of its arcs, its nodes weighted by those hanging off them, and paths
+  through articulation points are counted in closed form. Bridges and the trees hanging off a
+  graph cost nothing; when one component holds 95% of the nodes or more, the whole graph is
+  searched instead. `O(|V| |E|)` at most: graphs of up to millions of edges. Each node's
+  distance, path count, dependency and weight share a cache line, as Brandes' algorithm is bound
+  by memory latency (on machines with hyperthreads, as many threads as physical cores may well
+  be faster than all of them).
+
+| exact, 16 threads | by components | whole graph |
+|---|---|---|
+| sparse graph, 50k nodes, 147k edges (random trees, joined by 25k random edges) | 18.9 s | 1.5x longer |
+| de Bruijn graph (`graph_3_10`), 138k nodes, 750k edges | (one component: the whole graph) | 532 s |
+* **KADABRA** (`BetweennessEngine::Kadabra`): Borassi and Natale's adaptive sampling, in parallel
+  as van der Grinten et al.'s. Each sample is a random pair of nodes and a uniformly random
+  shortest path between them, found by a balanced bidirectional BFS (Dijkstra's algorithm, on
+  weighted graphs); a node's share of the samples estimates its betweenness. It stops once every
+  estimate is within `epsilon` (as a fraction of ordered pairs) with probability `1 - delta`, or,
+  with `top_k`, once the `k` most central nodes are told apart. Samples are drawn in epochs from
+  generators seeded by their index, so results are the same whatever the threads. Its memory is a
+  4-byte counter per node, and each thread's searches' nodes.
+
+`BetweennessEngine::Auto` (the default) is exact when `|V| |E| <= 1e10`. The number of samples
+is bounded by Riondato and Kornaropoulos' `ω`, from an upper bound on the nodes of a shortest path:
+`2 e + 1` on undirected unweighted graphs (`e` the eccentricity of a node of each component, from
+one parallel BFS of every component at once), the largest component's size otherwise.
+
+| graph (32 threads) | KADABRA | samples (`ω`) |
+|---|---|---|
+| random graph, 1M nodes, 8M edges, `epsilon = 0.01` | 0.54 s (3.9 s on 1 thread) | 12,825 (31,513) |
+| de Bruijn graph (`graph_8_15`, 21.9M nodes), `epsilon = 0.01` | 6.7 s (55.6 s on 1 thread) | 15,390 (46,513) |
+| the same, top 10, `epsilon = 0.001` | 114 s | 491,628 (4,651,293) |
+
+```rust
+use sparx::centralities::betweenness::{Betweenness, BetweennessEngine, BetweennessOptions};
+use sparx::graph::Graph;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g: Graph<(), (), u32> = Graph::from_file("graph.mtx", None, None)?;
+    let options = BetweennessOptions {
+        engine: BetweennessEngine::Kadabra,
+        epsilon: 0.001,
+        top_k: Some(10),
+        ..Default::default()
+    };
+    let b = Betweenness::with_options(&g, options)?;
+    println!("top 10: {:?} ({} samples)", b.top(), b.samples());
     Ok(())
 }
 ```

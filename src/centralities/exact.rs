@@ -4,6 +4,7 @@ use crate::graph;
 use crate::graph::*;
 use crate::shared_slice::*;
 
+use crate::graph::csr::Csr;
 use crate::trails::dijkstra::{DijkstraMemory, WeightedReach, dijkstra};
 
 use crossbeam::thread;
@@ -1001,6 +1002,644 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         self.g.cleanup_cache(CacheFile::ExactLin)?;
         Ok(())
     }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Betweenness
+// ------------------------------------------------------------------------------------------------
+
+/// Every node's exact betweenness centrality: how many of the shortest paths between other nodes
+/// run through it, as networkx's `betweenness_centrality` (`endpoints=False`), weighted on weighted
+/// graphs (whose weights must be positive and finite). Normalized by the `(|V| - 1) (|V| - 2)`
+/// ordered pairs of other nodes, or not (the number of shortest paths through a node, each
+/// unordered pair of an undirected graph counted once).
+///
+/// Brandes' algorithm ("A faster algorithm for betweenness centrality", 2001): a search from
+/// every node (BFS, or Dijkstra's algorithm on weighted graphs), whose shortest paths' dependencies
+/// are then accumulated backward; sources are shared out among the graph's threads, each with its
+/// own memory (mapped in the cache). On undirected graphs, it runs on their biconnected
+/// components (as Puzis et al.'s "Heuristics for speeding up betweenness centrality computation",
+/// 2012, and Sariyüce et al.'s BADIOS, 2013): a shortest path between two nodes of a component
+/// never leaves it, so Brandes' algorithm runs within each component only, from each of its nodes,
+/// sources and targets weighted by the nodes they stand for (those hanging off them outside the
+/// component), and the paths through an articulation point between the parts its removal
+/// separates are counted at once. Components of two nodes (bridges, and so the nodes of trees
+/// hanging off the graph) cost nothing; the components are found by [`Biconnectivity`], in
+/// parallel, and each is searched on a compact copy of its arcs.
+///
+/// Its results are the same every run on as many threads, and may differ in their last bits with
+/// the number of threads (each thread's sources' sums are added separately). Each thread maps
+/// memory for its searches and sums (about 40 bytes per node of the largest component searched,
+/// and 8 per node); threads are capped to what half the available memory holds. For estimates on graphs too large for `O(|V| |E|)`, see
+/// [`Betweenness`](super::betweenness::Betweenness)'s KADABRA engine.
+///
+/// [`Biconnectivity`]: ../../components/biconnected/struct.Biconnectivity.html
+pub struct ExactBetweennessCentrality<
+    'a,
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness = Undirected,
+> {
+    g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+    centralities: AbstractedProceduralMemoryMut<f64>,
+}
+
+impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
+    ExactBetweennessCentrality<'a, N, E, Ix, Dir>
+{
+    /// Computes every node's betweenness, `normalized` or not (see the type's documentation).
+    pub fn new(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        normalized: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let n = g.size();
+        let out_fn = g.build_cache_filename(CacheFile::ExactBetweenness, None)?;
+        let mut centralities = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, n.max(1), true)?;
+        let out = &mut centralities.as_mut_slice()[..n];
+        let computed = check_positive_weights(g)
+            .and_then(|()| betweenness_sums(g, out, g.thread_num().max(1)));
+        if let Err(e) = computed {
+            // no (partial) result left behind
+            drop(centralities);
+            let _ = crate::shared_slice::remove_if_exists(&out_fn);
+            return Err(e);
+        }
+        let scale = betweenness_scale(n, normalized, Dir::DIRECTED);
+        for c in out.iter_mut() {
+            *c *= scale;
+        }
+        centralities.flush()?;
+        Ok(Self { g, centralities })
+    }
+
+    /// A node's betweenness.
+    pub fn get_node_centrality(&self, idx: usize) -> f64 {
+        self.centralities()[idx]
+    }
+
+    /// Every node's betweenness.
+    pub fn centralities(&self) -> &[f64] {
+        &self.centralities.as_slice()[..self.g.size()]
+    }
+
+    /// Removes the centralities from the cache.
+    pub fn drop_cache(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let this = ManuallyDrop::new(self);
+        let out_fn = this
+            .g
+            .build_cache_filename(CacheFile::ExactBetweenness, None)?;
+        crate::shared_slice::remove_if_exists(out_fn)?;
+        Ok(())
+    }
+}
+
+/// What turns a node's sum over ordered pairs into its betweenness: normalized by the
+/// `(n - 1) (n - 2)` ordered pairs of other nodes, or not (each unordered pair counted once, on
+/// undirected graphs).
+pub(crate) fn betweenness_scale(n: usize, normalized: bool, directed: bool) -> f64 {
+    if normalized {
+        if n > 2 {
+            1. / ((n - 1) as f64 * (n - 2) as f64)
+        } else {
+            0.
+        }
+    } else if directed {
+        1.
+    } else {
+        0.5
+    }
+}
+
+/// Checks a weighted graph's weights positive (and finite).
+pub(crate) fn check_positive_weights<
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness,
+>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if E::is_weighted() {
+        // positive weights: a zero-weight arc would make a path and its extension equally short,
+        // and zero-weight cycles infinitely many shortest paths
+        g.total_weight()?;
+        if let Some(w) = g
+            .iter_edge_labels()
+            .map(|label| label.weight::<f64>())
+            .find(|&w| w <= 0.)
+        {
+            return Err(format!("error betweenness needs positive weights, not {w}").into());
+        }
+    }
+    Ok(())
+}
+
+/// Every node's betweenness as a sum over ordered pairs of other nodes, into `out`, on `threads`
+/// threads: by biconnected components on undirected graphs (unless the graph's [`Biconnectivity`]
+/// is cached, which isn't overwritten), Brandes' algorithm on the whole graph otherwise. The
+/// weights must have been checked positive ([`check_positive_weights`]).
+///
+/// [`Biconnectivity`]: ../../components/biconnected/struct.Biconnectivity.html
+pub(crate) fn betweenness_sums<
+    N: graph::N,
+    E: graph::E,
+    Ix: graph::IndexType,
+    Dir: Directedness,
+>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    out: &mut [f64],
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    out.fill(0.);
+    if g.size() < 3 {
+        return Ok(());
+    }
+    let result = (|| {
+        if let Some(u) = (g as &dyn std::any::Any).downcast_ref::<Graph<N, E, Ix>>() {
+            let bcc = u.build_pers_cache_filename(CacheFile::Biconnectivity, Some(0))?;
+            if !std::path::Path::new(&bcc).exists() {
+                return betweenness_by_blocks(u, out, threads);
+            }
+        }
+        let csr = Csr::of(g);
+        brandes_blocks(g, &csr, &[0, g.size()], None, out, threads, 0)
+    })();
+    g.cleanup_cache(CacheFile::ExactBetweenness)?;
+    result
+}
+
+/// The arcs Brandes' algorithm searches: a graph's, or a biconnected component's.
+trait Arcs: Sync {
+    /// Calls `f(v, weight)` for each arc out of `u`, `v` relative to `u`'s block.
+    fn arcs(&self, u: usize, f: impl FnMut(usize, f64));
+}
+
+impl<Ix: graph::IndexType, E: graph::E> Arcs for Csr<'_, Ix, E> {
+    #[inline(always)]
+    fn arcs(&self, u: usize, mut f: impl FnMut(usize, f64)) {
+        for e in self.range(u) {
+            let w = if E::is_weighted() {
+                self.weights[e].weight::<f64>()
+            } else {
+                1.
+            };
+            f(self.targets[e].index(), w);
+        }
+    }
+}
+
+/// Biconnected components' arcs, each component's nodes numbered from 0 (its head) in a block of
+/// their own.
+struct BlockArcs<'a> {
+    offsets: &'a [usize],
+    /// (`u32`s, as most graphs' own: half the bytes of `usize`s to stream through, per search)
+    targets: &'a [u32],
+    weights: Option<&'a [f64]>,
+}
+
+impl Arcs for BlockArcs<'_> {
+    #[inline(always)]
+    fn arcs(&self, u: usize, mut f: impl FnMut(usize, f64)) {
+        for e in self.offsets[u]..self.offsets[u + 1] {
+            f(self.targets[e] as usize, self.weights.map_or(1., |w| w[e]));
+        }
+    }
+}
+
+/// A node's state in Brandes' algorithm: its distance, shortest paths and dependency, together
+/// (in a 32-byte aligned record, never straddling cache lines), as they're read together: a
+/// neighbour's visit costs one cache miss, not three.
+#[derive(Clone, Copy)]
+#[repr(C, align(32))]
+struct Slot {
+    dist: f64,
+    sigma: f64,
+    dep: f64,
+    /// Its weight as a target (`reach`'s, or 1), set when it's reached.
+    weight: f64,
+}
+
+const UNREACHED: Slot = Slot {
+    dist: f64::INFINITY,
+    sigma: 0.,
+    dep: 0.,
+    weight: 0.,
+};
+
+/// A thread's memory for Brandes' algorithm, for its largest block's nodes.
+struct BrandesScratch<'s> {
+    slots: &'s mut [Slot],
+    /// (`u32`s: nodes are numbered within blocks of fewer than 2^32)
+    order: &'s mut [u32],
+    heap:
+        std::collections::BinaryHeap<std::cmp::Reverse<(ordered_float::OrderedFloat<f64>, usize)>>,
+}
+
+/// Brandes' algorithm from `s` (relative to the block starting at `base`): adds each node's
+/// dependency on `s`, weighted by `s`'s weight and its targets' (`reach`, or 1), to `sums`.
+fn brandes_source<A: Arcs>(
+    arcs: &A,
+    weighted: bool,
+    base: usize,
+    s: usize,
+    m: &mut BrandesScratch,
+    reach: Option<&[f64]>,
+    sums: &mut [f64],
+) {
+    let (slots, order) = (&mut *m.slots, &mut *m.order);
+    let weight_of = |v: usize| reach.map_or(1., |r| r[base + v]);
+    slots[s] = Slot {
+        dist: 0.,
+        sigma: 1.,
+        dep: 0.,
+        weight: weight_of(s),
+    };
+    order[0] = s as u32;
+    let reached = if weighted {
+        use ordered_float::OrderedFloat;
+        use std::cmp::Reverse;
+        let heap = &mut m.heap;
+        heap.clear();
+        heap.push(Reverse((OrderedFloat(0.), s)));
+        let mut settled = 0;
+        while let Some(Reverse((OrderedFloat(d), u))) = heap.pop() {
+            // nodes are pushed again only closer: a later entry of a settled node is farther
+            if d > slots[u].dist {
+                continue;
+            }
+            order[settled] = u as u32;
+            settled += 1;
+            let su = slots[u].sigma;
+            arcs.arcs(base + u, |v, w| {
+                let dv = d + w;
+                let sv = &mut slots[v];
+                if dv < sv.dist {
+                    if sv.dist == f64::INFINITY {
+                        sv.weight = weight_of(v);
+                    }
+                    sv.dist = dv;
+                    sv.sigma = su;
+                    heap.push(Reverse((OrderedFloat(dv), v)));
+                } else if dv == sv.dist {
+                    sv.sigma += su;
+                }
+            });
+        }
+        settled
+    } else {
+        let (mut head, mut tail) = (0, 1);
+        while head < tail {
+            let u = order[head] as usize;
+            head += 1;
+            let (du, su) = (slots[u].dist + 1., slots[u].sigma);
+            arcs.arcs(base + u, |v, _| {
+                let sv = &mut slots[v];
+                if sv.dist == f64::INFINITY {
+                    sv.dist = du;
+                    sv.weight = weight_of(v);
+                    order[tail] = v as u32;
+                    tail += 1;
+                }
+                if sv.dist == du {
+                    sv.sigma += su;
+                }
+            });
+        }
+        tail
+    };
+    // dependencies, farthest nodes first: each node's on its successors'
+    let source = slots[s].weight;
+    for w in order[..reached].iter().rev().map(|&w| w as usize) {
+        let Slot {
+            dist: dw,
+            sigma: sw,
+            ..
+        } = slots[w];
+        let mut d = 0.;
+        arcs.arcs(base + w, |v, weight| {
+            let sv = &slots[v];
+            if sv.dist == dw + weight {
+                d += sw / sv.sigma * (sv.weight + sv.dep);
+            }
+        });
+        slots[w].dep = d;
+        if w != s {
+            sums[base + w] += source * d;
+        }
+    }
+    for &w in &order[..reached] {
+        slots[w as usize] = UNREACHED;
+    }
+}
+
+/// Brandes' algorithm from every node of every block of `arcs` (block `b`'s nodes are
+/// `starts[b]..starts[b + 1]`), on `threads` threads: each node's dependencies, weighted by
+/// `reach` (or 1), summed into `out` (one per node of every block). Scratch files are
+/// [`CacheFile::ExactBetweenness`]'s, from `first_file` on.
+fn brandes_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness, A: Arcs>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    arcs: &A,
+    starts: &[usize],
+    reach: Option<&[f64]>,
+    out: &mut [f64],
+    threads: usize,
+    first_file: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let total = *starts.last().unwrap_or(&0);
+    let largest = starts.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0);
+    if total == 0 {
+        return Ok(());
+    }
+    if largest > u32::MAX as usize {
+        return Err(format!(
+            "error exact betweenness numbers a search's nodes as u32s: {largest} are too many"
+        )
+        .into());
+    }
+    // sources a few at a time, each thread's chunks fixed (round robin, in order), so that its
+    // sums, and so the results, are the same every run on as many threads
+    const CHUNK: usize = 16;
+    // each thread's memory: its search's nodes' states and order (`largest` of each), and its
+    // sums (`total`); as many threads as half the available memory holds, at most
+    let per_thread = (std::mem::size_of::<Slot>() + 4) * largest + 8 * total;
+    let affordable = sys_info::mem_info()
+        .map(|m| (m.avail as usize * 1024 / 2 / per_thread.max(1)).max(1))
+        .unwrap_or(usize::MAX);
+    let threads = threads.min(affordable).min(total.div_ceil(CHUNK)).max(1);
+    let chunks = total.div_ceil(CHUNK);
+    // each thread's nodes' states, visit order and sums
+    const FILES: usize = 3;
+    let files: Vec<String> = (0..FILES * threads)
+        .map(|k| g.build_cache_filename(CacheFile::ExactBetweenness, Some(first_file + k)))
+        .collect::<Result<_, _>>()?;
+    let sums: Vec<AbstractedProceduralMemoryMut<f64>> = (0..threads)
+        .map(|tid| SharedSliceMut::<f64>::abst_mem_mut(&files[FILES * tid + 2], total, true))
+        .collect::<Result<_, _>>()?;
+    let sum_views: Vec<SharedSliceMut<f64>> = sums.iter().map(|s| s.shared_slice()).collect();
+    let weighted = E::is_weighted();
+    super::betweenness::on_threads(threads, "Brandes", |tid| {
+        let f = &files[FILES * tid..FILES * (tid + 1)];
+        let memory = (|| -> Result<_, Box<dyn std::error::Error>> {
+            Ok((
+                SharedSliceMut::<Slot>::abst_mem_mut(&f[0], largest, true)?,
+                SharedSliceMut::<u32>::abst_mem_mut(&f[1], largest, true)?,
+            ))
+        })()
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+        let (mut slots, mut order) = memory;
+        let mut m = BrandesScratch {
+            slots: slots.as_mut_slice(),
+            order: order.as_mut_slice(),
+            heap: std::collections::BinaryHeap::new(),
+        };
+        assert_eq!(m.slots.as_ptr() as usize % std::mem::align_of::<Slot>(), 0);
+        m.slots.fill(UNREACHED);
+        let mut sum = sum_views[tid];
+        let sum = sum.as_mut_slice();
+        sum.fill(0.);
+        for chunk in (tid..chunks).step_by(threads) {
+            let first = CHUNK * chunk;
+            for l in first..(first + CHUNK).min(total) {
+                let base = starts[starts.partition_point(|&x| x <= l) - 1];
+                brandes_source(arcs, weighted, base, l - base, &mut m, reach, sum);
+            }
+        }
+        Ok(())
+    })?;
+    // the threads' sums, in thread order
+    let out_view = SharedSliceMut::new(out.as_mut_ptr(), out.len());
+    const PART: usize = 1 << 16;
+    let parts = std::sync::atomic::AtomicUsize::new(0);
+    super::betweenness::on_threads(threads, "Brandes sum", |_| {
+        let mut out = out_view;
+        loop {
+            let begin = PART * parts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if begin >= total {
+                return Ok(());
+            }
+            let end = (begin + PART).min(total);
+            for (i, o) in out.as_mut_slice()[begin..end].iter_mut().enumerate() {
+                *o = sum_views.iter().map(|s| s.as_slice()[begin + i]).sum();
+            }
+        }
+    })?;
+    drop(sums);
+    g.remove_tmp_files(
+        CacheFile::ExactBetweenness,
+        first_file..first_file + files.len(),
+    )?;
+    Ok(())
+}
+
+/// [`betweenness_sums`] by biconnected components (see [`ExactBetweennessCentrality`]), unless one
+/// holds 95% of the nodes or more: then on the whole graph, as searching it alone would save
+/// little (the nodes outside it), and copying its arcs would cost more.
+///
+/// [`Biconnectivity`]'s components form a forest: a component's head is listed in its parent
+/// component (or, a root, in none), every other node in exactly one. `below[b]` counts the nodes
+/// under component `b` (its nodes but its head, and those under the components they head), so
+/// that, within `b`, its head stands for the `component size - below[b]` nodes it doesn't lead to
+/// through `b`, and any other node `v` for itself and the `hanging[v]` nodes under the components
+/// it heads. An articulation point `v` separates the other nodes of its connected component into
+/// parts of `below[c]` nodes (for each `c` it heads) and, if it's listed in a component, the rest:
+/// it's on every path between two parts, `(n_c - 1)^2 - Σ part^2` ordered pairs.
+///
+/// [`Biconnectivity`]: ../../components/biconnected/struct.Biconnectivity.html
+fn betweenness_by_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    g: &Graph<N, E, Ix>,
+    out: &mut [f64],
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bcc = crate::components::biconnected::Biconnectivity::new(g)?;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let n = g.size();
+        let (labels, heads, k) = (bcc.components(), bcc.heads(), bcc.count());
+        let none = <Ix as graph::IndexType>::max();
+        let block = |v: usize| (labels[v] != none).then(|| labels[v].index());
+        let parent = |b: usize| block(heads[b].index());
+
+        // each component's listed nodes, depth (from its forest's root) and nodes below
+        let mut listed = vec![0usize; k];
+        for v in 0..n {
+            if let Some(b) = block(v) {
+                listed[b] += 1;
+            }
+        }
+        // nearly all one component: little to gain, a copy of its arcs to pay for
+        if 20 * (listed.iter().copied().max().unwrap_or(0) + 1) >= 19 * n {
+            return brandes_blocks(g, &Csr::of(g), &[0, n], None, out, threads, 0);
+        }
+        let mut depth = vec![usize::MAX; k];
+        let mut path = vec![];
+        for b in 0..k {
+            path.clear();
+            let mut c = b;
+            let mut d = loop {
+                if depth[c] != usize::MAX {
+                    break depth[c] + 1;
+                }
+                path.push(c);
+                match parent(c) {
+                    Some(p) => c = p,
+                    None => break 0,
+                }
+            };
+            for &c in path.iter().rev() {
+                depth[c] = d;
+                d += 1;
+            }
+        }
+        let mut by_depth: Vec<usize> = (0..k).collect();
+        by_depth.sort_unstable_by_key(|&b| std::cmp::Reverse(depth[b]));
+        let mut below = listed.clone();
+        for &b in &by_depth {
+            if let Some(p) = parent(b) {
+                below[p] += below[b];
+            }
+        }
+        let (mut hanging, mut squares) = (vec![0usize; n], vec![0f64; n]);
+        for b in 0..k {
+            let h = heads[b].index();
+            hanging[h] += below[b];
+            squares[h] += below[b] as f64 * below[b] as f64;
+        }
+        // each component's connected component's size, roots first
+        let mut size = vec![0usize; k];
+        for &b in by_depth.iter().rev() {
+            size[b] = match parent(b) {
+                Some(p) => size[p],
+                None => 1 + hanging[heads[b].index()],
+            };
+        }
+
+        // the pairs articulation points separate
+        for v in 0..n {
+            if hanging[v] == 0 {
+                continue;
+            }
+            let (nc, rest) = match block(v) {
+                Some(p) => (size[p], size[p] - 1 - hanging[v]),
+                None => (1 + hanging[v], 0),
+            };
+            let others = (nc - 1) as f64;
+            out[v] += others * others - squares[v] - rest as f64 * rest as f64;
+        }
+
+        // components of three nodes or more (in pairs, no node is inner to a path), each a block
+        // of local ids, its head first
+        let mut starts = vec![0usize];
+        let mut local_block = vec![usize::MAX; k];
+        let mut blocks = vec![];
+        for b in 0..k {
+            if listed[b] >= 2 {
+                local_block[b] = blocks.len();
+                blocks.push(b);
+                starts.push(starts.last().unwrap() + listed[b] + 1);
+            }
+        }
+        let total = *starts.last().unwrap();
+        if total == 0 {
+            return Ok(());
+        }
+        let largest = starts.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0);
+        if largest > u32::MAX as usize {
+            // (local ids are `u32`s) the whole graph instead, the separated pairs not counted twice
+            out.fill(0.);
+            return brandes_blocks(g, &Csr::of(g), &[0, n], None, out, threads, 0);
+        }
+        let file = |seq: usize| g.build_cache_filename(CacheFile::ExactBetweenness, Some(seq));
+        let mut members_mem = SharedSliceMut::<usize>::abst_mem_mut(&file(0)?, total, true)?;
+        let mut reach_mem = SharedSliceMut::<f64>::abst_mem_mut(&file(1)?, total, true)?;
+        let mut position_mem = SharedSliceMut::<usize>::abst_mem_mut(&file(2)?, n, true)?;
+        let (members, reach, position) = (
+            members_mem.as_mut_slice(),
+            reach_mem.as_mut_slice(),
+            position_mem.as_mut_slice(),
+        );
+        let mut next: Vec<usize> = vec![1; blocks.len()];
+        for (lb, &b) in blocks.iter().enumerate() {
+            members[starts[lb]] = heads[b].index();
+            reach[starts[lb]] = (size[b] - below[b]) as f64;
+        }
+        for v in 0..n {
+            if let Some(b) = block(v)
+                && local_block[b] != usize::MAX
+            {
+                let lb = local_block[b];
+                position[v] = next[lb];
+                members[starts[lb] + next[lb]] = v;
+                reach[starts[lb] + next[lb]] = (1 + hanging[v]) as f64;
+                next[lb] += 1;
+            }
+        }
+
+        // each block's arcs, between its nodes (an arc between two nodes of a component is its:
+        // two components share at most a node)
+        let csr = Csr::of(g);
+        let local = |lb: usize, v: usize, w: usize| -> Option<usize> {
+            let b = blocks[lb];
+            if w == v {
+                None
+            } else if w == heads[b].index() {
+                Some(0)
+            } else if block(w) == Some(b) {
+                Some(position[w])
+            } else {
+                None
+            }
+        };
+        let mut offsets_mem = SharedSliceMut::<usize>::abst_mem_mut(&file(3)?, total + 1, true)?;
+        let offsets = offsets_mem.as_mut_slice();
+        offsets[0] = 0;
+        for lb in 0..blocks.len() {
+            for l in starts[lb]..starts[lb + 1] {
+                let v = members[l];
+                let degree = csr
+                    .range(v)
+                    .filter(|&e| local(lb, v, csr.targets[e].index()).is_some())
+                    .count();
+                offsets[l + 1] = offsets[l] + degree;
+            }
+        }
+        let arcs = offsets[total];
+        let mut targets_mem = SharedSliceMut::<u32>::abst_mem_mut(&file(4)?, arcs.max(1), true)?;
+        let mut weights_mem = SharedSliceMut::<f64>::abst_mem_mut(
+            &file(5)?,
+            if E::is_weighted() { arcs.max(1) } else { 1 },
+            true,
+        )?;
+        let (targets, weights) = (targets_mem.as_mut_slice(), weights_mem.as_mut_slice());
+        for lb in 0..blocks.len() {
+            for l in starts[lb]..starts[lb + 1] {
+                let v = members[l];
+                let mut at = offsets[l];
+                for e in csr.range(v) {
+                    if let Some(w) = local(lb, v, csr.targets[e].index()) {
+                        targets[at] = w as u32;
+                        if E::is_weighted() {
+                            weights[at] = csr.weights[e].weight::<f64>();
+                        }
+                        at += 1;
+                    }
+                }
+            }
+        }
+        let block_arcs = BlockArcs {
+            offsets,
+            targets,
+            weights: E::is_weighted().then_some(&*weights),
+        };
+        let mut sums_mem = SharedSliceMut::<f64>::abst_mem_mut(&file(6)?, total, true)?;
+        let sums = sums_mem.as_mut_slice();
+        brandes_blocks(g, &block_arcs, &starts, Some(reach), sums, threads, 8)?;
+        for (l, &s) in sums.iter().enumerate() {
+            out[members[l]] += s;
+        }
+        Ok(())
+    })();
+    bcc.drop_cache()?;
+    result
 }
 
 #[cfg(test)]

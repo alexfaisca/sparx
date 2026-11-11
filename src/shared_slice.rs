@@ -47,14 +47,17 @@ pub(crate) struct SharedQueueMut<T> {
     len: Arc<AtomicUsize>,
 }
 
-unsafe impl<T> Send for SharedSlice<T> {}
-unsafe impl<T> Sync for SharedSlice<T> {}
+// Views shared across threads hand out `&T`s from several of them (and, the mutable ones,
+// `&mut T`s): sound only for `T`s that may be so shared (callers keep the elements different
+// threads write apart, or write them atomically).
+unsafe impl<T: Sync> Send for SharedSlice<T> {}
+unsafe impl<T: Sync> Sync for SharedSlice<T> {}
 
-unsafe impl<T> Send for SharedSliceMut<T> {}
-unsafe impl<T> Sync for SharedSliceMut<T> {}
+unsafe impl<T: Send + Sync> Send for SharedSliceMut<T> {}
+unsafe impl<T: Send + Sync> Sync for SharedSliceMut<T> {}
 
-unsafe impl<T> Send for SharedQueueMut<T> {}
-unsafe impl<T> Sync for SharedQueueMut<T> {}
+unsafe impl<T: Send + Sync> Send for SharedQueueMut<T> {}
+unsafe impl<T: Send + Sync> Sync for SharedQueueMut<T> {}
 
 impl<T> Clone for SharedSlice<T> {
     #[inline(always)]
@@ -112,16 +115,6 @@ impl<T> AbstractedProceduralMemory<T> {
     #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.slice.ptr, self.slice.len) }
-    }
-
-    #[allow(unused_mut)]
-    #[inline(always)]
-    pub(crate) fn into_bodex_slice(mut self) -> Box<[T]> {
-        let this = ManuallyDrop::new(self);
-        let raw: *mut [T] =
-            std::ptr::slice_from_raw_parts_mut(this.slice.ptr as *mut T, this.slice.len);
-        // SAFETY: `raw` points to a uniquely-owned heap allocation of exactly `len` Ts,
-        unsafe { Box::from_raw(raw) }
     }
 
     #[inline(always)]
@@ -214,15 +207,6 @@ impl<T> AbstractedProceduralMemoryMut<T> {
     #[inline(always)]
     pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.slice.ptr, self.slice.len) }
-    }
-
-    #[allow(unused_mut)]
-    #[inline(always)]
-    pub(crate) fn into_bodex_slice(mut self) -> Box<[T]> {
-        let this = ManuallyDrop::new(self);
-        let raw: *mut [T] = std::ptr::slice_from_raw_parts_mut(this.slice.ptr, this.slice.len);
-        // SAFETY: `raw` points to a uniquely-owned heap allocation of exactly `len` Ts,
-        unsafe { Box::from_raw(raw) }
     }
 
     #[inline(always)]
@@ -338,16 +322,6 @@ impl<T> SharedSlice<T> {
     #[inline(always)]
     pub(crate) fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    // FIXME: if `mut` is removed does unique ownership get comprimized? Is it already compromized?
-    #[allow(unused_mut)]
-    #[inline(always)]
-    pub(crate) fn into_bodex_slice(mut self) -> Box<[T]> {
-        let this = ManuallyDrop::new(self);
-        let raw: *mut [T] = std::ptr::slice_from_raw_parts_mut(this.ptr as *mut T, this.len);
-        // SAFETY: `raw` points to a uniquely-owned heap allocation of exactly `len` Ts,
-        unsafe { Box::from_raw(raw) }
     }
 
     #[inline(always)]
@@ -499,15 +473,6 @@ impl<T> SharedSliceMut<T> {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
-    #[allow(unused_mut)]
-    #[inline(always)]
-    pub(crate) fn into_bodex_slice(mut self) -> Box<[T]> {
-        let this = ManuallyDrop::new(self);
-        let raw: *mut [T] = std::ptr::slice_from_raw_parts_mut(this.ptr, this.len);
-        // SAFETY: `raw` points to a uniquely-owned heap allocation of exactly `len` Ts,
-        unsafe { Box::from_raw(raw) }
-    }
-
     #[inline(always)]
     pub(crate) fn slice(&self, start: usize, end: usize) -> Option<&[T]> {
         assert!(start <= end && end <= self.len);
@@ -542,7 +507,10 @@ impl<T> SharedSliceMut<T> {
     }
 
     /// SAFETY: Only if 0 is a valid bit-pattern for T (true for integers/floats).
-    pub(crate) fn par_zero_out_bytes(&mut self) -> Self {
+    pub(crate) fn par_zero_out_bytes(&mut self) -> Self
+    where
+        T: Send + Sync,
+    {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -756,17 +724,6 @@ impl<T: Debug + Copy + Clone + Eq> SharedQueueMut<T> {
 
     #[allow(unused_mut)]
     #[inline(always)]
-    /// Returns a boxed slice over the entirity of the allocated memory[^1].
-    ///
-    /// [^1]: naturally, if any uninitialized memory cells remain at the time of this method's calling,
-    /// behavioiur upon their reading is undefined.
-    pub(crate) fn into_bodex_slice(mut self) -> Box<[T]> {
-        let this = ManuallyDrop::new(self);
-        let raw: *mut [T] = std::ptr::slice_from_raw_parts_mut(this.ptr, this.max);
-        // SAFETY: `raw` points to a uniquely-owned heap allocation of exactly `len` Ts,
-        unsafe { Box::from_raw(raw) }
-    }
-
     pub(crate) fn slice(&self, start: usize, end: usize) -> Option<SharedSliceMut<T>> {
         let start = if start < self.read.load(Ordering::Relaxed) {
             self.read.load(Ordering::Relaxed)

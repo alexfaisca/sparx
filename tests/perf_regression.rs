@@ -9,13 +9,19 @@
 //! cargo test --release --test perf_regression -- --ignored --nocapture --test-threads=1
 //! ```
 use sparx::assortativity::{Correlation, degree_assortativity};
+use sparx::centralities::betweenness::{Betweenness, BetweennessEngine, BetweennessOptions};
 use sparx::centralities::exact::ExactClosenessCentrality;
 use sparx::centralities::hyper_log_log::{HyperLogLog, Precision, Precision4, Precision8};
 use sparx::communities::directed_louvain::DirectedLouvain;
+use sparx::communities::label_propagation::LabelPropagation;
+use sparx::communities::spectral::{EmbeddingOptions, SpectralEmbedding, SpectralMatrix};
 use sparx::components::biconnected::Biconnectivity;
 use sparx::components::weak::ConnectedComponents;
 use sparx::graph::{DiGraph, Graph};
-use sparx::k_truss::clustering_coefficient::ClusteringCoefficient;
+use sparx::k_core::directed::{CoreDegree, DirectedKCores};
+use sparx::k_truss::clustering_coefficient::{
+    ClusteringCoefficient, DirectedClusteringCoefficient,
+};
 use sparx::k_truss::triangles::Triangles;
 use sparx::trails::dijkstra::{DijkstraDists, ShortestPathEngine};
 use std::hint::black_box;
@@ -101,6 +107,38 @@ fn random_digraph(
         DiGraph::from_file(&path, Some(id), Some(threads)).unwrap(),
         dir,
     )
+}
+
+/// A planted partition of `n` nodes into `k` equal blocks, with `n * degree / 2` edges, each
+/// between blocks with probability `mu` (within one otherwise), as a MatrixMarket file in a fresh
+/// directory: the file's path, to be loaded with as many threads as each check needs.
+fn planted_partition(name: &str, n: usize, k: usize, degree: usize, mu: f64) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("sparx_perf_{name}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.mtx"));
+    let mut next = rng((n ^ k ^ degree) as u64);
+    let size = n / k;
+    let m = n * degree / 2;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    writeln!(
+        f,
+        "%%MatrixMarket matrix coordinate pattern symmetric\n{n} {n} {m}"
+    )
+    .unwrap();
+    let mut written = 0;
+    while written < m {
+        let u = next() as usize % n;
+        let v = if ((next() % (1 << 30)) as f64) < mu * (1u64 << 30) as f64 {
+            next() as usize % n
+        } else {
+            ((u / size) * size + next() as usize % size) % n
+        };
+        if u != v {
+            writeln!(f, "{} {}", u.max(v) + 1, u.min(v) + 1).unwrap();
+            written += 1;
+        }
+    }
+    (path, dir)
 }
 
 /// The threads checks timing parallel algorithms run on: the machine's, up to `max`.
@@ -411,5 +449,181 @@ fn delta_stepping_is_parallel() {
     assert!(
         speedup >= 2.,
         "Δ-stepping is only {speedup:.1}x as fast as Dijkstra's algorithm on {threads} threads"
+    );
+}
+
+/// Label propagation's semi-synchronous rounds run on all threads: on a planted partition of 2^18
+/// nodes, many threads must be at least twice as fast as one (about 5x measured, 1 to 16
+/// threads).
+#[test]
+#[ignore]
+fn label_propagation_is_parallel() {
+    let threads = threads(16);
+    if threads < 4 {
+        println!("label propagation: skipped, {threads} threads");
+        return;
+    }
+    let (path, dir) = planted_partition("lpa", 1 << 18, 16, 16, 0.3);
+    let time = |t: u8| {
+        let id = format!("perf_lpa_{t}_{}", std::process::id());
+        let mut g = Graph::<(), (), u32>::from_file(&path, Some(id), Some(t)).unwrap();
+        let time = fastest(3, || {
+            let mut l = LabelPropagation::new(&g).unwrap();
+            black_box(l.community_count());
+            l.drop_cache().unwrap();
+        });
+        g.drop_cache().unwrap();
+        time
+    };
+    let sequential = time(1);
+    let parallel = time(threads);
+    let speedup = sequential.as_secs_f64() / parallel.as_secs_f64();
+    println!(
+        "label propagation: {parallel:?} on {threads} threads, {sequential:?} on 1 ({speedup:.1}x)"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        speedup >= 2.,
+        "label propagation is only {speedup:.1}x as fast on {threads} threads as on 1"
+    );
+}
+
+/// The exact spectral engine's filtered subspace iteration converges in a few iterations when
+/// the graph has the structure it looks for: on a planted partition of 2^18 nodes into 16 blocks,
+/// both matrices' 16 eigenvectors must converge within 10 iterations (2 measured), so that a
+/// regression of the filter or the locking shows as many more.
+#[test]
+#[ignore]
+fn exact_spectral_engine_converges_quickly() {
+    let (path, dir) = planted_partition("spectral", 1 << 18, 16, 16, 0.3);
+    let id = format!("perf_spectral_{}", std::process::id());
+    let mut g = Graph::<(), (), u32>::from_file(&path, Some(id), Some(threads(16))).unwrap();
+    let mut results = vec![];
+    for matrix in [
+        SpectralMatrix::RegularizedLaplacian,
+        SpectralMatrix::BetheHessian,
+    ] {
+        let t = Instant::now();
+        let mut e = SpectralEmbedding::<_, _, _, f64>::new(
+            &g,
+            EmbeddingOptions {
+                matrix,
+                ..EmbeddingOptions::new(16)
+            },
+        )
+        .unwrap();
+        println!(
+            "exact spectral engine, {matrix:?}: {:?}, {} iterations, converged: {}",
+            t.elapsed(),
+            e.iterations(),
+            e.converged()
+        );
+        results.push((matrix, e.iterations(), e.converged()));
+        e.drop_cache().unwrap();
+    }
+    g.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    for (matrix, iterations, converged) in results {
+        assert!(
+            converged && iterations <= 10,
+            "the exact engine took {iterations} iterations on {matrix:?} (converged: {converged})"
+        );
+    }
+}
+
+/// KADABRA's samples are drawn on all threads: on a random graph of 2^19 nodes, many threads
+/// must be at least twice as fast as one (about 7x measured, 1 to 16 threads), drawing the same
+/// samples.
+#[test]
+#[ignore]
+fn kadabra_is_parallel() {
+    let threads = threads(16);
+    if threads < 4 {
+        println!("kadabra: skipped, {threads} threads");
+        return;
+    }
+    let (mut g, dir) = random_graph("kadabra", 1 << 19, 1 << 22, 1);
+    let path = dir.join("kadabra.mtx");
+    let options = BetweennessOptions {
+        engine: BetweennessEngine::Kadabra,
+        ..BetweennessOptions::default()
+    };
+    let time = |g: &Graph<(), (), u32>| {
+        let mut samples = 0;
+        let time = fastest(3, || {
+            let mut b = Betweenness::with_options(g, options).unwrap();
+            samples = b.samples();
+            black_box(b.centralities());
+            b.drop_cache().unwrap();
+        });
+        (time, samples)
+    };
+    let (sequential, samples) = time(&g);
+    g.drop_cache().unwrap();
+    let id = format!("perf_kadabra_many_{}", std::process::id());
+    let mut many = Graph::<(), (), u32>::from_file(&path, Some(id), Some(threads)).unwrap();
+    let (parallel, parallel_samples) = time(&many);
+    many.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    let speedup = sequential.as_secs_f64() / parallel.as_secs_f64();
+    println!(
+        "kadabra: {parallel:?} on {threads} threads, {sequential:?} on 1 ({speedup:.1}x, {samples} samples)"
+    );
+    assert_eq!(samples, parallel_samples);
+    assert!(
+        speedup >= 2.,
+        "KADABRA is only {speedup:.1}x as fast on {threads} threads as on 1"
+    );
+}
+
+/// Directed k-cores and clustering coefficients run on all threads: on a random directed graph of
+/// 2^20 nodes, many threads must be at least twice as fast as one at both (measured on a de
+/// Bruijn graph of 21.9M nodes: k-cores 3.4x, clustering 9.2x, 1 to 32 threads).
+#[test]
+#[ignore]
+fn directed_cores_and_clustering_are_parallel() {
+    let threads = threads(16);
+    if threads < 4 {
+        println!("directed cores and clustering: skipped, {threads} threads");
+        return;
+    }
+    let (mut one, dir) = random_digraph("directed_parallel", 1 << 20, 8, 1);
+    let path = dir.join("directed_parallel.mtx");
+    let id = format!("perf_directed_parallel_many_{}", std::process::id());
+    let mut many = DiGraph::<(), (), u32>::from_file(&path, Some(id), Some(threads)).unwrap();
+    let time = |g: &DiGraph<(), (), u32>| {
+        g.transpose().unwrap();
+        let cores = fastest(3, || {
+            let mut c = DirectedKCores::new(g, CoreDegree::In).unwrap();
+            black_box(c.k_cores());
+            c.drop_cache().unwrap();
+        });
+        let clustering = fastest(3, || {
+            let mut c = DirectedClusteringCoefficient::new(g).unwrap();
+            black_box(c.get_average_clustering_coefficient());
+            c.drop_cache().unwrap();
+        });
+        (cores, clustering)
+    };
+    let (cores_one, clustering_one) = time(&one);
+    let (cores_many, clustering_many) = time(&many);
+    one.drop_cache().unwrap();
+    many.drop_cache().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    let (cores, clustering) = (
+        cores_one.as_secs_f64() / cores_many.as_secs_f64(),
+        clustering_one.as_secs_f64() / clustering_many.as_secs_f64(),
+    );
+    println!(
+        "directed k-cores: {cores_many:?} on {threads} threads ({cores:.1}x); clustering: \
+         {clustering_many:?} ({clustering:.1}x)"
+    );
+    assert!(
+        cores >= 2.,
+        "directed k-cores are only {cores:.1}x as fast on {threads} threads"
+    );
+    assert!(
+        clustering >= 2.,
+        "directed clustering is only {clustering:.1}x as fast on {threads} threads"
     );
 }

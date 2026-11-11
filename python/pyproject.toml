@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sparx-graph"
-description = "Memory-mapped analytics for large static sparse graphs: k-cores, k-trusses, triangles, Louvain, HyperBall, centralities"
+description = "Memory-mapped analytics for large static sparse graphs: k-cores, k-trusses, triangles, communities (Louvain, Leiden, label propagation, spectral), shortest paths, centralities"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"

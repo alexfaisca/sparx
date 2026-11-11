@@ -1,6 +1,5 @@
 # build outputs
 target/
-derive_macros/target/
 criterion_backup*
 */criterion-benches/target/
 

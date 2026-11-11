@@ -10,6 +10,7 @@ Direction = Literal["out", "in", "both"]
 CoreDegree = Literal["in", "out", "total"]
 UndirectedMode = Literal["collapse", "each", "mutual"]
 WeightParsing = Literal["fast", "checked"]
+WeightType = Literal["f64", "f32"]
 WeightMerge = Literal["sum", "min", "max"]
 Engine = Literal["auto", "sequential", "delta"]
 Guide = Literal["auto", "landmarks", "none"]
@@ -46,6 +47,21 @@ class LabelPropagation(TypedDict):
     modularity: float
     moves: npt.NDArray[np.int64]
     colors: int
+
+class Community(TypedDict):
+    nodes: npt.NDArray[np.int64]  # by descending heat
+    heat: npt.NDArray[np.float64]
+    size: int
+    volume: int
+    width: int
+    conductance: float
+
+class BetweennessResult(TypedDict, total=False):
+    betweenness: npt.NDArray[np.float64]
+    exact: bool
+    samples: int
+    sample_cap: int
+    top: npt.NDArray[np.int64]  # only with k
 
 class Clustering(TypedDict):
     local: npt.NDArray[np.float64]
@@ -94,6 +110,7 @@ class Graph:
         id: Optional[str] = None,
         weighted: bool = False,
         weight_parsing: WeightParsing = "fast",
+        weight_type: WeightType = "f64",
     ) -> None: ...
     @staticmethod
     def open(
@@ -102,6 +119,7 @@ class Graph:
         index: Index = "u64",
         threads: Optional[int] = None,
         weighted: bool = False,
+        weight_type: WeightType = "f64",
     ) -> Graph: ...
     def close(self) -> None: ...
     def __enter__(self) -> Graph: ...
@@ -131,6 +149,9 @@ class Graph:
     def is_weighted(self) -> bool: ...
     def weights(self, u: int) -> npt.NDArray[np.float64]: ...
     def edge_weights(self) -> npt.NDArray[np.float64]: ...
+    @property
+    def weight_type(self) -> Optional[WeightType]: ...
+    def modularity(self, communities: npt.ArrayLike) -> float: ...
     def components(self, *, kind: Literal["weak", "strong"] = "weak") -> Components: ...
     def triangles(self, *, width: Width = "u8", gpu: bool = False) -> npt.NDArray[np.unsignedinteger]: ...
     def k_truss(
@@ -149,6 +170,16 @@ class Graph:
         exploration: int = 20,
         direction: Literal["both", "in", "out"] = "both",
     ) -> LabelPropagation: ...
+    def betweenness(
+        self,
+        *,
+        engine: Literal["auto", "exact", "kadabra"] = "auto",
+        epsilon: float = 0.01,
+        delta: float = 0.1,
+        k: Optional[int] = None,
+        normalized: bool = True,
+        seed: int = 0x5EED,
+    ) -> BetweennessResult: ...
     def spectral_clustering(
         self,
         k: Optional[int],
@@ -236,6 +267,33 @@ class Graph:
         bidirectional: Optional[bool] = None,
         paths: bool = True,
     ) -> list[Optional[Path]]: ...
+    def hk_relax(
+        self,
+        seeds: list[int],
+        *,
+        t: float = 10.0,
+        eps: float = 1e-4,
+        target_size: Optional[int] = None,
+        target_volume: Optional[int] = None,
+    ) -> Community: ...
+    def hkpr(
+        self,
+        seed: int,
+        *,
+        eps: float = 0.1,
+        target_size: Optional[int] = None,
+        target_volume: Optional[int] = None,
+        target_conductance: float = 0.1,
+        random_seed: int = 0x5EED,
+    ) -> Community: ...
+    def sweep_cut(
+        self,
+        nodes: NodeIds,
+        heat: npt.ArrayLike,
+        *,
+        target_size: Optional[int] = None,
+        target_volume: Optional[int] = None,
+    ) -> Community: ...
 
     def to_directed(self) -> DiGraph:
         """The graph as a `DiGraph` mapping this graph's cache entry: usable while this graph is open."""
@@ -253,6 +311,7 @@ class DiGraph:
         id: Optional[str] = None,
         weighted: bool = False,
         weight_parsing: WeightParsing = "fast",
+        weight_type: WeightType = "f64",
     ) -> None: ...
     @staticmethod
     def open(
@@ -261,6 +320,7 @@ class DiGraph:
         index: Index = "u64",
         threads: Optional[int] = None,
         weighted: bool = False,
+        weight_type: WeightType = "f64",
     ) -> DiGraph: ...
     def close(self) -> None: ...
     def __enter__(self) -> DiGraph: ...
@@ -290,6 +350,9 @@ class DiGraph:
     def is_weighted(self) -> bool: ...
     def weights(self, u: int) -> npt.NDArray[np.float64]: ...
     def edge_weights(self) -> npt.NDArray[np.float64]: ...
+    @property
+    def weight_type(self) -> Optional[WeightType]: ...
+    def modularity(self, communities: npt.ArrayLike) -> float: ...
     def components(self, *, kind: Literal["weak", "strong"] = "weak") -> Components: ...
     def in_degree(self, u: int) -> int: ...
     def in_neighbours(self, u: int) -> npt.NDArray[np.int64]: ...
@@ -308,6 +371,16 @@ class DiGraph:
         exploration: int = 20,
         direction: Literal["both", "in", "out"] = "both",
     ) -> LabelPropagation: ...
+    def betweenness(
+        self,
+        *,
+        engine: Literal["auto", "exact", "kadabra"] = "auto",
+        epsilon: float = 0.01,
+        delta: float = 0.1,
+        k: Optional[int] = None,
+        normalized: bool = True,
+        seed: int = 0x5EED,
+    ) -> BetweennessResult: ...
     def spectral_clustering(
         self,
         k: Optional[int],

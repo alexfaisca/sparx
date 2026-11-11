@@ -1,4 +1,5 @@
 pub(crate) mod cache;
+pub(crate) mod csr;
 pub mod direction;
 #[cfg(test)]
 mod direction_regression_test;
@@ -29,7 +30,6 @@ pub use direction::{
     AnyGraph, Directed, Directedness, Direction, Undirected, UndirectedMode, WeightMerge,
 };
 pub use edge_weight::{EdgeWeight, ParseWeightError, WeightDomain, WeightParsing, Weighted};
-pub use graph_derive::{GenericEdge, GenericEdgeType};
 pub use weight::{Weight, WeightAtomic};
 
 use label::VoidLabel;
@@ -45,9 +45,9 @@ use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::{fmt::Debug, fs::File, sync::Arc};
 
-pub use graph_derive::E;
-pub use graph_derive::N;
-use graph_derive::sparkx_label;
+/// `bytemuck`, for [`label!`](crate::label!)'s expansions (in crates that may not depend on it).
+#[doc(hidden)]
+pub use bytemuck as __bytemuck;
 
 /// The default integer type for indexing.
 ///
@@ -215,8 +215,7 @@ pub fn edge_index<Ix: IndexType>(index: usize) -> EdgeIndex<Ix> {
 
 /// Describes the behavior node labels must exhibit to be used by the tool.
 ///
-/// Given a repr C/transparent struct the required traits may be derived automatically by
-/// annotating the struct with #[sparkx_label].
+/// [`label!`](crate::label!) declares label types (integer newtypes) with everything required.
 #[allow(dead_code)]
 pub trait N:
     Copy + std::fmt::Debug + Ord + bytemuck::Pod + bytemuck::Zeroable + Send + Sync
@@ -251,8 +250,7 @@ pub trait N:
 
 /// Describes the behavior edge labels must exhibit to be used by the tool.
 ///
-/// Given a repr C/transparent struct the required traits may be derived automatically by
-/// annotating the struct with #[sparkx_label].
+/// [`label!`](crate::label!) declares label types (integer newtypes) with everything required.
 ///
 /// Being labeled ([`is_labeled`](Self::is_labeled)) and being weighted
 /// ([`is_weighted`](Self::is_weighted)) are independent: a labeled but unweighted edge (e.g. a
@@ -386,6 +384,7 @@ pub enum CacheFile {
     Landmarks,
     Spectral,
     LabelPropagation,
+    Betweenness,
     DFS,
     DfsVisitor,
     BfsVisitor,
@@ -415,6 +414,7 @@ pub enum CacheFile {
     HyperBallLinCentrality,
     GVELouvain,
     ExactCloseness,
+    ExactBetweenness,
     ExactHarmonic,
     ExactLin,
     /// Weakly connected components (connected components, for undirected graphs).

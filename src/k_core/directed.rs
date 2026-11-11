@@ -1,6 +1,8 @@
 use crate::graph;
+use crate::graph::csr::Csr;
 use crate::graph::*;
 use crate::k_core::count::CoreCount;
+use crate::k_core::liu_et_al::liu_peel;
 use crate::shared_slice::*;
 
 use std::mem::ManuallyDrop;
@@ -27,11 +29,12 @@ pub enum CoreDegree {
 /// symmetric graph, in- and out-cores are its usual k-cores (see [`AlgoBatageljZaversnik`], for
 /// [`Graph`]s), and total degree ones twice those (every edge being two arcs).
 ///
-/// Computed in `O(|V| + |E|)` by Batagelj and Zaversnik's bucket peeling (["An O(m) Algorithm
-/// for Cores Decomposition of Networks"](https://doi.org/10.48550/arXiv.cs/0310049)), peeling by
-/// in-degree a view of the graph: peeling a node lowers the in-degree of its out-neighbours, so
-/// in-cores peel the graph, out-cores its transpose and total degree cores its underlying
-/// undirected graph with an edge per arc ([`UndirectedMode::Each`]).
+/// Computed in parallel by Liu et al.'s peeling (["Parallel k-Core Decomposition: Theory and
+/// Practice"](https://doi.org/10.48550/arXiv.2502.08042), as [`AlgoLiuEtAl`] for [`Graph`]s),
+/// peeling by in-degree a view of the graph: peeling a node lowers the in-degree of its
+/// out-neighbours, so in-cores peel the graph, out-cores its transpose and total degree cores
+/// its underlying undirected graph with an edge per arc ([`UndirectedMode::Each`]). The result is
+/// the same whatever the threads.
 ///
 /// Coreness is stored as `Cx` integers (`u8` by default, see [`CoreCount`]): every node's degree
 /// (of the kind cores are by) must fit a `Cx`, or the decomposition fails with an error.
@@ -42,6 +45,7 @@ pub enum CoreDegree {
 /// [`DiGraph`]: ../../graph/type.DiGraph.html
 /// [`Graph`]: ../../graph/type.Graph.html
 /// [`AlgoBatageljZaversnik`]: ../batagelj_zaversnik/struct.AlgoBatageljZaversnik.html
+/// [`AlgoLiuEtAl`]: ../liu_et_al/struct.AlgoLiuEtAl.html
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct DirectedKCores<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount = u8> {
@@ -77,25 +81,22 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         g: &'a DiGraph<N, E, Ix>,
         degree: CoreDegree,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // the view first, so that failing to build it leaves no result file behind
-        enum View<'v, N: graph::N, E: graph::E, Ix: graph::IndexType> {
-            Directed(&'v DiGraph<N, E, Ix>),
-            Undirected(&'v Graph<N, E, Ix>),
-        }
-        let view = match degree {
-            CoreDegree::In => View::Directed(g),
-            CoreDegree::Out => View::Directed(g.transpose()?),
+        // the views first, so that failing to build them leaves no result file behind: the
+        // graph peeled by in-degree (peeling a node lowers the in-degree of its out-neighbours),
+        // and its transpose, whose rows are its in-arcs
+        let (peeled, reverse) = match degree {
+            CoreDegree::In => (Csr::of(g), Csr::of(g.transpose()?)),
+            CoreDegree::Out => (Csr::of(g.transpose()?), Csr::of(g)),
             // in plus out degree: every arc counts, both ways too
-            CoreDegree::Total => View::Undirected(g.to_undirected_with(UndirectedMode::Each)?),
+            CoreDegree::Total => {
+                let both = Csr::of(g.to_undirected_with(UndirectedMode::Each)?);
+                (both, both)
+            }
         };
         let out_fn = g.build_cache_filename(CacheFile::KCoreDirected(degree), None)?;
         let k_cores = SharedSliceMut::<Cx>::abst_mem_mut(&out_fn, g.size(), true)?;
         let mut cores = Self { g, degree, k_cores };
-        let peeled = match view {
-            View::Directed(v) => cores.peel(v),
-            View::Undirected(v) => cores.peel(v),
-        };
-        if let Err(e) = peeled {
+        if let Err(e) = cores.peel(peeled, reverse) {
             let _ = std::fs::remove_file(&out_fn);
             return Err(e);
         }
@@ -127,108 +128,59 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         Ok(())
     }
 
-    /// Peels `p` (a view of the graph, with the same nodes) by in-degree: removing a node lowers
-    /// the in-degree of its out-neighbours.
-    fn peel<Dir: Directedness>(
+    /// Peels the graph whose arcs are `peeled` by in-degree (each node's in-arcs being its row
+    /// of `reverse`, self-loops not counted), in parallel: Liu et al.'s peeling (see
+    /// [`AlgoLiuEtAl`]).
+    ///
+    /// [`AlgoLiuEtAl`]: ../liu_et_al/struct.AlgoLiuEtAl.html
+    fn peel(
         &mut self,
-        p: &GraphMemoryMap<N, E, Ix, Dir>,
+        peeled: Csr<Ix, E>,
+        reverse: Csr<Ix, E>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let node_count = p.size();
+        let node_count = self.g.size();
         if node_count == 0 {
             return Ok(());
         }
-        let index_ptr = SharedSlice::<Ix>::new(p.offsets_ptr(), p.offsets_size());
-        let neighbours_ptr = SharedSlice::<Ix>::new(p.neighbours_ptr(), p.width());
-        let degree = self.degree;
-        let helper = |seq| {
-            self.g
-                .build_cache_filename(CacheFile::KCoreDirected(degree), Some(seq))
-        };
-        let helpers = [helper(0)?, helper(1)?, helper(2)?];
-        let mut degree_mem = SharedSliceMut::<Ix>::abst_mem_mut(&helpers[0], node_count, true)?;
-        let mut node_mem = SharedSliceMut::<Ix>::abst_mem_mut(&helpers[1], node_count, true)?;
-        let mut pos_mem = SharedSliceMut::<Ix>::abst_mem_mut(&helpers[2], node_count, true)?;
-        let (degree, node, pos) = (
-            degree_mem.as_mut_slice(),
-            node_mem.as_mut_slice(),
-            pos_mem.as_mut_slice(),
-        );
-        let core = self.k_cores.as_mut_slice();
-
-        // in-degrees, without self-loops
-        let mut max_degree = 0usize;
-        for u in 0..node_count {
-            for e in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
-                let v = neighbours_ptr.get(e).index();
-                if v != u {
-                    degree[v] = Ix::new(degree[v].index() + 1);
-                    max_degree = max_degree.max(degree[v].index());
-                }
-            }
-        }
-
-        if max_degree > Cx::MAX {
-            let v = (0..node_count)
-                .find(|&v| degree[v].index() == max_degree)
-                .unwrap_or_default();
-            let e = crate::k_core::count::check_degree::<Cx>(v, max_degree).unwrap_err();
-            drop((degree_mem, node_mem, pos_mem));
-            for f in &helpers {
-                let _ = std::fs::remove_file(f);
-            }
-            return Err(e.to_string().into());
-        }
-
-        // nodes sorted by degree; bins[d]: where nodes of degree d start
-        let mut bins = vec![0usize; max_degree + 2];
-        for d in degree.iter() {
-            bins[d.index() + 1] += 1;
-        }
-        for d in 0..=max_degree {
-            bins[d + 1] += bins[d];
-        }
-        for v in 0..node_count {
-            let d = degree[v].index();
-            pos[v] = Ix::new(bins[d]);
-            node[bins[d]] = Ix::new(v);
-            bins[d] += 1;
-        }
-        for d in (1..=max_degree).rev() {
-            bins[d] = bins[d - 1];
-        }
-        bins[0] = 0;
-
-        // peel nodes in order of current degree
-        for i in 0..node_count {
-            let v = node[i].index();
-            let degree_v = degree[v].index();
-            core[v] = Cx::from_usize(degree_v);
-            for e in index_ptr.get(v).index()..index_ptr.get(v + 1).index() {
-                let u = neighbours_ptr.get(e).index();
-                let degree_u = degree[u].index();
-                if u == v || degree_u <= degree_v {
-                    continue;
-                }
-                // move u to the front of its bin, then shrink the bin past it
-                let (u_pos, front) = (pos[u].index(), bins[degree_u]);
-                let w = node[front].index();
-                if u != w {
-                    node[u_pos] = Ix::new(w);
-                    pos[w] = Ix::new(u_pos);
-                    node[front] = Ix::new(u);
-                    pos[u] = Ix::new(front);
-                }
-                bins[degree_u] += 1;
-                degree[u] = Ix::new(degree_u - 1);
-            }
-        }
-
-        self.k_cores.flush_async()?;
-        drop((degree_mem, node_mem, pos_mem));
-        for f in &helpers {
+        let target = || CacheFile::KCoreDirected(self.degree);
+        let files: Vec<String> = (0..5)
+            .map(|seq| self.g.build_cache_filename(target(), Some(seq)))
+            .collect::<Result<_, _>>()?;
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            // each node is in a frontier once
+            let proc_mem = (
+                SharedSliceMut::<Cx::Atomic>::abst_mem_mut(&files[0], node_count, true)?,
+                SharedSliceMut::<Ix>::abst_mem_mut(&files[1], node_count, true)?,
+                SharedSliceMut::<portable_atomic::AtomicBool>::abst_mem_mut(
+                    &files[2], node_count, true,
+                )?,
+                SharedSliceMut::<Ix>::abst_mem_mut(&files[3], node_count, true)?,
+                SharedSliceMut::<Ix>::abst_mem_mut(&files[4], node_count, true)?,
+            );
+            // in-degrees, without self-loops (rows are sorted)
+            let in_degree = |v: usize| {
+                let row = &reverse.targets[reverse.range(v)];
+                let loops = row.partition_point(|x| x.index() < v);
+                let loops = row[loops..].iter().take_while(|x| x.index() == v).count();
+                row.len() - loops
+            };
+            let slice = |s: &[Ix]| SharedSlice::<Ix>::new(s.as_ptr(), s.len());
+            liu_peel(
+                slice(peeled.offsets),
+                slice(peeled.targets),
+                node_count,
+                self.g.thread_num(),
+                &in_degree,
+                proc_mem,
+                self.k_cores.shared_slice(),
+            )?;
+            self.k_cores.flush_async()?;
+            Ok(())
+        })();
+        for f in &files {
             let _ = std::fs::remove_file(f);
         }
-        Ok(())
+        result
     }
 }
 

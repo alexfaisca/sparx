@@ -4,10 +4,12 @@ use crate::shared_slice::*;
 
 use crossbeam::thread;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use super::count::{TriangleCount, TriangleCounter};
 use super::triangles::Triangles;
+use crate::graph::csr::Csr;
 
 type ProceduralMemoryClusteringCoefficient = ();
 
@@ -522,52 +524,105 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
         let mut local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
 
         let node_count = g.size();
-        let index_ptr = SharedSlice::<Ix>::new(g.offsets_ptr(), g.offsets_size());
-        let neighbours_ptr = SharedSlice::<Ix>::new(g.neighbours_ptr(), g.width());
+        let threads = g.thread_num().max(1);
+        let (out_csr, in_csr) = (Csr::of(g), Csr::of(transpose));
 
-        // 2 t(i): every arc's triangles, at both of its ends
-        let t = local.as_mut_slice();
+        // 2 t(i): every arc's triangles, at both of its ends, added up as integers (exactly, in
+        // any order) in the coefficients' own memory, as `u64` atomics (of the same size, and
+        // here aligned); then each node's coefficient stored over its count, as its bits,
+        // through the same atomics: the memory is only ever accessed through them
+        let ptr = {
+            let t = local.as_mut_slice();
+            t[..node_count].fill(0.);
+            t.as_mut_ptr()
+        };
+        assert_eq!(ptr as usize % std::mem::align_of::<AtomicU64>(), 0);
+        let twice = unsafe { std::slice::from_raw_parts(ptr as *const AtomicU64, node_count) };
         let counts = triangles.all_triangles();
-        for u in 0..node_count {
-            let (begin, end) = (index_ptr.get(u).index(), index_ptr.get(u + 1).index());
-            for (e, count) in (begin..end).zip(&counts[begin..end]) {
-                let v = neighbours_ptr.get(e).index();
-                let c = count.count() as f64;
-                t[u] += c;
-                t[v] += c;
-            }
-        }
-
-        let mut sum = 0f64;
-        for (i, t_i) in t.iter_mut().enumerate() {
-            let outs: Vec<usize> = g.neighbours(i)?.filter(|&j| j != i).collect();
-            let ins: Vec<usize> = transpose.neighbours(i)?.filter(|&j| j != i).collect();
-            let degree = (outs.len() + ins.len()) as f64;
-            // d↔(i): the product of the runs of each neighbour in both sorted lists
-            let mut reciprocated = 0usize;
-            let (mut a, mut b) = (0, 0);
-            while a < outs.len() && b < ins.len() {
-                match outs[a].cmp(&ins[b]) {
-                    std::cmp::Ordering::Less => a += 1,
-                    std::cmp::Ordering::Greater => b += 1,
-                    std::cmp::Ordering::Equal => {
-                        let j = outs[a];
-                        let run_out = outs[a..].iter().take_while(|&&x| x == j).count();
-                        let run_in = ins[b..].iter().take_while(|&&x| x == j).count();
-                        reciprocated += run_out * run_in;
-                        a += run_out;
-                        b += run_in;
+        // nodes claimed a block at a time; sums by block, so that the average is the same
+        // whatever the threads
+        const BLOCK: usize = 4096;
+        let blocks = node_count.div_ceil(BLOCK);
+        let next = AtomicUsize::new(0);
+        let for_blocks = |f: &(dyn Fn(usize) + Sync)| {
+            next.store(0, Ordering::Relaxed);
+            std::thread::scope(|scope| {
+                for _ in 0..threads.min(blocks) {
+                    scope.spawn(|| {
+                        loop {
+                            let b = next.fetch_add(1, Ordering::Relaxed);
+                            if b >= blocks {
+                                break;
+                            }
+                            f(b);
+                        }
+                    });
+                }
+            });
+        };
+        for_blocks(&|b| {
+            for u in b * BLOCK..((b + 1) * BLOCK).min(node_count) {
+                let mut own = 0;
+                for e in out_csr.range(u) {
+                    let v = out_csr.targets[e];
+                    let c = counts[e].count() as u64;
+                    if c > 0 {
+                        own += c;
+                        twice[v.index()].fetch_add(c, Ordering::Relaxed);
                     }
                 }
+                twice[u].fetch_add(own, Ordering::Relaxed);
             }
-            let possible = degree * (degree - 1.) - 2. * reciprocated as f64;
-            *t_i = if possible > 0. {
-                *t_i / 2. / possible
-            } else {
-                0.
-            };
-            sum += *t_i;
-        }
+        });
+
+        // the coefficients, each node's from its (sorted) rows out and in
+        let block_sums: Vec<AtomicU64> = (0..blocks).map(|_| AtomicU64::new(0)).collect();
+        for_blocks(&|b| {
+            let mut sum = 0f64;
+            let (begin, end) = (b * BLOCK, ((b + 1) * BLOCK).min(node_count));
+            for (i, t) in twice.iter().enumerate().take(end).skip(begin) {
+                let t2 = t.load(Ordering::Relaxed) as f64;
+                let (outs, ins) = (
+                    &out_csr.targets[out_csr.range(i)],
+                    &in_csr.targets[in_csr.range(i)],
+                );
+                let not_i = |x: &&Ix| x.index() != i;
+                let degree =
+                    (outs.iter().filter(not_i).count() + ins.iter().filter(not_i).count()) as f64;
+                // d↔(i): the product of the runs of each neighbour (but `i`) in both rows
+                let mut reciprocated = 0usize;
+                let (mut a, mut b) = (0, 0);
+                while a < outs.len() && b < ins.len() {
+                    let (x, y) = (outs[a].index(), ins[b].index());
+                    match x.cmp(&y) {
+                        std::cmp::Ordering::Less => a += 1,
+                        std::cmp::Ordering::Greater => b += 1,
+                        std::cmp::Ordering::Equal => {
+                            let run_out = outs[a..].iter().take_while(|z| z.index() == x).count();
+                            let run_in = ins[b..].iter().take_while(|z| z.index() == x).count();
+                            if x != i {
+                                reciprocated += run_out * run_in;
+                            }
+                            a += run_out;
+                            b += run_in;
+                        }
+                    }
+                }
+                let possible = degree * (degree - 1.) - 2. * reciprocated as f64;
+                let value = if possible > 0. {
+                    t2 / 2. / possible
+                } else {
+                    0.
+                };
+                t.store(value.to_bits(), Ordering::Relaxed);
+                sum += value;
+            }
+            block_sums[b].store(sum.to_bits(), Ordering::Relaxed);
+        });
+        let mut sum: f64 = block_sums
+            .iter()
+            .map(|s| f64::from_bits(s.load(Ordering::Relaxed)))
+            .sum();
         triangles.drop_cache()?;
         // weighted arcs: the weighted coefficients
         if E::is_weighted() {

@@ -1,10 +1,10 @@
 [package]
 # published as `sparx-graph` (`sparx` is taken on crates.io), used as `sparx` (see `[lib]`)
 name = "sparx-graph"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Memory-mapped analytics for large static sparse graphs (de Bruijn graphs in particular): k-cores, k-trusses, triangles, Louvain, HyperBall, centralities, Euler trails"
+description = "Memory-mapped analytics for large static sparse graphs (de Bruijn graphs in particular): k-cores, k-trusses, triangles, communities (Louvain, Leiden, label propagation, spectral clustering), weighted shortest paths, centralities, Euler trails"
 repository = "https://github.com/alexfaisca/sparx"
 readme = "README.md"
 keywords = ["graph", "sparse", "de-bruijn", "k-truss", "centrality"]
@@ -52,7 +52,6 @@ petgraph = []
 rustworkx = []
 
 [dependencies]
-graph_derive = { package = "sparx-graph-derive", version = "0.1.0", path = "./derive_macros/" }
 bytemuck = { version = "1.23.0", features = ["derive"] }
 bitfield = "0.19.1"
 clap = { version = "4.5.39", features = ["derive"] }
