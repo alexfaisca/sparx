@@ -1345,12 +1345,32 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> Graph<
     /// * `comms_cardinality` --- cardinality of distinct communities in the given partition.
     ///
     /// [`GraphMemoryMap`]: ./struct.GraphMemoryMap.html#
+    ///
+    /// Computed in parallel, the same whatever the threads; it maps memory for the communities'
+    /// total degrees (and, with weighted edges, the nodes' weighted degrees): algorithms holding
+    /// memory they're done with can lend it, with [`modularity_with`](Self::modularity_with).
     pub fn modularity(
         &self,
         communities: &[Ix],
         comms_cardinality: usize,
     ) -> Result<f64, Box<dyn std::error::Error>> {
         self.modularity_impl(communities, comms_cardinality)
+    }
+
+    /// [`modularity`](Self::modularity), in memory the caller lends rather than memory it maps:
+    /// `totals` (at least `comms_cardinality` entries) for the communities' total degrees, and,
+    /// with weighted edges ([`E::is_weighted`], required then), `degrees` (at least `|V|`
+    /// entries) for the nodes' weighted degrees; unweighted edges need none (degrees are the
+    /// rows' lengths). Their contents are overwritten. `T` is any [`Weight`] (the sums are
+    /// added up in it: `f64` for full precision).
+    pub fn modularity_with<T: Weight>(
+        &self,
+        communities: &[Ix],
+        comms_cardinality: usize,
+        totals: &mut [T],
+        degrees: Option<&mut [T]>,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        self.modularity_with_impl(communities, comms_cardinality, totals, degrees)
     }
 
     #[inline(always)]

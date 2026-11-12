@@ -17,91 +17,185 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         communities: &[Ix],
         comms_cardinality: usize,
     ) -> Result<f64, Box<dyn std::error::Error>> {
-        let m2 = match self.width() {
-            0 => return Ok(0.),
-            edge_count => edge_count as f64,
-        };
-        let node_count = self.size();
+        if self.width() == 0 {
+            return Ok(0.);
+        }
+        // the communities' total degrees, and, for weighted edges, the nodes' weighted degrees
+        let totals_fn = self.build_helper_filename(1)?;
+        let degrees_fn = self.build_helper_filename(2)?;
+        let result = (|| -> Result<f64, Box<dyn std::error::Error>> {
+            let mut totals =
+                SharedSliceMut::<f64>::abst_mem_mut(&totals_fn, comms_cardinality.max(1), true)?;
+            let mut degrees = if E::is_weighted() {
+                Some(SharedSliceMut::<f64>::abst_mem_mut(
+                    &degrees_fn,
+                    self.size().max(1),
+                    true,
+                )?)
+            } else {
+                None
+            };
+            self.modularity_with_impl(
+                communities,
+                comms_cardinality,
+                totals.as_mut_slice(),
+                degrees.as_mut().map(|d| d.as_mut_slice()),
+            )
+        })();
+        self.cleanup_helpers()?;
+        result
+    }
 
-        // simple input invariants validatation
+    /// Modularity (see [`modularity`](GraphMemoryMap::modularity)) with the caller's memory:
+    /// `totals` (`comms_cardinality` entries at least) for the communities' total degrees, and,
+    /// for weighted edges, `degrees` (`|V|` entries at least) for the nodes' weighted degrees.
+    ///
+    /// In parallel: the nodes, in blocks, each sum their arcs' weights and those within their
+    /// community (the latter only adding up to a number, the edges within communities' total
+    /// weight), the blocks' sums added up in block order; then the communities' total degrees
+    /// are summed in node order. The same result whatever the threads.
+    pub(super) fn modularity_with_impl<T: crate::graph::Weight>(
+        &self,
+        communities: &[Ix],
+        comms_cardinality: usize,
+        totals: &mut [T],
+        degrees: Option<&mut [T]>,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        let node_count = self.size();
         if communities.len() != node_count {
             return Err(format!("error can't calculate the modularity of a partition with length {}: partition length must equal |V| = {node_count}", communities.len()).into());
         } else if comms_cardinality > node_count {
             return Err(format!("error community cardinality {comms_cardinality} can't be bigger than |V| = {node_count}").into());
+        } else if totals.len() < comms_cardinality {
+            return Err(format!(
+                "error modularity needs {comms_cardinality} communities' totals, not {}",
+                totals.len()
+            )
+            .into());
+        }
+        if self.width() == 0 {
+            return Ok(0.);
+        }
+        // (unweighted: the rows' lengths, whatever memory is lent)
+        let degrees = match degrees {
+            _ if !E::is_weighted() => None,
+            Some(d) if d.len() >= node_count => Some(SharedSliceMut::new(d.as_mut_ptr(), d.len())),
+            Some(d) => {
+                return Err(format!(
+                    "error modularity needs {node_count} nodes' degrees, not {}",
+                    d.len()
+                )
+                .into());
+            }
+            None => {
+                return Err(
+                    "error modularity needs the nodes' degrees' memory, for weighted edges".into(),
+                );
+            }
+        };
+
+        let csr = crate::graph::csr::Csr::of(self);
+        const BLOCK: usize = 4096;
+        let blocks = node_count.div_ceil(BLOCK);
+        let threads = self.thread_num().max(1).min(blocks.max(1));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        // each block's (within communities, total) weight
+        // each thread's blocks' (block, within, total), or the error it met
+        type BlockSums = Result<Vec<(usize, f64, f64)>, String>;
+        let sums: Vec<BlockSums> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let next = &next;
+                    s.spawn(move || -> Result<Vec<(usize, f64, f64)>, String> {
+                        let mut degrees = degrees;
+                        let mut mine = vec![];
+                        loop {
+                            let b = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if b >= blocks {
+                                return Ok(mine);
+                            }
+                            let (mut within, mut total) = (0f64, 0f64);
+                            for u in b * BLOCK..((b + 1) * BLOCK).min(node_count) {
+                                let comm_u = communities[u].index();
+                                if comm_u >= comms_cardinality {
+                                    return Err(format!(
+                                        "error node {u}'s community {comm_u} is past the {comms_cardinality} communities"
+                                    ));
+                                }
+                                if !E::is_weighted() {
+                                    let range = csr.range(u);
+                                    total += range.len() as f64;
+                                    for &v in &csr.targets[range] {
+                                        // (`v < node_count`: safety)
+                                        let v = v.index();
+                                        if v < node_count && communities[v].index() == comm_u {
+                                            within += 1.;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let mut degree = 0f64;
+                                for e in csr.range(u) {
+                                    let w = csr.weights[e].weight::<f64>();
+                                    if !(w.is_finite() && w >= 0.) {
+                                        return Err(format!(
+                                            "error modularity's edge weights must be finite and non-negative, but one is {:?}",
+                                            csr.weights[e]
+                                        ));
+                                    }
+                                    degree += w;
+                                    let v = csr.targets[e].index();
+                                    if v < node_count && communities[v].index() == comm_u {
+                                        within += w;
+                                    }
+                                }
+                                total += degree;
+                                if let Some(d) = degrees.as_mut() {
+                                    *d.get_mut(u) = T::from_f64(degree);
+                                }
+                            }
+                            mine.push((b, within, total));
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|e| Err(format!("{e:?}"))))
+                .collect()
+        });
+        let mut blocks_sums = Vec::with_capacity(blocks);
+        for part in sums {
+            blocks_sums.extend(part?);
+        }
+        blocks_sums.sort_unstable_by_key(|b| b.0);
+        let (mut within, mut m2) = (0f64, 0f64);
+        for &(_, w, t) in &blocks_sums {
+            within += w;
+            m2 += t;
+        }
+        if m2 == 0. {
+            return Ok(0.);
         }
 
-        // helper internal degree accumulator
-        let id_fn = self.build_helper_filename(0)?;
-        // helper total degree accumulator
-        let td_fn = self.build_helper_filename(1)?;
-
-        if E::is_weighted() {
-            // edges weigh their labels' weights (finite and non-negative), summed in `f64`
-            let mut internal =
-                SharedSliceMut::<f64>::abst_mem_mut(&id_fn, comms_cardinality, true)?;
-            let mut total = SharedSliceMut::<f64>::abst_mem_mut(&td_fn, comms_cardinality, true)?;
-            let mut m2 = 0f64;
-            for u in 0..node_count {
-                let comm_u = communities[u].index();
-                for (v, label) in self.weighted_neighbours(u)? {
-                    let w = label.weight::<f64>();
-                    if !(w.is_finite() && w >= 0.) {
-                        drop((internal, total));
-                        self.cleanup_helpers()?;
-                        return Err(format!(
-                            "error modularity's edge weights must be finite and non-negative, but one is {label:?}"
-                        )
-                        .into());
-                    }
-                    m2 += w;
-                    *total.get_mut(comm_u) += w;
-                    if v < node_count && communities[v].index() == comm_u {
-                        *internal.get_mut(comm_u) += w;
-                    }
-                }
-            }
-            let modularity = if m2 == 0. {
-                0.
-            } else {
-                (0..comms_cardinality)
-                    .map(|c| internal.get(c) / m2 - (total.get(c) / m2).powi(2))
-                    .sum()
+        // the communities' total degrees, in node order
+        let totals = &mut totals[..comms_cardinality];
+        totals.fill(T::zero());
+        for (u, c) in communities.iter().enumerate() {
+            totals[c.index()] += match &degrees {
+                Some(d) => *d.get(u),
+                None => T::from_usize(csr.range(u).len()),
             };
-            drop((internal, total));
-            self.cleanup_helpers()?;
-            return Ok(modularity);
         }
-
-        let mut internal_degree =
-            SharedSliceMut::<usize>::abst_mem_mut(&id_fn, comms_cardinality, true)?;
-        let mut total_degree =
-            SharedSliceMut::<usize>::abst_mem_mut(&td_fn, comms_cardinality, true)?;
-
-        for u in 0..node_count {
-            let iter = self.neighbours(u)?;
-            let comm_u = communities[u].index();
-            *total_degree.get_mut(comm_u) += iter.remaining_neighbours();
-            for v in iter {
-                if v >= node_count {
-                    continue;
-                } // safety
-                if communities[v].index() == comm_u {
-                    *internal_degree.get_mut(comm_u) += 1;
-                }
-            }
-        }
-
         // modularity: sum_c( internal_dir_edges[c]/m2 - (Kc[c]/m2)^2 )
-        let mut partition_modularity = 0.0f64;
-        for c in 0..comms_cardinality {
-            let lc_over_m2 = (*internal_degree.get(c) as f64) / m2;
-            let kc_over_m2 = (*total_degree.get(c) as f64) / m2;
-            partition_modularity += lc_over_m2 - kc_over_m2 * kc_over_m2;
-        }
-
-        self.cleanup_helpers()?;
-
-        Ok(partition_modularity)
+        let spread: f64 = totals
+            .iter()
+            .map(|t| {
+                let k = t.to_f64() / m2;
+                k * k
+            })
+            .sum();
+        Ok(within / m2 - spread)
     }
 
     pub(crate) fn coallesce_isolated_nodes_community(

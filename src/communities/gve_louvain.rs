@@ -1083,15 +1083,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         Ok(())
     }
 
-    /// Accumulates each community's internal/total degree (into `int_deg`/`tot_deg`, zeroed by
-    /// the caller) and computes the resulting partition modularity.
+    /// The partition's modularity ([`GraphMemoryMap::modularity_with`], in parallel), in memory
+    /// the run is done with: `tot_deg` for the communities' total degrees, and, with weighted
+    /// edges, `int_deg` for the nodes' weighted degrees, if it holds them (else, mapped anew).
     ///
-    /// Generic over `T: Weight`, independently of the algorithm's own `W`: `int_deg`/`tot_deg`
-    /// are purely a transient scratch computation local to this one function, so the caller is
-    /// free to pick whichever `T` lets it reuse already-allocated memory in place (see call
-    /// site), with the division/summation always happening in `f64` regardless, so `T` and `W`
-    /// never need to match.
-    #[allow(clippy::too_many_arguments)]
+    /// Generic over `T: Weight`, independently of the algorithm's own `W`: the caller picks
+    /// whichever `T` lets it reuse memory in place (see call site); the division and the
+    /// summation are in `f64` regardless.
+    ///
+    /// [`GraphMemoryMap::modularity_with`]: crate::graph::GraphMemoryMap::modularity_with
     fn finish_modularity<T: Weight>(
         &self,
         mut int_deg: SharedSliceMut<T>,
@@ -1099,41 +1099,18 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         communities: SharedSliceMut<Ix>,
         node_count: usize,
         prev_comm_count: usize,
-        m2: f64,
     ) -> Result<f64, Box<dyn std::error::Error>> {
-        // sum internal degree ---> int_deg | sum total degree ---> tot_deg
-        for u in 0..node_count {
-            let comm_u = communities.get(u).index();
-            if E::is_weighted() {
-                for (v, label) in self.g.weighted_neighbours(u)? {
-                    let w = label.weight::<T>();
-                    *tot_deg.get_mut(comm_u) += w;
-                    if v < node_count && communities.get(v).index() == comm_u {
-                        *int_deg.get_mut(comm_u) += w;
-                    }
-                }
-                continue;
-            }
-            let iter = self.g.neighbours(u)?;
-            *tot_deg.get_mut(comm_u) += T::from_usize(iter.remaining_neighbours());
-            for v in iter {
-                if v >= node_count {
-                    continue;
-                } // safety
-                if communities.get(v).index() == comm_u {
-                    *int_deg.get_mut(comm_u) += T::one();
-                }
-            }
+        let communities = &communities.as_slice()[..node_count];
+        let degrees = (int_deg.len() >= node_count).then(|| int_deg.as_mut_slice());
+        if E::is_weighted() && degrees.is_none() {
+            return self.g.modularity(communities, prev_comm_count);
         }
-
-        // modularity: sum_c( internal_dir_edges[c]/m2 - (Kc[c]/m2)^2 )
-        let mut partition_modularity = 0.0f64;
-        for c in 0..prev_comm_count {
-            let lc_over_m2 = int_deg.get(c).to_f64() / m2;
-            let kc_over_m2 = tot_deg.get(c).to_f64() / m2;
-            partition_modularity += lc_over_m2 - kc_over_m2 * kc_over_m2;
-        }
-        Ok(partition_modularity)
+        self.g.modularity_with(
+            communities,
+            prev_comm_count,
+            tot_deg.as_mut_slice(),
+            degrees,
+        )
     }
 
     fn compute_with_proc_mem_impl(
@@ -1470,21 +1447,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             self.g.cleanup_cache(CacheFile::GVELouvain)?;
             return Ok(());
         }
-        let m2_f64 = m2.to_f64();
 
         self.modularity = if self.g.size() <= self.g.width() {
             // common case (|E| >= |V|): reuse the already-`W`-typed weight buffers directly ---
             // no cast, no extra allocation.
             let int_deg = weights.par_zero_out_bytes();
             let tot_deg = next_weights.par_zero_out_bytes();
-            self.finish_modularity::<W>(
-                int_deg,
-                tot_deg,
-                communities,
-                node_count,
-                prev_comm_count,
-                m2_f64,
-            )?
+            self.finish_modularity::<W>(int_deg, tot_deg, communities, node_count, prev_comm_count)?
         } else if let (Some(mut int_deg), Some(mut tot_deg)) =
             (unsafe { helper.cast::<f64>() }, unsafe {
                 coms.cast::<f64>()
@@ -1498,7 +1467,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 communities,
                 node_count,
                 prev_comm_count,
-                m2_f64,
             )?
         } else if let (Some(mut int_deg), Some(mut tot_deg)) =
             (unsafe { helper.cast::<f32>() }, unsafe {
@@ -1513,7 +1481,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 communities,
                 node_count,
                 prev_comm_count,
-                m2_f64,
             )?
         } else {
             // rare case (|V| > |E|) *and* `Ix` is 1 or 2 bytes wide (`u8`/`u16`): no float width
@@ -1530,7 +1497,6 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 communities,
                 node_count,
                 prev_comm_count,
-                m2_f64,
             )?;
             drop(int_deg_owner);
             drop(tot_deg_owner);
