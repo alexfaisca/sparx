@@ -31,6 +31,9 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
   `LpaOptions::exploration_ends_early` (`exploration="auto"` in Python) ends exploring at the
   first pass that moves at most `tolerance` of the nodes: up to 2.5x faster where exploring has
   stopped paying, for a slightly lower modularity, and the same communities where it pays.
+  `LpaEngine::Asynchronous` (`engine="asynchronous"` in Python): nodes move in turn, seeing
+  labels as they are (as NetworKit's PLP), without coloring: 1.7x to 3.1x as fast on graphs of
+  millions of nodes, the communities depending on the threads' timing.
 * **Spectral clustering** (`communities::spectral`): a compressive engine (KPM and Chebyshev
   low-pass filtering of random signals) and an exact one (Chebyshev-filtered subspace iteration
   with locking), on the regularized Laplacian or the Bethe Hessian, with automatic choice of `k`;
@@ -86,7 +89,9 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
   directed) is 1.1x to 3.1x faster: its threads push peeled nodes in batches (each node had
   updated two counters all threads contended for), take the frontier in chunks as they finish,
   and bound each local search (one could peel most of a near-regular graph while the other
-  threads waited).
+  threads waited). Shortest paths on unweighted graphs are found by a parallel BFS, whose levels
+  of a few nodes one thread searches alone (sharing each cost two barriers: on graphs of long
+  paths, tens of thousands of them).
 
 ### Fixed
 

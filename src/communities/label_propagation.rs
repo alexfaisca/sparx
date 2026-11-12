@@ -382,7 +382,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
         }
         // whether a node is to be looked at (again), mapped as the labels are
         let pending_fn = g.build_cache_filename(CacheFile::LabelPropagation, Some(1))?;
-        let mut pending_mem = SharedSliceMut::<AtomicBool>::abst_mem_mut(&pending_fn, n.max(1), true)?;
+        let mut pending_mem =
+            SharedSliceMut::<AtomicBool>::abst_mem_mut(&pending_fn, n.max(1), true)?;
         for p in pending_mem.as_mut_slice().iter_mut() {
             *p = AtomicBool::new(true);
         }
@@ -450,8 +451,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
                                         break;
                                     }
                                     let at = ((k as u128 * stride as u128 + offset as u128)
-                                        % count as u128) as usize
+                                        % count as u128)
+                                        as usize
                                         * chunk;
+                                    // (`i` is the node itself, asynchronous: `order` only
+                                    // semi-synchronous, so no iterating over it)
+                                    #[allow(clippy::needless_range_loop)]
                                     for i in first + at..first + (at + chunk).min(len) {
                                         let u = if asynchronous { i } else { order[i] };
                                         if !pending[u].swap(false, Ordering::Relaxed) {
@@ -489,7 +494,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
                                                     let v = csr.targets[a].index();
                                                     if v != u {
                                                         let w = csr.weights[a].weight::<f64>();
-                                                        seen.push((labels[v].load_widened(Ordering::Relaxed), w));
+                                                        seen.push((
+                                                            labels[v]
+                                                                .load_widened(Ordering::Relaxed),
+                                                            w,
+                                                        ));
                                                     }
                                                 }
                                             }
@@ -513,7 +522,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
                                                 for &v in &csr.targets[csr.range(u)] {
                                                     let v = v.index();
                                                     if v != u {
-                                                        seen_labels.push(labels[v].load_widened(Ordering::Relaxed));
+                                                        seen_labels.push(
+                                                            labels[v]
+                                                                .load_widened(Ordering::Relaxed),
+                                                        );
                                                     }
                                                 }
                                             }
@@ -840,7 +852,10 @@ mod test {
             let g = graph::<()>(&format!("async_{run}"), 1000, &edges, threads);
             let mut lpa = LabelPropagation::with_options(&g, options).unwrap();
             check(&g, &lpa);
-            assert!(nmi(&labels(lpa.communities()), &truth) > 0.95, "{threads} threads");
+            assert!(
+                nmi(&labels(lpa.communities()), &truth) > 0.95,
+                "{threads} threads"
+            );
             // no coloring
             assert_eq!(lpa.colors(), 1);
             if threads == 1 {
@@ -854,9 +869,8 @@ mod test {
         let g = digraph("async_directed", 750, &arcs, 4);
         let mut lpa = LabelPropagation::with_options(&*g, options).unwrap();
         assert!(nmi(&labels(lpa.communities()), &truth) > 0.9);
-        let q =
-            crate::communities::directed_louvain::directed_modularity(&*g, lpa.communities())
-                .unwrap();
+        let q = crate::communities::directed_louvain::directed_modularity(&*g, lpa.communities())
+            .unwrap();
         assert_eq!(lpa.partition_modularity(), q);
         lpa.drop_cache().unwrap();
     }

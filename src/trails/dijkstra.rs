@@ -378,7 +378,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             threads,
             &scratch,
         )?;
-        distances.flush()?;
+        // (written back in the background, as other results are: the map is the result)
+        distances.flush_async()?;
         let (reachable, total_distances) = totals(distances.as_slice(), threads);
         Ok(Self {
             g,
@@ -628,6 +629,9 @@ pub(crate) fn resolve_engine<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir
     Ok(match engine {
         ShortestPathEngine::Sequential => None,
         ShortestPathEngine::Auto if threads <= 1 || g.size() < PARALLEL_FROM_NODES => None,
+        // (unweighted arcs: a parallel BFS, which takes no buckets; their width, unused, would
+        // take a pass over the arcs)
+        ShortestPathEngine::Auto if !E::is_weighted() => Some(1.),
         ShortestPathEngine::Auto => Some(default_delta(g)?),
         ShortestPathEngine::DeltaStepping { delta } => Some(match delta {
             Some(d) => d,
@@ -650,6 +654,12 @@ pub(crate) fn distances_into<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n = g.size();
     assert_eq!(out.len(), n);
+    // unweighted arcs: distances are hop counts, found by a BFS (in parallel, where Δ-stepping
+    // would run), the same, exactly
+    if !E::is_weighted() {
+        let threads = if delta.is_some() { threads } else { 1 };
+        return hop_distances(g, source, out, threads, scratch);
+    }
     match delta {
         Some(delta) => {
             // `f64`s as their bits, for atomic minima (of the same size, and here aligned)
@@ -673,6 +683,176 @@ pub(crate) fn distances_into<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir
             result
         }
     }
+}
+
+/// Every node's number of arcs from `source` in `g` (as an `f64`), into `out` ([`f64::INFINITY`]
+/// for unreachable nodes): a BFS, or, on more `threads` than one, a level-synchronous BFS in
+/// parallel (threads take chunks of a level's nodes, each node claimed by the thread that finds
+/// it first, with one compare-and-swap); its frontiers mapped in the 2 `scratch` files (removed
+/// after). The distances Dijkstra's algorithm and Δ-stepping find on unweighted arcs, exactly.
+fn hop_distances<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>(
+    g: &GraphMemoryMap<N, E, Ix, Dir>,
+    source: usize,
+    out: &mut [f64],
+    threads: usize,
+    scratch: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let n = g.size();
+    let csr = crate::graph::csr::Csr::of(g);
+    out.fill(f64::INFINITY);
+    out[source] = 0.;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let fronts = [
+            SharedSliceMut::<usize>::abst_mem_mut(&scratch[0], n, true)?,
+            SharedSliceMut::<usize>::abst_mem_mut(&scratch[1], n, true)?,
+        ];
+        let views = [fronts[0].shared_slice(), fronts[1].shared_slice()];
+        if threads <= 1 {
+            let mut queue = views[0];
+            let queue = queue.as_mut_slice();
+            queue[0] = source;
+            let (mut head, mut tail) = (0, 1);
+            while head < tail {
+                let u = queue[head];
+                head += 1;
+                let d = out[u] + 1.;
+                for &v in &csr.targets[csr.range(u)] {
+                    let v = v.index();
+                    if out[v] == f64::INFINITY {
+                        out[v] = d;
+                        queue[tail] = v;
+                        tail += 1;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // `f64`s as their bits, for compare-and-swaps (of the same size, and here aligned)
+        let ptr = out.as_mut_ptr();
+        assert_eq!(ptr as usize % std::mem::align_of::<AtomicU64>(), 0);
+        let dist = unsafe { std::slice::from_raw_parts(ptr as *const AtomicU64, n) };
+        const UNREACHED: u64 = f64::INFINITY.to_bits();
+        const CHUNK: usize = 256;
+        // levels of fewer nodes are searched by one thread (see below)
+        const SHARED_FROM: usize = 4 * CHUNK;
+        {
+            let mut first = views[0];
+            *first.get_mut(0) = source;
+        }
+        let lengths = [AtomicUsize::new(1), AtomicUsize::new(0)];
+        let next = AtomicUsize::new(0);
+        let barrier = crate::utils::SpinBarrier::new(threads);
+        // the level thread 0 reached alone (see below), for the others to resume from
+        let resumed = AtomicUsize::new(0);
+        let (views, lengths, next, barrier, csr, resumed) =
+            (&views, &lengths, &next, &barrier, &csr, &resumed);
+        std::thread::scope(|s| {
+            for tid in 0..threads {
+                s.spawn(move || {
+                    // the nodes found, for the next frontier: a batch at a time
+                    let mut found: Vec<usize> = Vec::with_capacity(CHUNK * 4);
+                    let mut level = 0u64;
+                    loop {
+                        let (current, upcoming) = ((level & 1) as usize, 1 - (level & 1) as usize);
+                        let len = lengths[current].load(Ordering::Acquire);
+                        if len == 0 {
+                            return;
+                        }
+                        // small frontiers: thread 0 alone, level after level, until one is
+                        // worth sharing (or the search ends), the others waiting once. Sharing a
+                        // level costs two barriers: on graphs of long paths (de Bruijn graphs'),
+                        // tens of thousands of levels of a few nodes each made the parallel BFS
+                        // 4 times as slow as a sequential one
+                        if len < SHARED_FROM {
+                            // (every thread has read `len` before thread 0 changes the lengths)
+                            barrier.wait();
+                            if tid == 0 {
+                                let (mut current, mut len, mut at) = (current, len, level);
+                                loop {
+                                    let upcoming = 1 - current;
+                                    let d = ((at + 1) as f64).to_bits();
+                                    let mut frontier = views[upcoming];
+                                    let mut found = 0;
+                                    for i in 0..len {
+                                        let u = *views[current].get(i);
+                                        for &v in &csr.targets[csr.range(u)] {
+                                            let v = v.index();
+                                            if dist[v].load(Ordering::Relaxed) == UNREACHED {
+                                                dist[v].store(d, Ordering::Relaxed);
+                                                *frontier.get_mut(found) = v;
+                                                found += 1;
+                                            }
+                                        }
+                                    }
+                                    lengths[current].store(0, Ordering::Relaxed);
+                                    lengths[upcoming].store(found, Ordering::Relaxed);
+                                    (current, len, at) = (upcoming, found, at + 1);
+                                    if len == 0 || len >= SHARED_FROM {
+                                        break;
+                                    }
+                                }
+                                resumed.store(at as usize, Ordering::Relaxed);
+                            }
+                            barrier.wait();
+                            level = resumed.load(Ordering::Relaxed) as u64;
+                            continue;
+                        }
+                        level += 1;
+                        let d = (level as f64).to_bits();
+                        let flush = |found: &mut Vec<usize>| {
+                            let at = lengths[upcoming].fetch_add(found.len(), Ordering::Relaxed);
+                            let mut frontier = views[upcoming];
+                            for (i, &v) in found.iter().enumerate() {
+                                *frontier.get_mut(at + i) = v;
+                            }
+                            found.clear();
+                        };
+                        loop {
+                            let begin = CHUNK * next.fetch_add(1, Ordering::Relaxed);
+                            if begin >= len {
+                                break;
+                            }
+                            for i in begin..(begin + CHUNK).min(len) {
+                                let u = *views[current].get(i);
+                                for &v in &csr.targets[csr.range(u)] {
+                                    let v = v.index();
+                                    if dist[v].load(Ordering::Relaxed) == UNREACHED
+                                        && dist[v]
+                                            .compare_exchange(
+                                                UNREACHED,
+                                                d,
+                                                Ordering::Relaxed,
+                                                Ordering::Relaxed,
+                                            )
+                                            .is_ok()
+                                    {
+                                        found.push(v);
+                                        if found.len() == found.capacity() {
+                                            flush(&mut found);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !found.is_empty() {
+                            flush(&mut found);
+                        }
+                        barrier.wait();
+                        if tid == 0 {
+                            lengths[current].store(0, Ordering::Relaxed);
+                            next.store(0, Ordering::Relaxed);
+                        }
+                        barrier.wait();
+                    }
+                });
+            }
+        });
+        Ok(())
+    })();
+    for f in scratch {
+        let _ = std::fs::remove_file(f);
+    }
+    result
 }
 
 /// The number of finite `dist`ances, and their sum: summed in blocks of a fixed size, in
@@ -941,6 +1121,74 @@ pub(crate) mod test {
         }
     }
 
+    /// The parallel BFS (unweighted arcs, where Δ-stepping would run) finds the sequential
+    /// one's distances, on graphs whose frontiers grow past what it shares between threads and
+    /// shrink below it, again and again (dense clusters joined by long paths: levels searched by
+    /// one thread, then by all, and back), on any number of threads.
+    #[test]
+    fn parallel_bfs_switches_between_one_thread_and_all() {
+        let (clusters, size, path) = (8, 3000, 400);
+        let mut arcs = vec![];
+        let mut next = 0x5eedu64;
+        let mut random = move |m: usize| {
+            next = next
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (next >> 33) as usize % m
+        };
+        let cluster_start = |c: usize| c * (size + path);
+        for c in 0..clusters {
+            let base = cluster_start(c);
+            for _ in 0..size * 4 {
+                let (u, v) = (base + random(size), base + random(size));
+                arcs.push((u, v));
+                arcs.push((v, u));
+            }
+            if c + 1 < clusters {
+                // a path from this cluster to the next, both ways
+                let mut prev = base + size - 1;
+                for i in 0..path {
+                    let v = base + size + i;
+                    arcs.push((prev, v));
+                    arcs.push((v, prev));
+                    prev = v;
+                }
+                arcs.push((prev, cluster_start(c + 1)));
+                arcs.push((cluster_start(c + 1), prev));
+            }
+        }
+        let n = cluster_start(clusters - 1) + size;
+        // each source's distances, by the sequential BFS (one thread)
+        let mut want: Vec<Vec<u64>> = vec![];
+        for threads in [1u8, 2, 7, 16] {
+            let g = crate::components::test_utils::graph_with_threads(
+                &format!("bfs_switch_{threads}"),
+                "general",
+                n,
+                &arcs,
+                threads,
+            );
+            for (i, source) in [0, cluster_start(3) + 17].into_iter().enumerate() {
+                let engine = if threads == 1 {
+                    ShortestPathEngine::Sequential
+                } else {
+                    ShortestPathEngine::DeltaStepping { delta: None }
+                };
+                let mut d = DijkstraDists::with_engine(&*g, source, engine).unwrap();
+                let got: Vec<u64> = d.get_distances().iter().map(|x| x.to_bits()).collect();
+                d.drop_cache().unwrap();
+                if threads == 1 {
+                    want.push(got);
+                } else {
+                    assert_eq!(got, want[i], "{threads} threads, source {source}");
+                }
+            }
+        }
+        // the far end: past every cluster and path
+        let far = f64::from_bits(want[0][n - 1]);
+        assert!(far > (path * (clusters - 1)) as f64, "{far}");
+    }
+
     /// Unit weights give the hop counts BFSs do: the same centralities (closeness and Lin's bit
     /// for bit, their sums being of integers).
     #[test]
@@ -1173,6 +1421,53 @@ pub(crate) mod test {
 
     /// Converting a weighted graph's cache to another index type keeps every arc's weight, so
     /// weighted algorithms find the same results on the converted graph.
+    /// Unweighted distances, by the parallel BFS, switching between one thread (the long paths'
+    /// levels of a node or two) and all of them (a hub's thousands of neighbours), and back: the
+    /// hop counts a sequential BFS finds, whatever the threads.
+    #[test]
+    fn parallel_hops_through_small_and_large_levels() {
+        // a path of 3000 nodes, a hub at its end linked to 3000 nodes, each linked to the next
+        // path's start through a node of its own, and a path of 2000 nodes from there
+        let (path, fan, tail) = (3000, 3000, 2000);
+        let hub = path;
+        let join = hub + fan + 1;
+        let n = join + tail;
+        let mut arcs = vec![];
+        for u in 0..path {
+            arcs.push((u, u + 1));
+        }
+        for i in 0..fan {
+            arcs.push((hub, hub + 1 + i));
+            arcs.push((hub + 1 + i, join));
+        }
+        for u in join..n - 1 {
+            arcs.push((u, u + 1));
+        }
+        let mut want = vec![f64::INFINITY; n];
+        for (u, d) in want.iter_mut().enumerate().take(hub + 1) {
+            *d = u as f64;
+        }
+        for d in &mut want[hub + 1..join] {
+            *d = (hub + 1) as f64;
+        }
+        for (i, d) in want[join..].iter_mut().enumerate() {
+            *d = (hub + 2 + i) as f64;
+        }
+        for threads in [1u8, 3, 8] {
+            let g = crate::components::test_utils::graph_with_threads(
+                &format!("hops_{threads}"),
+                "general",
+                n,
+                &arcs,
+                threads,
+            );
+            let engine = ShortestPathEngine::DeltaStepping { delta: None };
+            let mut d = DijkstraDists::with_engine(&*g, 0, engine).unwrap();
+            assert_eq!(d.get_distances(), want.as_slice(), "{threads} threads");
+            d.drop_cache().unwrap();
+        }
+    }
+
     #[test]
     fn index_conversion_keeps_weights() {
         let arcs = weighted_arcs(200, 900, 61, true);

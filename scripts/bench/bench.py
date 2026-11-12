@@ -240,17 +240,17 @@ ALGORITHMS = [
     Algorithm("pagerank", lambda g: f"max rank {g.pagerank().max():.3e}", nk_pagerank),
     Algorithm(
         "bfs",
-        lambda g: f"{int((g.bfs(0) >= 0).sum())} reached",
+        lambda g: f"{int((g.bfs(SOURCE) >= 0).sum())} reached",
         lambda G: nk_run(
-            nk().distance.BFS(G, 0, storePaths=False),
+            nk().distance.BFS(G, SOURCE, storePaths=False),
             lambda a: f"{sum(d < 1e300 for d in a.getDistances())} reached",
         ),
     ),
     Algorithm(
         "sssp",
-        lambda g: f"{int((g.dijkstra(0, engine='auto') < float('inf')).sum())} reached",
+        lambda g: f"{int((g.dijkstra(SOURCE, engine='auto') < float('inf')).sum())} reached",
         lambda G: nk_run(
-            nk().distance.Dijkstra(G, 0, storePaths=False),
+            nk().distance.Dijkstra(G, SOURCE, storePaths=False),
             lambda a: f"{sum(d < 1e300 for d in a.getDistances())} reached",
         ),
     ),
@@ -374,7 +374,22 @@ def run_algorithms(rec: Recorder, graph, library: str, names: list[str], reps: i
                 break
 
 
+# where BFS and SSSP start: the least node of the largest component (node 0 can be isolated, as
+# on graph_8_15, which would time a search of one node), the same for both libraries
+SOURCE = 0
+
+
+def source_of(g) -> int:
+    """The least node of `g`'s largest (connected) component, by sparx (not timed)."""
+    import numpy as np
+
+    c = g.components()
+    largest = int(np.argmax(c["sizes"]))
+    return int(np.flatnonzero(c["components"] == largest)[0])
+
+
 def worker(args) -> None:
+    global SOURCE
     import sparx
 
     dataset = next(d for d in DATASETS if d.name == args.dataset)
@@ -384,6 +399,7 @@ def worker(args) -> None:
         seconds, g = timed(lambda: sparx.Graph(dataset.path, index="u32", threads=args.threads))
         with g:
             rec.nodes, rec.edges = g.num_nodes, g.num_edges // 2
+            SOURCE = source_of(g)
             rec.row("load", 0, seconds, "ok", "parsed, cache built")
             run_algorithms(rec, g, "sparx", args.algorithms, args.reps)
     else:
@@ -396,6 +412,7 @@ def worker(args) -> None:
         with sparx.Graph(dataset.path, index="u32", threads=args.threads) as g:
             offsets, targets = g.csr()
             rec.nodes, rec.edges = g.num_nodes, g.num_edges // 2
+            SOURCE = source_of(g)
         n = len(offsets) - 1
         # each undirected edge once (from its smaller end), as NetworKit's undirected graphs take
         rows = np.repeat(np.arange(n, dtype=np.int64), np.diff(offsets))
