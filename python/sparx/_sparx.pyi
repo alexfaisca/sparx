@@ -167,8 +167,9 @@ class Graph:
         *,
         max_iterations: int = 40,
         tolerance: float = 0.05,
-        exploration: int = 20,
+        exploration: Union[int, Literal["auto"]] = 20,
         direction: Literal["both", "in", "out"] = "both",
+        engine: Literal["semi-synchronous", "asynchronous"] = "semi-synchronous",
     ) -> LabelPropagation: ...
     def betweenness(
         self,
@@ -368,8 +369,9 @@ class DiGraph:
         *,
         max_iterations: int = 40,
         tolerance: float = 0.05,
-        exploration: int = 20,
+        exploration: Union[int, Literal["auto"]] = 20,
         direction: Literal["both", "in", "out"] = "both",
+        engine: Literal["semi-synchronous", "asynchronous"] = "semi-synchronous",
     ) -> LabelPropagation: ...
     def betweenness(
         self,

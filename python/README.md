@@ -142,6 +142,8 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   `DiGraph`, `direction="in"` has labels spread along arcs (`"out"` against them, `"both"`, the
   default, ignores directions) and the modularity is directed. Faster than `leiden()`, and as
   good or better on clear structure; `leiden()`'s modularity is higher on graphs without it.
+  `exploration="auto"` ends exploring early, once a pass moves at most `tolerance` of the
+  nodes: faster where exploring has stopped paying, for a slightly lower modularity.
 * `spectral_clustering(k)` clusters by spectral clustering, into `{"communities", "count",
   "modularity", "lambda_k"}`, the same whatever the threads. `engine="compressive"` (the default)
   filters random signals by a low-pass graph filter; `engine="exact"` finds the eigenvectors

@@ -1726,3 +1726,37 @@ def test_betweenness_on_graphs_with_articulation_points(seed):
         np.testing.assert_allclose(b, [want[u] for u in range(len(G))], atol=1e-12)
         b = g.betweenness(engine="exact", normalized=False)["betweenness"]
         np.testing.assert_allclose(b, [raw[u] for u in range(len(G))], atol=1e-9)
+
+
+def test_label_propagation_exploration_auto():
+    G = nx.planted_partition_graph(5, 60, 0.3, 0.01, seed=3)
+    with sparx.Graph(undirected(G)) as g:
+        full = g.label_propagation()
+        auto = g.label_propagation(exploration="auto")
+        assert len(auto["moves"]) <= len(full["moves"])
+        assert auto["count"] >= 1 and auto["modularity"] > 0.5
+        # the same every run
+        assert auto["communities"].tolist() == g.label_propagation(exploration="auto")["communities"].tolist()
+        with pytest.raises(ValueError):
+            g.label_propagation(exploration="fast")
+        with pytest.raises(TypeError):
+            g.label_propagation(exploration=1.5)
+
+
+def test_label_propagation_asynchronous():
+    G = nx.planted_partition_graph(5, 60, 0.3, 0.01, seed=3)
+    truth = np.repeat(np.arange(5), 60)
+    with sparx.Graph(undirected(G), threads=1) as g:
+        r = g.label_propagation(engine="asynchronous")
+        assert r["colors"] == 1 and r["modularity"] > 0.5
+        # repeatable on one thread
+        again = g.label_propagation(engine="asynchronous")
+        assert r["communities"].tolist() == again["communities"].tolist()
+        parts = [set(np.flatnonzero(r["communities"] == c).tolist()) for c in np.unique(r["communities"])]
+        assert r["modularity"] == pytest.approx(nx.community.modularity(G, parts), abs=1e-9)
+        assert g.label_propagation(engine="asynchronous", exploration="auto")["modularity"] > 0.5
+        with pytest.raises(ValueError):
+            g.label_propagation(engine="fast")
+    D = nx.DiGraph(G)
+    with sparx.DiGraph(directed(D)) as d:
+        assert d.label_propagation(engine="asynchronous", direction="in")["modularity"] > 0.4

@@ -28,6 +28,9 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 * **Label propagation** (`communities::label_propagation`): semi-synchronous (Jones–Plassmann
   colouring) with GVE-LPA pruning; deterministic whatever the number of threads; `LpaDirection`
   on directed graphs.
+  `LpaOptions::exploration_ends_early` (`exploration="auto"` in Python) ends exploring at the
+  first pass that moves at most `tolerance` of the nodes: up to 2.5x faster where exploring has
+  stopped paying, for a slightly lower modularity, and the same communities where it pays.
 * **Spectral clustering** (`communities::spectral`): a compressive engine (KPM and Chebyshev
   low-pass filtering of random signals) and an exact one (Chebyshev-filtered subspace iteration
   with locking), on the regularized Laplacian or the Bethe Hessian, with automatic choice of `k`;
@@ -73,6 +76,17 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
   `Zeroable` among them).
 * **Breaking:** the `into_boxed_slice` methods of the shared slice views were removed: they
   freed memory-mapped memory as if it were heap memory.
+
+* Faster, with the same results: PageRank's `Auto` engine pulls the first iteration before
+  building the partition-centric bins (graphs converging at once: up to 10x); label propagation's
+  coloring is counter-based Jones and Plassmann's, `O(|E|)` work rather than a pass over the
+  remaining nodes' arcs per round (3.3x), and its passes count labels without weights on
+  unweighted graphs (1.2x to 5x in all); modularity is computed in parallel, in memory callers
+  can lend (`Graph::modularity_with`). K-core decomposition (Liu et al.'s peeling, undirected and
+  directed) is 1.1x to 3.1x faster: its threads push peeled nodes in batches (each node had
+  updated two counters all threads contended for), take the frontier in chunks as they finish,
+  and bound each local search (one could peel most of a near-regular graph while the other
+  threads waited).
 
 ### Fixed
 

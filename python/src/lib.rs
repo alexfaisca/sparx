@@ -38,7 +38,9 @@ use sparx::communities::directed_louvain::DirectedLouvain;
 use sparx::communities::directed_louvain::directed_modularity;
 use sparx::communities::gve_louvain::AlgoGVELouvain;
 use sparx::communities::hk_relax::HKRelax;
-use sparx::communities::label_propagation::{LabelPropagation, LpaDirection, LpaOptions};
+use sparx::communities::label_propagation::{
+    LabelPropagation, LpaDirection, LpaEngine, LpaOptions,
+};
 use sparx::communities::spectral::{
     EmbeddingOptions, SpectralClustering, SpectralEmbedding, SpectralEngine, SpectralMatrix,
     SpectralOptions,
@@ -890,6 +892,13 @@ fn betweenness<I: Ix, L: E, Dir: Reversible>(
         b.drop_cache()?;
         Ok(dict(entries))
     })
+}
+
+/// `label_propagation`'s `exploration`: a number of passes, or a mode (`"auto"`).
+#[derive(FromPyObject)]
+enum Exploration {
+    Passes(usize),
+    Mode(String),
 }
 
 fn label_propagation<I: Ix, L: E, Dir: Reversible>(
@@ -1880,15 +1889,42 @@ macro_rules! graph_class {
             /// `direction` is the arcs labels follow: `"both"` (directions ignored), `"in"` (a
             /// node takes its in-neighbours' label: labels spread along arcs) or `"out"`. Fast,
             /// and good on clear structure; `leiden` finds higher modularity on graphs without it.
-            #[pyo3(signature = (*, max_iterations = 40, tolerance = 0.05, exploration = 20, direction = "both"))]
+            /// `exploration` is the number of exploring passes, or `"auto"`: up to 20, ending at
+            /// the first that moves at most `tolerance` of the nodes (faster where exploring has
+            /// stopped paying, for a slightly lower modularity).
+            /// `engine` is `"semi-synchronous"` (the default: colors of nodes take turns, the same
+            /// communities whatever the threads) or `"asynchronous"` (nodes move in turn, seeing
+            /// labels as they are: no coloring and fewer passes, but communities depending on the
+            /// threads' timing, as NetworKit's PLP).
+            #[pyo3(signature = (*, max_iterations = 40, tolerance = 0.05, exploration = Exploration::Passes(20), direction = "both", engine = "semi-synchronous"))]
+            #[allow(clippy::too_many_arguments)]
             fn label_propagation<'py>(
                 &self,
                 py: Python<'py>,
                 max_iterations: usize,
                 tolerance: f64,
-                exploration: usize,
+                exploration: Exploration,
                 direction: &str,
+                engine: &str,
             ) -> PyResult<Bound<'py, PyAny>> {
+                let engine = match engine {
+                    "semi-synchronous" => LpaEngine::SemiSynchronous,
+                    "asynchronous" => LpaEngine::Asynchronous,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown engine {engine:?}: expected 'semi-synchronous' or 'asynchronous'"
+                        )));
+                    }
+                };
+                let (exploration, exploration_ends_early) = match exploration {
+                    Exploration::Passes(passes) => (passes, false),
+                    Exploration::Mode(mode) if mode == "auto" => (20, true),
+                    Exploration::Mode(mode) => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown exploration {mode:?}: expected a number of passes or 'auto'"
+                        )));
+                    }
+                };
                 let direction = match direction {
                     "both" => LpaDirection::Both,
                     "in" | "out" if !<Self as GraphClass>::Dir::DIRECTED => {
@@ -1908,7 +1944,9 @@ macro_rules! graph_class {
                     max_iterations,
                     tolerance,
                     exploration,
+                    exploration_ends_early,
                     direction,
+                    engine,
                 };
                 self.inner
                     .run(py, |g| with_graph!(g, g => label_propagation(g, options)))

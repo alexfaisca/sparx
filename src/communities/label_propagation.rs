@@ -34,6 +34,7 @@
 //! linking them), numbered by their least node.
 
 use crate::graph;
+use crate::graph::cache::AccumulatorAtomic;
 use crate::graph::csr::Csr;
 use crate::graph::*;
 use crate::shared_slice::*;
@@ -41,7 +42,7 @@ use crate::trails::astar::Reversible;
 use crate::utils::SpinBarrier;
 
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -60,10 +61,39 @@ pub struct LpaOptions {
     /// freeze small communities in place. After them, the own label is kept, so that it ends
     /// (and the tolerance applies). On a planted partition of a million nodes (64 blocks of mean
     /// degree 16, 20% of arcs across), 5 passes left 86 thousand communities, 10 left 37
-    /// thousand, and 20 found the blocks (an NMI of 0.955); more changed nothing.
+    /// thousand, and 20 found the blocks (an NMI of 0.955); more changed nothing. With
+    /// [`exploration_ends_early`](Self::exploration_ends_early), the most of them.
     pub exploration: usize,
+    /// Exploration ends at the first of its passes that moves at most `tolerance` of the nodes
+    /// (the same every run: every thread sees the pass's moves), rather than after
+    /// [`exploration`](Self::exploration) passes: where exploring has stopped paying, as on graphs
+    /// whose moves dwindle slowly, a faster run, for a slightly lower modularity (on a protein
+    /// graph of 3.2M nodes, 9 passes rather than 21, and 0.394 rather than 0.413); where it
+    /// does pay, as on the planted partition above (whose passes move a third of the nodes until
+    /// the blocks are found), the same communities.
+    pub exploration_ends_early: bool,
     /// On directed graphs, the arcs a node's label follows (on undirected ones, every edge).
     pub direction: LpaDirection,
+    /// How nodes take turns (see [`LpaEngine`]).
+    pub engine: LpaEngine,
+}
+
+/// How [`LabelPropagation`]'s nodes take turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LpaEngine {
+    /// Colors take turns, each's nodes moving at once (no two neighbours of the same color):
+    /// the same communities whatever the threads (see the [module docs](self)).
+    #[default]
+    SemiSynchronous,
+    /// Every node moves in turn, seeing its neighbours' labels as they are, those moved earlier in
+    /// the pass included (as Raghavan et al.'s, NetworKit's PLP and GVE-LPA): threads take the
+    /// nodes in chunks, in their ids' order, labels changing in place (atomically). No coloring,
+    /// and labels spread within a pass: 1.7x to 3.1x as fast as the semi-synchronous engine on
+    /// graphs of millions of nodes. But the communities depend on the threads' timing (the same
+    /// on one thread), and on partitions hard to find, their quality with it: on a planted
+    /// partition with 30% of its arcs across, NMIs from 0.55 to 0.96 by the threads, where the
+    /// semi-synchronous engine's are the same whatever they are.
+    Asynchronous,
 }
 
 /// Which neighbours' labels a node of a directed graph counts.
@@ -87,6 +117,8 @@ impl Default for LpaOptions {
             max_iterations: 40,
             tolerance: 0.05,
             exploration: 20,
+            exploration_ends_early: false,
+            engine: LpaEngine::SemiSynchronous,
             direction: LpaDirection::Both,
         }
     }
@@ -126,6 +158,32 @@ fn mix(mut x: u64) -> u64 {
 
 /// Nodes a thread takes at a time, at most.
 const CHUNK: usize = 1024;
+
+/// The asynchronous engine's chunks of consecutive nodes, taken in a pseudo-random order each
+/// pass: in the ids' order, a community settling first floods the next ones (whose nodes'
+/// labels are still their own), as it did a planted partition's (NMI 0.906 rather than 0.989,
+/// on a million nodes; one community, on one thread, of 1000 nodes in blocks of consecutive
+/// ids). At most this many (rows read near each other: in the ids' order, up to 1.8x faster, as
+/// labels settle sooner, but at that cost), and, on smaller graphs, down to 16: a 64th of a
+/// thread's share of the nodes (a chunk spanning communities floods them as the ids' order).
+const ASYNC_CHUNK: usize = 256;
+
+/// A pass's order of `count` chunks: the `k`-th taken is `(k stride + offset) mod count`, a
+/// permutation as `stride` is coprime with `count`; both pseudo-random, from the pass.
+fn chunk_order(count: usize, pass: usize) -> (usize, usize) {
+    fn gcd(a: usize, b: usize) -> usize {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    if count <= 2 {
+        return (1, pass % count.max(1));
+    }
+    let h = mix(pass as u64 ^ 0x5eed);
+    let mut stride = (h as usize % count) | 1;
+    while gcd(stride, count) != 1 {
+        stride = (stride + 2) % count;
+    }
+    (stride, mix(h) as usize % count)
+}
 
 /// Runs `f(begin, end, scratch)` over `0..n` in chunks taken by `threads` threads as they finish
 /// (each with its own `scratch`): `f`'s results, in chunk order.
@@ -185,29 +243,36 @@ fn color_classes<Ix: graph::IndexType, E: graph::E>(
     let mut colors = SharedSliceMut::<u32>::abst_mem_mut(color_file, n.max(1), true)?;
     colors.as_mut_slice().iter_mut().for_each(|c| *c = NONE);
     let shared = colors.shared_slice();
-    let mut remaining: Vec<usize> = (0..n).collect();
-    while !remaining.is_empty() {
-        let work = &remaining;
-        // the nodes all of whose neighbours of higher priority are colored: no two neighbours
-        let ready: Vec<Vec<usize>> = chunked(work.len(), threads, &|| (), &|begin, end, _| {
-            work[begin..end]
-                .iter()
-                .copied()
-                .filter(|&u| {
-                    neighbours(u)
-                        .all(|v| v == u || priority(v) < priority(u) || *shared.get(v) != NONE)
-                })
-                .collect::<Vec<_>>()
-        });
-        let ready: Vec<usize> = ready.concat();
-        // each takes the least color its (colored) neighbours don't have
-        chunked(
-            ready.len(),
+    // each node's neighbours of higher priority (colored before it), which it waits for; the
+    // nodes waiting for none are colored first
+    let waiting: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    let roots: Vec<Vec<usize>> = chunked(n, threads, &|| (), &|begin, end, _| {
+        (begin..end)
+            .filter(|&u| {
+                let pu = priority(u);
+                let before = neighbours(u)
+                    .filter(|&v| v != u && priority(v) > pu)
+                    .count();
+                waiting[u].store(before as u32, Ordering::Relaxed);
+                before == 0
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut ready: Vec<usize> = roots.concat();
+    // round by round: the ready nodes (no two neighbours: of two, one waits for the other) each
+    // take the least color its neighbours of higher priority (all colored, and only they) don't
+    // have, then free those of lower priority it was the last to wait for. O(|E|) work in all,
+    // and the same colors as recoloring round by round would give
+    while !ready.is_empty() {
+        let work = &ready;
+        let freed: Vec<Vec<usize>> = chunked(
+            work.len(),
             threads,
             &Vec::<usize>::new,
             &|begin, end, taken| {
                 let mut colors = shared;
-                for &u in &ready[begin..end] {
+                let mut freed = vec![];
+                for &u in &work[begin..end] {
                     for v in neighbours(u) {
                         let c = *colors.get(v);
                         if v != u && c != NONE {
@@ -220,17 +285,20 @@ fn color_classes<Ix: graph::IndexType, E: graph::E>(
                     }
                     let c = (0..).find(|&c| taken.get(c) != Some(&u)).unwrap();
                     *colors.get_mut(u) = c as u32;
+                    let pu = priority(u);
+                    for v in neighbours(u) {
+                        if v != u
+                            && priority(v) < pu
+                            && waiting[v].fetch_sub(1, Ordering::Relaxed) == 1
+                        {
+                            freed.push(v);
+                        }
+                    }
                 }
+                freed
             },
         );
-        let parts: Vec<Vec<usize>> = chunked(work.len(), threads, &|| (), &|begin, end, _| {
-            work[begin..end]
-                .iter()
-                .copied()
-                .filter(|&u| *shared.get(u) == NONE)
-                .collect::<Vec<_>>()
-        });
-        remaining = parts.concat();
+        ready = freed.concat();
     }
     // counting sort, by color then node
     let colors = colors.as_slice();
@@ -296,105 +364,192 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
         };
         let both: Vec<Csr<Ix, E>> = into.map_or(vec![out], |into| vec![out, into]);
         let out_fn = g.build_cache_filename(CacheFile::LabelPropagation, None)?;
-        let color_fn = g.build_cache_filename(CacheFile::LabelPropagation, Some(0))?;
-        let classes = color_classes(&both, n, &color_fn, threads);
-        g.cleanup_cache(CacheFile::LabelPropagation)?;
-        let (order, starts) = classes?;
+        let asynchronous = options.engine == LpaEngine::Asynchronous;
+        // the nodes' turns: color after color, or (asynchronous) all at once, by id (no order)
+        let (mut order, starts) = if asynchronous {
+            (Vec::new(), vec![0, n])
+        } else {
+            let color_fn = g.build_cache_filename(CacheFile::LabelPropagation, Some(0))?;
+            let classes = color_classes(&both, n, &color_fn, threads);
+            g.cleanup_cache(CacheFile::LabelPropagation)?;
+            classes?
+        };
         let colors = starts.len() - 1;
 
         let mut labels = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, n.max(1), true)?;
         for (u, l) in labels.as_mut_slice().iter_mut().enumerate().take(n) {
             *l = Ix::new(u);
         }
-        let pending: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(true)).collect();
+        // whether a node is to be looked at (again), mapped as the labels are
+        let pending_fn = g.build_cache_filename(CacheFile::LabelPropagation, Some(1))?;
+        let mut pending_mem = SharedSliceMut::<AtomicBool>::abst_mem_mut(&pending_fn, n.max(1), true)?;
+        for p in pending_mem.as_mut_slice().iter_mut() {
+            *p = AtomicBool::new(true);
+        }
+        let pending = &pending_mem.as_slice()[..n];
         let cursors: Vec<AtomicUsize> = (0..colors).map(|_| AtomicUsize::new(0)).collect();
         // the nodes each pass moves, by its parity (see `shortest_path_tree`'s counts)
         let moved = [AtomicUsize::new(0), AtomicUsize::new(0)];
         let moves = std::sync::Mutex::new(vec![]);
         let barrier = SpinBarrier::new(threads);
-        let shared = labels.shared_slice();
+        // labels read and written atomically (relaxed: plain loads and stores, on x86), as
+        // asynchronous passes move neighbours at once (semi-synchronous ones never do)
+        let label_ptr = labels.as_mut_slice().as_mut_ptr();
+        assert_eq!(label_ptr as usize % std::mem::align_of::<Ix::Atomic>(), 0);
+        // (`Ix::Atomic`'s `Plain` is `Ix`: the same size, and here aligned)
+        let atomics: &[Ix::Atomic] =
+            unsafe { std::slice::from_raw_parts(label_ptr as *const Ix::Atomic, n) };
         let limit = (options.tolerance * n as f64).floor() as usize;
 
         std::thread::scope(|s| {
             for tid in 0..threads {
-                let (order, starts, pending, cursors, moved, moves, barrier) = (
-                    &order, &starts, &pending, &cursors, &moved, &moves, &barrier,
-                );
+                let (order, starts, cursors, moved, moves, barrier) =
+                    (&order, &starts, &cursors, &moved, &moves, &barrier);
                 let (reads, wakes) = (&reads, &wakes);
                 s.spawn(move || {
-                    let mut labels = shared;
+                    let labels = atomics;
                     let mut seen: Vec<(usize, f64)> = Vec::new();
+                    // (unweighted: the labels alone, counted)
+                    let mut seen_labels: Vec<usize> = Vec::new();
+                    // (every thread sees each pass's moves: they end exploring together)
+                    let mut explored = false;
                     for pass in 0..options.max_iterations {
-                        let exploring = pass < options.exploration;
+                        let exploring = pass < options.exploration && !explored;
                         let mut mine = 0;
                         for c in 0..colors {
                             let (first, end) = (starts[c], starts[c + 1]);
                             let len = end - first;
                             // small colors: one thread (the others would mostly wait)
                             let workers = len.div_ceil(256).min(threads);
-                            let chunk = (len / (workers * 4)).clamp(1, CHUNK);
+                            let chunk = if asynchronous {
+                                (len / (threads * 64)).clamp(16, ASYNC_CHUNK)
+                            } else {
+                                (len / (workers * 4)).clamp(1, CHUNK)
+                            };
+                            let count = len.div_ceil(chunk);
+                            // asynchronous passes over small graphs (small chunks, for the threads)
+                            // take the chunks in an order of their own (a stride coprime with their
+                            // number, from an offset), the same every run: in the ids' order, a
+                            // community's label, settled first, could flood the next ones' nodes
+                            // (all of a 1,000-node planted partition's, on one thread), and
+                            // threads on adjacent small chunks contend for cache lines (permuted,
+                            // twice as fast on 0.5M-node graphs on 32 threads). Large graphs' keep
+                            // the ids' order: their passes 1.5x to 1.8x as fast (locality), and no
+                            // better communities for permuting (planted partitions of 0.3M and 1M
+                            // nodes, on 1 to 32 threads)
+                            let permute = asynchronous && chunk < ASYNC_CHUNK;
+                            let (stride, offset) = if permute {
+                                chunk_order(count, pass)
+                            } else {
+                                (1, 0)
+                            };
                             if tid < workers {
                                 loop {
-                                    let at = cursors[c].fetch_add(chunk, Ordering::Relaxed);
-                                    if at >= len {
+                                    let k = cursors[c].fetch_add(1, Ordering::Relaxed);
+                                    if k >= count {
                                         break;
                                     }
-                                    for &u in &order[first + at..first + (at + chunk).min(len)] {
+                                    let at = ((k as u128 * stride as u128 + offset as u128)
+                                        % count as u128) as usize
+                                        * chunk;
+                                    for i in first + at..first + (at + chunk).min(len) {
+                                        let u = if asynchronous { i } else { order[i] };
                                         if !pending[u].swap(false, Ordering::Relaxed) {
                                             continue;
                                         }
-                                        seen.clear();
-                                        for csr in reads.iter() {
-                                            for a in csr.range(u) {
-                                                let v = csr.targets[a].index();
-                                                if v != u {
-                                                    let w = if E::is_weighted() {
-                                                        csr.weights[a].weight::<f64>()
-                                                    } else {
-                                                        1.
-                                                    };
-                                                    seen.push((labels.get(v).index(), w));
-                                                }
-                                            }
-                                        }
-                                        if seen.is_empty() {
-                                            continue;
-                                        }
-                                        seen.sort_unstable_by_key(|p| p.0);
-                                        let own = labels.get(u).index();
-                                        let (mut best, mut best_w, mut own_w) =
-                                            (own, f64::NEG_INFINITY, f64::NEG_INFINITY);
+                                        let own = labels[u].load_widened(Ordering::Relaxed);
                                         let salt = mix(u as u64 ^ mix(pass as u64));
-                                        let mut best_key = u64::MAX;
-                                        let mut i = 0;
-                                        while i < seen.len() {
-                                            let l = seen[i].0;
-                                            let mut w = 0.;
-                                            while i < seen.len() && seen[i].0 == l {
-                                                w += seen[i].1;
-                                                i += 1;
-                                            }
+                                        // the best label so far, its weight, and its hash (only
+                                        // computed once another label ties it): of equals, the
+                                        // least hash of the node, the label and the pass, which
+                                        // is unbiased (the least label would flood the graph),
+                                        // yet the same every run
+                                        let mut best = (own, f64::NEG_INFINITY, None::<u64>);
+                                        let mut own_w = f64::NEG_INFINITY;
+                                        let mut consider = |l: usize, w: f64| {
                                             if l == own {
                                                 own_w = w;
                                             }
-                                            // of equals, the least hash of the node, the
-                                            // label and the pass: unbiased (the least label
-                                            // would flood the graph), yet the same every run
-                                            let key = mix(mix(salt ^ l as u64));
-                                            if w > best_w || (w == best_w && key < best_key) {
-                                                (best, best_w, best_key) = (l, w, key);
+                                            if w > best.1 {
+                                                best = (l, w, None);
+                                            } else if w == best.1 {
+                                                let key = mix(mix(salt ^ l as u64));
+                                                let best_key = *best.2.get_or_insert_with(|| {
+                                                    mix(mix(salt ^ best.0 as u64))
+                                                });
+                                                if key < best_key {
+                                                    best = (l, w, Some(key));
+                                                }
+                                            }
+                                        };
+                                        if E::is_weighted() {
+                                            seen.clear();
+                                            for csr in reads.iter() {
+                                                for a in csr.range(u) {
+                                                    let v = csr.targets[a].index();
+                                                    if v != u {
+                                                        let w = csr.weights[a].weight::<f64>();
+                                                        seen.push((labels[v].load_widened(Ordering::Relaxed), w));
+                                                    }
+                                                }
+                                            }
+                                            if seen.is_empty() {
+                                                continue;
+                                            }
+                                            seen.sort_unstable_by_key(|p| p.0);
+                                            let mut i = 0;
+                                            while i < seen.len() {
+                                                let l = seen[i].0;
+                                                let mut w = 0.;
+                                                while i < seen.len() && seen[i].0 == l {
+                                                    w += seen[i].1;
+                                                    i += 1;
+                                                }
+                                                consider(l, w);
+                                            }
+                                        } else {
+                                            seen_labels.clear();
+                                            for csr in reads.iter() {
+                                                for &v in &csr.targets[csr.range(u)] {
+                                                    let v = v.index();
+                                                    if v != u {
+                                                        seen_labels.push(labels[v].load_widened(Ordering::Relaxed));
+                                                    }
+                                                }
+                                            }
+                                            if seen_labels.is_empty() {
+                                                continue;
+                                            }
+                                            seen_labels.sort_unstable();
+                                            let mut i = 0;
+                                            while i < seen_labels.len() {
+                                                let l = seen_labels[i];
+                                                let run = seen_labels[i..]
+                                                    .iter()
+                                                    .take_while(|&&x| x == l)
+                                                    .count();
+                                                i += run;
+                                                // (counts, exact as `f64`s: as their unit weights' sums)
+                                                consider(l, run as f64);
                                             }
                                         }
+                                        let (best, best_w) = (best.0, best.1);
                                         // exploring, ties are broken by the hash, the own
                                         // label included; then, it's kept (so that it ends)
                                         if best == own || (!exploring && own_w == best_w) {
                                             continue;
                                         }
-                                        *labels.get_mut(u) = Ix::new(best);
+                                        // (a node id: it fits)
+                                        let _ = labels[u].checked_store(best, Ordering::Relaxed);
                                         mine += 1;
                                         for csr in wakes.iter() {
                                             for &v in &csr.targets[csr.range(u)] {
-                                                pending[v.index()].store(true, Ordering::Relaxed);
+                                                // (read first: most are pending already, and
+                                                // writing them would bounce their cache lines)
+                                                let p = &pending[v.index()];
+                                                if !p.load(Ordering::Relaxed) {
+                                                    p.store(true, Ordering::Relaxed);
+                                                }
                                             }
                                         }
                                     }
@@ -418,6 +573,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
                         if !exploring && total <= limit {
                             break;
                         }
+                        if exploring && options.exploration_ends_early && total <= limit {
+                            explored = true;
+                        }
                     }
                 });
             }
@@ -439,7 +597,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
             // `Dir` is `Undirected`: `g` is a `Graph`
             let g =
                 unsafe { &*(g as *const GraphMemoryMap<N, E, Ix, Dir> as *const Graph<N, E, Ix>) };
-            g.modularity(communities, count)?
+            if E::is_weighted() {
+                g.modularity(communities, count)?
+            } else if order.len() >= count {
+                // the color classes' order is done with: its `n` words (`count` at most needed)
+                // hold the communities' totals, rather than memory mapped anew
+                let totals: &mut [f64] = bytemuck::cast_slice_mut(&mut order[..]);
+                g.modularity_with(communities, count, totals, None)?
+            } else {
+                // (asynchronous: no order)
+                g.modularity(communities, count)?
+            }
         };
         Ok(Self {
             g,
@@ -578,6 +746,119 @@ mod test {
             lpa.drop_cache().unwrap();
         }
         assert!(found.windows(2).all(|f| f[0] == f[1]));
+    }
+
+    /// Modularity in lent memory is modularity in mapped memory, unweighted or weighted, the
+    /// same whatever the threads; memory too short is an error.
+    #[test]
+    fn modularity_with_lent_memory() {
+        let (edges, _) = planted(4, 150, 0.1, 0.01, 21);
+        let weighted: Vec<_> = edges
+            .iter()
+            .enumerate()
+            .map(|(i, &(u, v, _))| (u, v, 0.5 + (i % 7) as f64))
+            .collect();
+        let labels: Vec<usize> = (0..600).map(|u| (u * 7 + u / 150) % 9).collect();
+        let communities: Vec<usize> = labels.clone();
+        for threads in [1u8, 3, 8] {
+            let g = graph::<()>(&format!("lent_{threads}"), 600, &edges, threads);
+            let mapped = g.modularity(&communities, 9).unwrap();
+            let mut totals = vec![0f64; 9];
+            let lent = g
+                .modularity_with(&communities, 9, &mut totals, None)
+                .unwrap();
+            assert_eq!(mapped, lent);
+            assert!(
+                g.modularity_with(&communities, 9, &mut [0f64; 8], None)
+                    .is_err()
+            );
+
+            let w = graph::<Weighted<f64>>(&format!("lent_w_{threads}"), 600, &weighted, threads);
+            let mapped = w.modularity(&communities, 9).unwrap();
+            let (mut totals, mut degrees) = (vec![0f64; 9], vec![0f64; 600]);
+            let lent = w
+                .modularity_with(&communities, 9, &mut totals, Some(&mut degrees))
+                .unwrap();
+            assert_eq!(mapped, lent);
+            // weighted edges need the degrees' memory
+            assert!(
+                w.modularity_with(&communities, 9, &mut totals, None)
+                    .is_err()
+            );
+            assert!(
+                w.modularity_with(&communities, 9, &mut totals, Some(&mut [0f64; 10]))
+                    .is_err()
+            );
+        }
+    }
+
+    /// Exploration ending early: no longer than exploring every pass, it still finds planted
+    /// partitions, the same whatever the threads; and it ends at the first exploring pass that
+    /// moves at most `tolerance` of the nodes.
+    #[test]
+    fn exploration_ending_early() {
+        let (edges, truth) = planted(5, 200, 0.1, 0.003, 11);
+        let options = LpaOptions {
+            exploration_ends_early: true,
+            ..LpaOptions::default()
+        };
+        let mut found = vec![];
+        for threads in [1u8, 4, 7] {
+            let g = graph::<()>(&format!("early_{threads}"), 1000, &edges, threads);
+            let mut lpa = LabelPropagation::with_options(&g, options).unwrap();
+            check(&g, &lpa);
+            assert!(
+                nmi(&labels(lpa.communities()), &truth) > 0.95,
+                "{threads} threads"
+            );
+            let mut full = LabelPropagation::new(&g).unwrap();
+            assert!(lpa.moves().len() <= full.moves().len());
+            // exploring stops at the first pass moving 5% of the nodes or fewer: the run at
+            // the first (exploring or not) after it
+            let limit = (options.tolerance * 1000.) as usize;
+            let first = lpa.moves().iter().position(|&m| m <= limit).unwrap();
+            assert!(lpa.moves().len() <= first + 2, "{:?}", lpa.moves());
+            found.push((labels(lpa.communities()), lpa.moves().to_vec()));
+            lpa.drop_cache().unwrap();
+            full.drop_cache().unwrap();
+        }
+        assert!(found.windows(2).all(|f| f[0] == f[1]));
+    }
+
+    /// The asynchronous engine finds planted partitions (on several threads, whose timing it
+    /// depends on), repeats itself on one thread, moves no more than the semi-synchronous
+    /// engine passes, and works on directed graphs too.
+    #[test]
+    fn asynchronous_engine() {
+        let (edges, truth) = planted(5, 200, 0.1, 0.003, 11);
+        let options = LpaOptions {
+            engine: LpaEngine::Asynchronous,
+            ..LpaOptions::default()
+        };
+        let mut repeated = vec![];
+        for (run, threads) in [(0, 1u8), (1, 1), (2, 6)] {
+            let g = graph::<()>(&format!("async_{run}"), 1000, &edges, threads);
+            let mut lpa = LabelPropagation::with_options(&g, options).unwrap();
+            check(&g, &lpa);
+            assert!(nmi(&labels(lpa.communities()), &truth) > 0.95, "{threads} threads");
+            // no coloring
+            assert_eq!(lpa.colors(), 1);
+            if threads == 1 {
+                repeated.push(labels(lpa.communities()));
+            }
+            lpa.drop_cache().unwrap();
+        }
+        assert_eq!(repeated[0], repeated[1]);
+
+        let (arcs, truth) = directed_planted();
+        let g = digraph("async_directed", 750, &arcs, 4);
+        let mut lpa = LabelPropagation::with_options(&*g, options).unwrap();
+        assert!(nmi(&labels(lpa.communities()), &truth) > 0.9);
+        let q =
+            crate::communities::directed_louvain::directed_modularity(&*g, lpa.communities())
+                .unwrap();
+        assert_eq!(lpa.partition_modularity(), q);
+        lpa.drop_cache().unwrap();
     }
 
     #[test]
