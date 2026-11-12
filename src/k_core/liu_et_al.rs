@@ -7,7 +7,6 @@ use crossbeam::thread;
 use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::mem::ManuallyDrop;
 use std::path::Path;
-use std::sync::{Arc, Barrier};
 
 pub(crate) type ProceduralMemoryLiuEtAL<Ix, Cx> = (
     AbstractedProceduralMemoryMut<<Cx as CoreCount>::Atomic>,
@@ -394,10 +393,15 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
     // for nodes with degree <= 16 no bucketing is used
     let mut k = 0usize;
     // number of vertices not yet peeled
-    let remaining_global = Arc::new(AtomicUsize::new(node_count - total_dead_nodes));
+    let remaining_global = AtomicUsize::new(node_count - total_dead_nodes);
     let frontier = SharedQueueMut::<Ix>::from_shared_slice(frontier.shared_slice());
     let swap = SharedQueueMut::<Ix>::from_shared_slice(swap.shared_slice());
-    let synchronize = Arc::new(Barrier::new(threads));
+    // (sleeping, not spinning: with hyperthreads, threads spinning at a subround's end would slow
+    // those still peeling on the same cores)
+    let synchronize = std::sync::Barrier::new(threads);
+    // the frontier's next chunk to peel (threads take chunks as they finish theirs: peeling
+    // cascades, through the local stacks, vary widely)
+    let next_chunk = AtomicUsize::new(0);
 
     thread::scope(|s| -> Result<(), Box<dyn std::error::Error>> {
         for tid in 0..threads {
@@ -405,9 +409,8 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
             let alive = alive.shared_slice();
             let mut frontier = frontier.clone();
             let mut swap = swap.clone();
-
-            let remaining_global = Arc::clone(&remaining_global);
-            let synchronize = Arc::clone(&synchronize);
+            let (remaining_global, synchronize, next_chunk) =
+                (&remaining_global, &synchronize, &next_chunk);
 
             let start = std::cmp::min(tid * thread_load, node_count);
             let end = std::cmp::min(start + thread_load, node_count);
@@ -416,6 +419,15 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
                 move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let mut local_stack: Vec<Ix> = vec![];
                     let max_len = 256;
+                    // a local search's nodes at most: on graphs whose peeling is one long
+                    // cascade (near-regular ones), unbounded searches had one thread peel most of
+                    // the graph while the others waited; past it, the search's stack goes to the
+                    // next frontier, which all threads share
+                    const LOCAL_BUDGET: usize = 1024;
+                    // nodes for a shared queue, pushed together: one atomic update each batch,
+                    // rather than each node (all threads contending for the queue's counters)
+                    let mut found: Vec<Ix> = vec![];
+                    let mut overflow: Vec<Ix> = vec![];
 
                     while remaining_global.load(Ordering::Relaxed) > 0 {
                         synchronize.wait();
@@ -423,8 +435,15 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
                         for u in start..end {
                             if alive.get(u).load(Ordering::Relaxed) && degree.get(u).count() <= k {
                                 alive.get(u).store(false, Ordering::Relaxed);
-                                let _ = frontier.push(Ix::new(u));
+                                found.push(Ix::new(u));
                             }
+                        }
+                        if !found.is_empty() {
+                            let _ = frontier.push_slice(&found);
+                            found.clear();
+                        }
+                        if tid == 0 {
+                            next_chunk.store(0, Ordering::Relaxed);
                         }
 
                         synchronize.wait();
@@ -445,15 +464,23 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
                             if tid == 0 {
                                 remaining_global.fetch_sub(frontier.len(), Ordering::Relaxed);
                             }
+                            let len = frontier.len();
+                            let chunk = (len / (threads * 8)).clamp(64, 4096);
+                            // the nodes peeled through local stacks
+                            let mut peeled = 0usize;
 
-                            let chunk_size = frontier.len().div_ceil(threads);
-                            let start = std::cmp::min(tid * chunk_size, frontier.len());
-                            let end = std::cmp::min(start + chunk_size, frontier.len());
-
-                            if let Some(chunk) = frontier.slice(start, end) {
-                                for i in 0..end - start {
+                            loop {
+                                let begin = next_chunk.fetch_add(chunk, Ordering::Relaxed);
+                                if begin >= len {
+                                    break;
+                                }
+                                let Some(nodes) = frontier.slice(begin, (begin + chunk).min(len))
+                                else {
+                                    break;
+                                };
+                                for u in nodes.as_slice().iter() {
                                     // set coreness and decrement neighbour degrees
-                                    let u = chunk.get(i).index();
+                                    let u = u.index();
                                     *coreness.get_mut(u) = Cx::from_usize(k);
 
                                     // for each neighbor v of u:
@@ -469,17 +496,24 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
                                                 if local_stack.len() < max_len {
                                                     local_stack.push(Ix::new(v));
                                                 } else {
-                                                    let _ = swap.push(Ix::new(v));
+                                                    overflow.push(Ix::new(v));
                                                 }
                                             }
                                         }
                                     }
 
                                     // process local stack
-                                    let mut read_in_stack: usize = 0;
+                                    let mut budget = LOCAL_BUDGET;
                                     while let Some(u) = local_stack.pop() {
+                                        if budget == 0 {
+                                            // (popped, still to peel: with the rest)
+                                            overflow.push(u);
+                                            overflow.append(&mut local_stack);
+                                            break;
+                                        }
+                                        budget -= 1;
                                         // set coreness and decrement neighbour degrees
-                                        read_in_stack += 1;
+                                        peeled += 1;
                                         let u = u.index();
                                         *coreness.get_mut(u) = Cx::from_usize(k);
 
@@ -496,19 +530,28 @@ pub(crate) fn liu_peel<Ix: graph::IndexType, Cx: CoreCount>(
                                                     if local_stack.len() < max_len {
                                                         local_stack.push(Ix::new(v));
                                                     } else {
-                                                        let _ = swap.push(Ix::new(v));
+                                                        overflow.push(Ix::new(v));
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    remaining_global.fetch_sub(read_in_stack, Ordering::Relaxed);
                                 }
+                            }
+                            if !overflow.is_empty() {
+                                let _ = swap.push_slice(&overflow);
+                                overflow.clear();
+                            }
+                            if peeled > 0 {
+                                remaining_global.fetch_sub(peeled, Ordering::Relaxed);
                             }
 
                             synchronize.wait();
 
                             swap = std::mem::replace(&mut frontier, swap).clear();
+                            if tid == 0 {
+                                next_chunk.store(0, Ordering::Relaxed);
+                            }
 
                             synchronize.wait();
                         }
