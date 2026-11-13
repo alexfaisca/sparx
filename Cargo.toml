@@ -22,9 +22,17 @@ include = [
 [lib]
 name = "sparx"
 
+# the benchmarking CLI (`cargo run --features cli`, or `bench`): kept out of library builds, so that
+# depending on the crate doesn't compile its argument parser
 [[bin]]
 name = "sparx"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[package.metadata.docs.rs]
+# the optional APIs documented too (not `bench`, which makes internal methods public, nor `gpu`,
+# not documented yet)
+features = ["rayon", "petgraph", "rustworkx"]
 
 [workspace]
 members = ["xtask", ".", "python"]
@@ -39,8 +47,10 @@ codegen-units = 1
 
 [features]
 default = ["mtx", "ggcat", "nodes_edges"]
-# no extra dependencies, just a switch you to pass on to `cargo`
-bench = []
+# the benchmarking CLI (`src/main.rs`)
+cli = ["dep:clap"]
+# benchmarking hooks (internal methods public), and the CLI's benchmarking profiles
+bench = ["cli", "dep:dashmap", "dep:once_cell"]
 mtx = []
 ggcat = []
 nodes_edges = []
@@ -48,19 +58,18 @@ iter_with_offset = []
 rayon = ["dep:rayon"]
 # GPU compute backend (wgpu: Vulkan/Metal/DX12) --- currently HyperBall
 gpu = ["dep:wgpu", "dep:pollster"]
-petgraph = []
-rustworkx = []
+# exports to petgraph's and rustworkx's graphs
+petgraph = ["dep:petgraph"]
+rustworkx = ["dep:rustworkx-core"]
 
 [dependencies]
 bytemuck = { version = "1.23.0", features = ["derive"] }
-bitfield = "0.19.1"
-clap = { version = "4.5.39", features = ["derive"] }
+clap = { version = "4.5.39", features = ["derive"], optional = true }
 lz4 = "1.24.0"
 memmap2 = "0.9.7"
 rand = "0.9.1"
 static_assertions = "1.1.0"
 fst = "0.4"
-regex-automata = { version = "0.1.9", features = ["transducer"] }
 regex = "1"
 glob = "0.3.2"
 crossbeam = "0.8.4"
@@ -68,18 +77,22 @@ ordered-float = "5.0.0"
 rand_distr = "0.5.1"
 num_cpus = "1.17.0"
 sys-info = "0.9.1"
-paste = "1.0.15"
 sha2 = "0.10.9"
 portable-atomic = { version = "1.11.1", features = ["float"] }
-rustworkx-core = { version = "0.16.0" }
-petgraph = "0.8.2"
-smallvec = "1.15.1"
+rustworkx-core = { version = "0.16.0", optional = true }
+petgraph = { version = "0.8.2", optional = true }
 memchr = "2.7"
 rayon = { version = "1.11.0", optional = true }
 wgpu = { version = "30.0.1", optional = true }
 pollster = { version = "0.4.0", optional = true }
+dashmap = { version = "6.1.0", optional = true }
+once_cell = { version = "1.21.3", optional = true }
+
+[dev-dependencies]
+# (tests' helpers: `test_common`, `graph::test_utils`)
 dashmap = "6.1.0"
 once_cell = "1.21.3"
+paste = "1.0.15"
 
 [[example]]
 name = "hyperball_timing"

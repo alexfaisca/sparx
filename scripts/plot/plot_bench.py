@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Plots `scripts/bench/bench.py`'s results for the README: each figure in a light and a dark
-variant (`docs/bench/<name>-light.png`, `-dark.png`), picked by GitHub with `<picture>`.
+variant (`docs/bench/<name>-light.png`, `-dark.png`), picked by GitHub with `<picture>`. The
+README links them by absolute URLs (`master`'s), as crates.io renders it too: regenerated figures
+show once pushed.
 
     python3 scripts/plot/plot_bench.py results/bench/bench_full.csv results/bench/bench_*.csv
 

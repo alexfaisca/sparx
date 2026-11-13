@@ -319,62 +319,6 @@ pub trait E:
     }
 }
 
-/// Describes the behavior edge types must exhibit to be used by the tool.
-///
-/// Given an struct this trait may be automatically implemented using the provided procedural macro `GenericEdgeType`.
-#[allow(dead_code)]
-pub trait GenericEdgeType:
-    Copy
-    + Clone
-    + Default
-    + Debug
-    + std::fmt::Display
-    + PartialEq
-    + Eq
-    + bytemuck::Zeroable
-    + From<u64>
-    + From<usize>
-    + rustworkx_core::petgraph::EdgeType
-    + Send
-    + Sync
-{
-    /// Edge label getter.
-    fn label(&self) -> usize;
-    /// Edge label setter.
-    fn set_label(&mut self, label: u64);
-}
-
-/// Describes the behavior edges must exhibit to be used by the tool.
-///
-/// Given an implicitly packed struct this trait may be automatically implemented using the provided procedural macro `GenericEdge`.
-#[allow(dead_code)]
-pub trait GenericEdge<T: GenericEdgeType>:
-    Copy
-    + Clone
-    + Default
-    + Debug
-    + std::fmt::Display
-    + PartialEq
-    + Eq
-    + PartialOrd
-    + Ord
-    + bytemuck::Pod
-    + bytemuck::Zeroable
-    + Send
-    + Sync
-{
-    /// Constructor from an <<edge_dest: u64>> and an <<edge_type: u64>>
-    fn new(edge_dest: u64, edge_type: u64) -> Self;
-    /// Edge destiny node setter from a <<new_edge_dest: u64>>.
-    fn set_edge_dest(&mut self, new_edge_dest: u64) -> &mut Self;
-    /// Edge type setter from a <<new_edge_type: u64>>.
-    fn set_edge_type(&mut self, new_edge_type: u64) -> &mut Self;
-    /// Edge destiny node getter.
-    fn dest(&self) -> usize;
-    /// Edge type getter.
-    fn e_type(&self) -> T;
-}
-
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
 pub enum CacheFile {

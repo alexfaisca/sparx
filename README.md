@@ -175,21 +175,31 @@ parentdir/
 
 ### Linking *SparX*
 
-#### 1. Installing *SparX* directly from Git.
+#### 1. From crates.io.
 
   The crate is named `sparx-graph` (`sparx` is taken on crates.io), but its library is `sparx`, so code
-  always uses `use sparx::...`. To install *SparX* directly from Git, simply add it to the
-  `[dependencies]` section in `myapp/Cargo.toml`:
+  always uses `use sparx::...`. Add it to the `[dependencies]` section in `myapp/Cargo.toml`:
 
 ```toml
- [dependencies]
-  # commit or tag of the version you want to use should be in rev
-  sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", rev = "v0.2.0" }
-  # optionally, select features to be enabled:
-  # sparx = { package = "sparx-graph", git = "...", tag = "v0.2.0", features = ["mtx","ggcat","rayon"] }
+[dependencies]
+sparx = { package = "sparx-graph", version = "0.2" }
+# optionally, select features: input formats (`mtx`, `ggcat`, `nodes_edges`, all on by default),
+# `rayon`, `petgraph` and `rustworkx` (exports to their graphs)
+# sparx = { package = "sparx-graph", version = "0.2", features = ["rayon"] }
 ```
 
-#### 2. Installing and linking *SparX* directly inside a Rust project.
+  or run `cargo add sparx-graph --rename sparx`.
+
+#### 2. From Git.
+
+  For unreleased changes, depend on the repository, at a commit or tag:
+
+```toml
+[dependencies]
+sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", tag = "v0.2.0" }
+```
+
+#### 3. Installing and linking *SparX* directly inside a Rust project.
 
   Install *SparX* as shown in [Installation](#installation) directly inside `myapp/`, after which, your project layout will look something like:
 
@@ -214,7 +224,7 @@ parentdir/
 ```
 
 
-#### 3. Installing and linking *SparX* in a workspace.
+#### 4. Installing and linking *SparX* in a workspace.
 
   If your library already has a top-level `Cargo.toml` with a `[workspace]`, in similar layout to the one shown bellow:
 
@@ -1123,8 +1133,8 @@ to 75M edges (NetworKit's KADABRA up to 2M: it took 19 minutes on 1.8M edges, an
 after 2 hours 45 minutes on 2.1M).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/bench/speedup-dark.png">
-  <img alt="NetworKit's time over sparx's, per algorithm and graph" src="docs/bench/speedup-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/alexfaisca/sparx/master/docs/bench/speedup-dark.png">
+  <img alt="NetworKit's time over sparx's, per algorithm and graph" src="https://raw.githubusercontent.com/alexfaisca/sparx/master/docs/bench/speedup-light.png">
 </picture>
 
 sparx is faster at most algorithms on every graph from half a million nodes on, and at the
@@ -1148,8 +1158,8 @@ Dijkstra's algorithm. Where NetworKit is faster:
   to 0.72).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/bench/walltime-dark.png">
-  <img alt="Wall time of both libraries on the two largest graphs" src="docs/bench/walltime-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/alexfaisca/sparx/master/docs/bench/walltime-dark.png">
+  <img alt="Wall time of both libraries on the two largest graphs" src="https://raw.githubusercontent.com/alexfaisca/sparx/master/docs/bench/walltime-light.png">
 </picture>
 
 On the graph with the most nodes (`graph_9_15`), sparx's connected components, clustering
@@ -1160,8 +1170,8 @@ engine and PageRank (which converges at once there, see above): from even (label
 asynchronous engine) to 47x (shortest paths).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/bench/sparx-only-dark.png">
-  <img alt="sparx's wall time on the algorithms NetworKit has no counterpart of" src="docs/bench/sparx-only-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/alexfaisca/sparx/master/docs/bench/sparx-only-dark.png">
+  <img alt="sparx's wall time on the algorithms NetworKit has no counterpart of" src="https://raw.githubusercontent.com/alexfaisca/sparx/master/docs/bench/sparx-only-light.png">
 </picture>
 
 The algorithms NetworKit has no counterpart of, by graph size: triangle counts and k-trusses take
@@ -1218,13 +1228,13 @@ The helper scripts live in `scripts/`. Run them from the repository's root:
 To obtain our memory benchmarking results we made use of a custom `cargo` target which launches the process and records the memory usage frame by frame using `valgrind --tool=massif`. To reproduce our results, on a Linux machine, with an `x86` architecture CPU, first build the `cargo` profile by running:
 
 ```bash
-RUSTFLAGS="-C target-cpu=x86-64 -C target-feature=-sha" cargo build --profile bench_cache
+RUSTFLAGS="-C target-cpu=x86-64 -C target-feature=-sha" cargo build --profile bench_cache --features cli
 ```
 
 If your machine runs Linux on an `arm64` CPU, try running the equivalent architecture command:
 
 ```bash
-RUSTFLAGS="-C target-cpu=armv8-a -C target-feature=-crypto,-sve,-sve2" cargo build --profile bench_cache
+RUSTFLAGS="-C target-cpu=armv8-a -C target-feature=-crypto,-sve,-sve2" cargo build --profile bench_cache --features cli
 ```
 
 However, the authors did not test the benchmarking tools work on an `arm` CPU and no guarantees are given.

@@ -73,7 +73,8 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 * **Breaking:** `SharedSlice`, `SharedSliceMut` and `SharedQueueMut` are `Send`/`Sync` only for
   element types that allow it (`T: Sync`, and `T: Send + Sync` for the mutable ones).
 * **Breaking:** the `sparx-graph-derive` crate is gone, and with it the `GenericEdge`,
-  `GenericEdgeType`, `N` and `E` derive macros re-exported by `sparx::graph` (unused, or no-ops)
+  `GenericEdgeType`, `N` and `E` derive macros re-exported by `sparx::graph` (unused, or no-ops),
+  the `GenericEdge` and `GenericEdgeType` traits they implemented (unused too)
   and `#[sparkx_label]`: `sparx-graph` is a single crate, publishable on its own. Label types are
   declared by `sparx::label!` (see Added), or with plain derives (`bytemuck`'s `Pod` and
   `Zeroable` among them).
