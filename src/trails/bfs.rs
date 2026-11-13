@@ -111,10 +111,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         self.total_distances
     }
 
-    /// Returns the number of reacheable nodes from the source node as determined by the BFS, the
-    /// source node itself included.
-    pub fn recheable(&self) -> usize {
+    /// The number of nodes the source reaches, itself included.
+    pub fn reachable(&self) -> usize {
         self.reacheable
+    }
+
+    /// [`reachable`](Self::reachable), under its earlier, misspelt name.
+    #[deprecated(since = "0.2.1", note = "renamed `reachable`")]
+    pub fn recheable(&self) -> usize {
+        self.reachable()
     }
 
     /// Returns all nodes' distance to the source node as determined by the BFS.
@@ -323,7 +328,7 @@ mod test {
             let got: Vec<usize> = bfs.get_distances().iter().map(|d| d.index()).collect();
             assert_eq!(got, distances, "distances from {source}");
             assert_eq!(bfs.total_distances(), total, "distance sum from {source}");
-            assert_eq!(bfs.recheable(), 4, "reachable nodes from {source}");
+            assert_eq!(bfs.reachable(), 4, "reachable nodes from {source}");
         }
     }
 
@@ -333,9 +338,9 @@ mod test {
         let g = graph_from_mtx("directed_path", "general", 3, &[(0, 1), (1, 2)]);
         let bfs = BFSDists::new(&g, 1).unwrap();
         assert_eq!(bfs.total_distances(), 1.);
-        assert_eq!(bfs.recheable(), 2, "node 1 reaches itself and node 2");
+        assert_eq!(bfs.reachable(), 2, "node 1 reaches itself and node 2");
         let bfs = BFSDists::new(&g, 2).unwrap();
         assert_eq!(bfs.total_distances(), 0.);
-        assert_eq!(bfs.recheable(), 1, "node 2 only reaches itself");
+        assert_eq!(bfs.reachable(), 1, "node 2 only reaches itself");
     }
 }

@@ -223,13 +223,13 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                                                     format!("error in BFS for {u}: {:?}", e).into()
                                                 },
                                             )?;
-                                            if bfs.recheable() <= 1 || bfs.total_distances() == 0. {
+                                            if bfs.reachable() <= 1 || bfs.total_distances() == 0. {
                                                 println!("found isolated node at {u}");
                                                 *e.get_mut(u) = 0.0;
                                             } else {
                                                 // reachable nodes other than `u` itself, as in
                                                 // `ExactClosenessCentrality` and *HyperBall*
-                                                *e.get_mut(u) = (bfs.recheable() - 1) as f64
+                                                *e.get_mut(u) = (bfs.reachable() - 1) as f64
                                                     / bfs.total_distances();
                                             }
                                         }

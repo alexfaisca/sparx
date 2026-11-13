@@ -6,6 +6,11 @@ compile_error!(
 
 pub mod shared_slice;
 
+// the README's Rust examples, compiled as doctests (`rust no_run`: not run, as they read datasets)
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 #[cfg(any(test, feature = "bench"))]
 pub mod test_common;
 

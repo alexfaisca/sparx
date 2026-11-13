@@ -21,19 +21,25 @@ mod export_rustworkx_core;
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
 
-use crate::graph::cache::{AccumulatorAtomic, GraphCache};
+use crate::graph::cache::GraphCache;
 use crate::shared_slice::{
     AbstractedProceduralMemory, AbstractedProceduralMemoryMut, SharedSliceMut,
 };
 use cache::CacheMetadata;
+/// The trait of the atomic counters graphs are parsed with (see
+/// [`from_file_with_accumulator`](GraphMemoryMap::from_file_with_accumulator)), the error of a
+/// value past one's range, and the counters themselves (re-exported, so that choosing one needs
+/// no dependency of its own).
+pub use cache::{AccumulatorAtomic, AccumulatorOverflow};
 pub use direction::{
     AnyGraph, Directed, Directedness, Direction, Undirected, UndirectedMode, WeightMerge,
 };
 pub use edge_weight::{EdgeWeight, ParseWeightError, WeightDomain, WeightParsing, Weighted};
+pub use portable_atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicUsize};
 pub use weight::{Weight, WeightAtomic};
 
 use label::VoidLabel;
-use portable_atomic::{AtomicUsize, Ordering};
+use portable_atomic::Ordering;
 #[cfg(feature = "rayon")]
 use rayon::iter::{
     IndexedParallelIterator, ParallelIterator,
@@ -66,11 +72,10 @@ pub type DefaultIx = usize;
 pub unsafe trait IndexType:
     Copy + Default + Hash + Ord + Debug + Send + Sync + 'static
 {
-    /// Width-matched atomic counterpart (see [`cache::AccumulatorAtomic`]), usable wherever a
+    /// Width-matched atomic counterpart (see [`AccumulatorAtomic`]), usable wherever a
     /// lock-free counter the same width as `Self` is needed (e.g. community-detection's
     /// aggregation-phase edge counters).
     ///
-    /// [`cache::AccumulatorAtomic`]: ./cache/trait.AccumulatorAtomic.html#
     type Atomic: cache::AccumulatorAtomic<Plain = Self>;
     fn new(x: usize) -> Self;
     fn index(&self) -> usize;
@@ -565,13 +570,12 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
 
     /// Same as [`from_file`](Self::from_file), but lets the caller choose the width-matched
     /// atomic type (`D`) used for lock-free per-node degree accumulation and edge-position
-    /// tracking during parsing (see [`cache::AccumulatorAtomic`]). Defaults to `AtomicUsize`
+    /// tracking during parsing (see [`AccumulatorAtomic`]). Defaults to [`AtomicUsize`]
     /// (always safe); `AtomicU32`/`AtomicU16` trade a (checked, never silently wrong) range
     /// restriction for reduced memory traffic while streaming through these buffers ---
     /// worthwhile for graphs comfortably within that narrower width (e.g. under ~4B edges for
     /// `AtomicU32`).
     ///
-    /// [`cache::AccumulatorAtomic`]: ./cache/trait.AccumulatorAtomic.html#
     #[inline(always)]
     pub fn from_file_with_accumulator<P: AsRef<Path>, D: AccumulatorAtomic>(
         p: P,

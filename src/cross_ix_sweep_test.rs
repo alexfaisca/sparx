@@ -158,7 +158,7 @@ fn run_all_algorithms<Ix: IndexType>(
         .iter()
         .map(|d| d.index())
         .collect::<Vec<usize>>();
-    let bfs_reachable = bfs.recheable();
+    let bfs_reachable = bfs.reachable();
 
     let dfs_order = DFS::new(&graph, 0)?
         .get_order()

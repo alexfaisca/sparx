@@ -2,6 +2,28 @@
 
 All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
+## 0.2.1 — 2026-11-13
+
+### Added
+
+* `sparx::graph` re-exports the parsing accumulators: the `AccumulatorAtomic` trait,
+  `AccumulatorOverflow` and the atomic counters (`AtomicU8` to `AtomicUsize`), so that choosing an
+  accumulator for `from_file_with_accumulator` needs no `portable-atomic` dependency.
+* `BFSDists::reachable`.
+* Examples: `shortest_paths` (Dijkstra/Δ-stepping, shortest path trees, A* with landmarks) and
+  `components` (connected, biconnected and strongly connected components, assortativity).
+
+### Changed
+
+* The examples share one layout: `[graph] [threads]` arguments, a bundled fixture by default, and
+  the graph's cache entry dropped even when a run fails.
+* The README's Rust examples are complete programs, compiled as doctests; it gained a testing
+  section.
+
+### Deprecated
+
+* `BFSDists::recheable`, renamed `reachable`.
+
 ## 0.2.0 — 2026-11-11
 
 ### Added

@@ -1,13 +1,14 @@
 //! Triangle counting, k-truss decomposition (PKT and Burkhardt et al.) and clustering coefficients.
 //!
+//! ```sh
 //! cargo run --release --example k_truss -- [graph] [threads]
+//! ```
 //!
-//! `[graph]` defaults to a small bundled fixture.
-use portable_atomic::Ordering;
-use sparx::graph::GraphMemoryMap;
+//! `[graph]` defaults to a small bundled fixture, `[threads]` to 4.
+use sparx::graph::Graph;
 use sparx::k_truss::{
     burkhardt_et_al::AlgoBurkhardtEtAl, clustering_coefficient::ClusteringCoefficient,
-    pkt::AlgoPKT, triangles::Triangles,
+    count::TriangleCounter, pkt::AlgoPKT, triangles::Triangles,
 };
 
 const FIXTURE: &str = "tests/fixtures/ggcat/random_graph_1_5.lz4";
@@ -17,32 +18,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = args.get(1).map_or(FIXTURE, String::as_str);
     let threads: u8 = args.get(2).map_or(Ok(4), |t| t.parse())?;
 
-    let mut graph = GraphMemoryMap::<(), (), u32>::from_file(path, None, Some(threads))?;
-    println!("graph |V| = {}, |E| = {}", graph.size(), graph.width());
+    let mut graph = Graph::<(), (), u32>::from_file(path, None, Some(threads))?;
+    println!("graph: {} nodes, {} arcs", graph.size(), graph.width());
 
-    let result = run(&graph, threads as usize);
-    // also when a run fails
+    let result = run(&graph);
+    // the graph's cache entry is dropped, also when the run failed
     graph.drop_cache()?;
     result
 }
 
-fn run(
-    graph: &GraphMemoryMap<(), (), u32>,
-    threads: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run(graph: &Graph<(), (), u32>) -> Result<(), Box<dyn std::error::Error>> {
     // per-edge triangle counts: each triangle is counted once on each of its edges, in both
     // directions
     let mut triangles = Triangles::new(graph)?;
-    let total: u64 = triangles
+    let total: usize = triangles
         .all_triangles()
         .iter()
-        .map(|c| c.load(Ordering::Relaxed) as u64)
-        .sum::<u64>()
+        .map(|c| c.count())
+        .sum::<usize>()
         / 6;
     println!("triangles: {total}");
     triangles.drop_cache()?;
 
-    let mut pkt = AlgoPKT::new_with_conf(graph, threads)?;
+    let mut pkt = AlgoPKT::new_with_conf(graph, graph.thread_num())?;
     let trussness = pkt.k_trusses().to_vec();
     pkt.drop_cache()?;
     println!(

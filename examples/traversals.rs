@@ -1,9 +1,11 @@
-//! Traversals: BFS distances from a source node and Euler trails (Hierholzer's algorithm), e.g. to
+//! Traversals: BFS distances from a source node, and Euler trails (Hierholzer's algorithm), e.g. to
 //! walk a de Bruijn graph's edges.
 //!
-//! cargo run --release --example traversals -- [graph] [threads] [source node]
+//! ```sh
+//! cargo run --release --example traversals -- [graph] [threads] [source]
+//! ```
 //!
-//! `[graph]` defaults to a small bundled fixture.
+//! `[graph]` defaults to a small bundled fixture, `[threads]` to 4, `[source]` to node 0.
 use sparx::graph::{DiGraph, IndexType};
 use sparx::trails::{bfs::BFSDists, hierholzer::AlgoHierholzer};
 
@@ -16,10 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source: usize = args.get(3).map_or(Ok(0), |s| s.parse())?;
 
     let mut graph = DiGraph::<(), (), u32>::from_file(path, None, Some(threads))?;
-    println!("graph |V| = {}, |E| = {}", graph.size(), graph.width());
+    println!("graph: {} nodes, {} arcs", graph.size(), graph.width());
 
     let result = run(&graph, source);
-    // also when a run fails
+    // the graph's cache entry is dropped, also when the run failed
     graph.drop_cache()?;
     result
 }
@@ -32,7 +34,10 @@ fn run(graph: &DiGraph<(), (), u32>, source: usize) -> Result<(), Box<dyn std::e
         .map(|d| d.index())
         .max()
         .unwrap_or(0);
-    println!("BFS from node {source}: eccentricity {eccentricity}");
+    println!(
+        "BFS from node {source}: {} nodes reached, eccentricity {eccentricity}",
+        bfs.reachable()
+    );
     bfs.drop_cache()?;
 
     let mut euler = AlgoHierholzer::new(graph)?;
@@ -41,7 +46,7 @@ fn run(graph: &DiGraph<(), (), u32>, source: usize) -> Result<(), Box<dyn std::e
         .filter_map(|i| euler.get_trail(i).map(<[u32]>::len))
         .max()
         .unwrap_or(0);
-    println!("{trails} Euler trail(s) cover every edge, the longest has length {longest}");
+    println!("{trails} Euler trail(s) cover every arc, the longest has length {longest}");
     euler.drop_cache()?;
     Ok(())
 }

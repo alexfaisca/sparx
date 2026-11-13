@@ -1226,7 +1226,7 @@ pub(crate) mod test {
                     "{source} -> {v}"
                 );
             }
-            assert_eq!(d.reachable(), bfs.recheable());
+            assert_eq!(d.reachable(), bfs.reachable());
             assert_eq!(d.total_distances(), bfs.total_distances());
             d.drop_cache().unwrap();
             bfs.drop_cache().unwrap();

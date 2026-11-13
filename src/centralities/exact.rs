@@ -1737,7 +1737,7 @@ mod test {
             assert_eq!(got, want, "{name}");
             for (u, got) in got.iter().enumerate() {
                 let bfs = BFSDists::new(&g, u).unwrap();
-                assert_eq!(got.reached, bfs.recheable(), "{name}: node {u} reaches");
+                assert_eq!(got.reached, bfs.reachable(), "{name}: node {u} reaches");
                 assert_eq!(
                     got.distances as f64,
                     bfs.total_distances(),

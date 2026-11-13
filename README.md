@@ -1,15 +1,24 @@
 # SparX
 
+> **Biconnected components (articulation points and bridges) of a 148M-edge graph in 2.2 seconds, where NetworKit takes 49: 23× faster**, with the same exact result.
+> On the same graph: k-truss in 6.7 s, Louvain in 22 s, unweighted shortest paths 45× faster than NetworKit. See [Benchmarks](#benchmarks-against-networkit).
+
 High-performance **Rust** library for large-scale **static sparse graphs analytics** on commodity hardware. Built on a memory-mapped core. It includes implementations of:
 
 - **k-core decomposition** (Batagelj–Zaversnik sequential; Liu et al. parallel)
 - **k-truss decomposition** (Burkhardt et al. sequential; PKT parallel)
 - **Louvain and Leiden** (GVE-Louvain and GVE-Leiden variants, undirected and directed, communities always connected)
-- **HyperBall** (HyperLogLog distance/centrality estimation)
+- **Label propagation** (semi-synchronous, deterministic whatever the threads; and asynchronous)
+- **Spectral clustering** (exact and compressive)
+- **Betweenness centrality** (exact, Brandes; approximate, KADABRA)
+- **HyperBall** (HyperLogLog distance/centrality estimation) and **exact closeness/harmonic centralities**
 - **PageRank** (partition-centric for graphs whose ranks don't fit in cache, pulling otherwise)
 - **Heat Kernel PageRank** (HK-relax --- SSPR/MSPR)
+- **Shortest paths** (hybrid parallel BFS; Dijkstra and Δ-stepping on weighted graphs; A* with landmarks)
+- **Components** (connected, strongly connected, biconnected: articulation points and bridges) and **degree assortativity**
 - Classic traversals/utilities (BFS/DFS, Hierholzer’s Euler trails, clustering coefficient, transitivity, triangle counting, etc.)
 
+Most algorithms run on directed graphs as well, and the library has **Python bindings** (`python/`).
 Comes with CSV **benchmark writers** and **plotting scripts** to visualize runtime scaling versus graph size.
 
 ---
@@ -41,6 +50,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Betweenness centrality](#betweenness-centrality)
 - [Benchmarks against NetworKit](#benchmarks-against-networkit)
 - [Python](#python)
+- [Testing](#testing)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
   - [Memory Benchmarks](#memory-benchmarks)
@@ -92,8 +102,13 @@ If the installation was successful, a version number ≥ 1.95 should be printed.
 
 ## Installation
 
-To install the *SparX* library the following steps must be followed.
-Firstly, clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `scripts/datasets/build_datasets.sh` it is advisable you clone `sparx` to the same directory you have cloned `GGCAT` into if you have previously done so):
+To use *SparX* in a project, add it from crates.io (see [Linking *SparX*](#linking-sparx)):
+
+```bash
+cargo add sparx-graph --rename sparx
+```
+
+To run the examples, tests and benchmarks, or to use the [OOTB Datasets](#ootb-datasets), clone the library's GitHub repository (if you want to use the [OOTB Datasets](#ootb-datasets) made available via `scripts/datasets/build_datasets.sh` it is advisable you clone `sparx` to the same directory you have cloned `GGCAT` into if you have previously done so):
 
 ```bash
 git clone git@github.com:alexfaisca/sparx.git
@@ -118,9 +133,9 @@ The library has an assortment of non-default features. As an example, `feature =
 cargo build --features rayon --release
 ```
 
-# Data Formats
+## Data Formats
 
-Input: **GGCAT Output Files** (`.lz4`), **Matrix Market** (`.mtx`) and cached internal formats (auto-created on first load).
+Input: **GGCAT Output Files** (`.lz4`), **Matrix Market** (`.mtx`), **nodes/edges** files and cached internal formats (auto-created on first load).
 
 Matrix Market files must be sparse (`coordinate`) square matrices, with `pattern`, `integer`, `real`
 (or `double`) or `complex` entries, `general` (one arc per entry) or `symmetric`, `skew-symmetric`
@@ -129,7 +144,11 @@ edge labels when the graph is loaded with integer labels (which `real`, `complex
 `skew-symmetric` files' values can't be), and ignored otherwise. The number of entries must match
 the size line's.
 
-## OOTB Datasets
+Nodes/edges input (feature `nodes_edges`, on by default) is a pair of files: `unitig_annotated_<name>.nodes`,
+one node per line (its id first), and `unitig_<name>.edges`, one edge per line (`<src> <dst> <DIR>`,
+`DIR` one of `FF`/`FR`/`RF`/`RR`, in any case). It carries no weights.
+
+### OOTB Datasets
 
 A script to build datasets out-of-the-box is provided for reproducibility and sandboxing purposes: `scripts/datasets/build_datasets.sh`. It builds all the datasets used for testing and benchmarking the library. It may be run in the following manner:
 
@@ -147,13 +166,13 @@ kmer_V2a,55042369,117217600
 my_custom_dataset,123123,123123123
 ```
 
-# Quick Start
+## Quick Start
 
 To follow this guide it is advisable you first run the `scripts/datasets/build_datasets.sh` script. This way you will be able to follow along and use the provided code examples as they come.
 
 ## Manually Linking *SparX*
 
-As *SparX* is not yet an indexed crate its usage requires manual linkage.
+*SparX* is published on crates.io as `sparx-graph` (its library is named `sparx`); it can also be linked from Git or from a local clone.
 
 ### Creating a Rust Project
 
@@ -265,14 +284,14 @@ workspace/
 
 ## Loading & Inspecting a Graph
 
-```rust
-use sparx::graph::GraphMemoryMap;
+```rust no_run
+use sparx::graph::Graph;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // path to the dataset from which a graph is to be built
     let path = "./datasets/graphs/kmer_V2a.mtx";
     // build the graph --- graph is mutable so calling drop_cache() becomes possible
-    let mut g: GraphMemoryMap<(), (), usize> = GraphMemoryMap::from_file(path, None, Some(32))?;
+    let mut g = Graph::<(), (), usize>::from_file(path, None, Some(32))?;
     println!("graph built (|V|={:?}, |E|={})", g.size(), g.width());
     println!("metadata:\n{}", g.metadata()?);
     // drop graph's cache entry
@@ -288,8 +307,8 @@ Nodes and edges may carry labels (GGCAT links' orientations, k-mers' colors...),
 memory-mapped files of their own: `sparx::label!` declares label types, integer newtypes with all
 the traits graphs need.
 
-```rust
-use sparx::graph::GraphMemoryMap;
+```rust no_run
+use sparx::graph::Graph;
 
 sparx::label! {
     /// A k-mer's color.
@@ -299,7 +318,7 @@ sparx::label! {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let g = GraphMemoryMap::<Color, Orientation, u32>::from_file("graph.lz4", None, None)?;
+    let g = Graph::<Color, Orientation, u32>::from_file("graph.lz4", None, None)?;
     println!("{:?}", g.weighted_neighbours(0)?.collect::<Vec<_>>());
     Ok(())
 }
@@ -307,74 +326,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Running Algorithms
 
-```rust
-use sparx::centralities::hyper_ball::*;
-use sparx::communities::gve_louvain::*;
-use sparx::communities::hk_relax::*;
-use sparx::graph;
-use sparx::graph::{E, GraphMemoryMap, IndexType, N, label::VoidLabel};
-use sparx::k_core::{batagelj_zaversnik::*, liu_et_al::*};
-use sparx::k_truss::{burkhardt_et_al::*, clustering_coefficient::*, pkt::*};
-use sparx::trails::hierholzer::*;
+Every algorithm is a struct built from a graph: it runs when built, exposes its results, and keeps
+them in memory-mapped files of the graph's cache until `drop_cache` removes them (as
+`g.drop_cache()` does the graph's own). Each section below covers one family; `examples/` has a
+runnable program for each.
+
+```rust no_run
+use sparx::centralities::hyper_ball::HyperBall6;
+use sparx::communities::gve_louvain::AlgoGVELouvain;
+use sparx::graph::Graph;
+use sparx::k_core::liu_et_al::AlgoLiuEtAl;
+use sparx::k_truss::pkt::AlgoPKT;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // path to the dataset from which a graph is to be built
-    let path = "./datasets/graphs/kmer_V2a.mtx";
-    // build the graph
-    let mut g: GraphMemoryMap<(), (), usize> =
-        GraphMemoryMap::from_file(path, None, Some(32))?;
+    let mut g = Graph::<(), (), u32>::from_file("./datasets/graphs/kmer_V2a.mtx", None, Some(32))?;
 
+    // every node's coreness (parallel, Liu et al.)
+    let mut cores = AlgoLiuEtAl::new(&g)?;
+    println!("coreness of node 0: {}", cores.coreness(0));
+    cores.drop_cache()?;
 
-    let mut pkt = AlgoPKT::new(&g)?;
-    // get trussness of edge 0
-    let kt = pkt.trussness(0);
-    pkt.drop_cache()?;
+    // every edge's trussness (parallel, PKT), in CSR order
+    let mut trusses = AlgoPKT::new(&g)?;
+    println!("max trussness: {:?}", trusses.k_trusses().iter().max());
+    trusses.drop_cache()?;
 
-    let mut burkhardt_et_al = AlgoBurkhardtEtAl::new(&g)?;
-    // get trussness of all edges
-    let kts = burkhardt_et_al.k_trusses();
-    burkhardt_et_al.drop_cache()?;
-
-    let mut bz = AlgoBatageljZaversnik::new(&g)?;
-    // get coreness of node 0
-    let c = bz.coreness(0);
-    bz.drop_cache()?;
-
-    let mut liu_et_al = AlgoLiuEtAl::new(&g)?;
-    // get coreness of all nodes
-    let cs = liu_et_al.k_cores();
-    liu_et_al.drop_cache()?;
-
-    let mut louvain = AlgoGVELouvain::new(&g)?;
-    let number_communities_found = louvain.community_count();
-    let partition_modularity = louvain.partition_modularity();
-    // get community of node 0
-    let com_0 = louvain.node_community(0);
-    //get all communities
-    let coms = louvain.communities();
+    // communities (GVE-Louvain), with `f64` weights
+    let mut louvain = AlgoGVELouvain::<_, _, _, f64>::new(&g)?;
+    println!(
+        "{} communities, modularity {:.4}",
+        louvain.community_count(),
+        louvain.partition_modularity()
+    );
     louvain.drop_cache()?;
-    println!();
 
-    // hyperball
-    let mut hyperball = HyperBall4::new(&g)?;
-    // get estimate of total distance from node 0 to all nodes in the graph
-    let g_dist_0 = hyperball.get_geodesic_distance(0);
-    // get estimates of total harmonic distances for all nodes in the graph
-    let hg_dists = hyperball.harmonic_geodesic_distances();
+    // closeness centrality estimates (HyperBall, 2^6 registers per counter)
+    let mut hyperball = HyperBall6::new(&g)?;
+    let closeness = hyperball.get_or_compute_closeness_centrality(true)?;
+    println!("closeness of node 0: {:.4}", closeness[0]);
     hyperball.drop_cache()?;
-    // hyperball with manual precision configuration
-    let mut hyperball_inner = HyperBallInner::<_, _, _, Precision6>::new(&g)?;
-    //get estimates of closeness centrality for all nodes in the graph, normalized by reacheable set
-    let r_closeness = hyperball_inner.get_or_compute_closeness_centrality(true)?;
-    //get estimates of harmonic centrality for all nodes in the graph, normalized by graph size
-    let t_harmonic = hyperball_inner.get_or_compute_harmonic_centrality(false)?;
-    hyperball_inner.drop_cache()?;
 
-    // drop graph's cache entry
     g.drop_cache()?;
     Ok(())
 }
-
 ```
 
 ## Examples
@@ -383,13 +377,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 default, or on the graph you pass it:
 
 ```bash
-cargo run --release --example k_core        # k-cores, sequential and parallel
-cargo run --release --example k_truss       # triangles, k-trusses, clustering coefficients
-cargo run --release --example communities   # GVE-Louvain and HK-relax
-cargo run --release --example centralities  # HyperBall vs exact closeness/harmonic centrality
-cargo run --release --example traversals    # BFS distances and Euler trails
+cargo run --release --example k_core          # k-cores, sequential and parallel
+cargo run --release --example k_truss         # triangles, k-trusses, clustering coefficients
+cargo run --release --example communities     # Louvain, Leiden, label propagation, spectral, HK-Relax
+cargo run --release --example centralities    # HyperBall vs exact closeness, PageRank, betweenness
+cargo run --release --example components      # connected, biconnected, strong components; assortativity
+cargo run --release --example shortest_paths  # weighted Dijkstra/Δ-stepping, shortest paths, A*
+cargo run --release --example traversals      # BFS distances and Euler trails
 cargo run --release --example k_core -- ./datasets/graphs/kmer_V2a.mtx 16   # your own graph, 16 threads
 ```
+
+They all take `[graph] [threads]` (and some a node, last), default to 4 threads, and drop every
+cache entry they made, also when a run fails. `hyperball_timing` (with `--features bench`) is a
+profiling tool rather than an example.
 
 ## Narrow Index Types & Accumulators
 
@@ -400,9 +400,8 @@ assignments, coreness/trussness bookkeeping, traversal stacks/queues, Euler trai
 Choosing a narrower `Ix` that still comfortably fits the graph's node/edge counts reduces memory
 traffic everywhere those buffers are streamed through.
 
-```rust
-use sparx::graph::GraphMemoryMap;
-use portable_atomic::AtomicU32;
+```rust no_run
+use sparx::graph::{AtomicU32, GraphMemoryMap};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "./datasets/graphs/kmer_V2a.mtx";
@@ -440,13 +439,13 @@ traffic on large graphs; numerically sensitive comparisons (e.g. GVE-Louvain's m
 decision) are always computed in `f64` internally regardless of `W`, so narrowing `W` doesn't
 sacrifice correctness.
 
-```rust
+```rust no_run
 use sparx::communities::gve_louvain::AlgoGVELouvain;
-use sparx::graph::GraphMemoryMap;
+use sparx::graph::Graph;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "./datasets/graphs/kmer_V2a.mtx";
-    let g: GraphMemoryMap<(), (), usize> = GraphMemoryMap::from_file(path, None, Some(32))?;
+    let g = Graph::<(), (), usize>::from_file(path, None, Some(32))?;
 
     // f64 weights (default) --- turbofish needed here since Rust doesn't infer defaulted
     // generic parameters from a bare `::new(...)` call
@@ -480,7 +479,7 @@ one of the type (`70000` as a `u16`, `-3` as a `u32`, `abc`) giving an unspecifi
 what a file declares is checked once against the type: a `real` file can't load integer weights,
 nor a `skew-symmetric` one unsigned weights. A cache entry only opens with its own weight type.
 
-```rust
+```rust no_run
 use sparx::graph::{DiGraph, Graph, WeightParsing, Weighted, label::VoidLabel};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -569,7 +568,7 @@ Expanded nodes per query (1M-node graphs):
 Hooks are called through generics: those a visitor doesn't override cost nothing, and the
 searches without a visitor run the same code, with a no-op one.
 
-```rust
+```rust no_run
 use sparx::graph::{DiGraph, Weighted, label::VoidLabel};
 use sparx::trails::astar::{AStarOptions, Landmarks, NoHeuristic, astar, astar_many_with};
 use sparx::trails::dijkstra::DijkstraDists;
@@ -627,22 +626,25 @@ three. `DirectedTriangleType` selects any combination of roles (`Cycle`, `Out`, 
 at least `k - 2` triangles of the `k`-truss in a selected role (`Cycle` gives cycle trusses,
 `FeedForward` flow trusses).
 
-```rust
+```rust no_run
 use sparx::graph::{DiGraph, Graph};
 use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
 use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
 
-// an undirected graph's triangles and trussness as u32s
-let g: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?;
-let triangles = Triangles::<_, _, _, u32>::new_tx(&g)?;
-let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 16)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // an undirected graph's triangles and trussness as u32s
+    let g: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?;
+    let triangles = Triangles::<_, _, _, u32>::new_tx(&g)?;
+    let pkt = AlgoPKT::<_, _, _, u32>::new_tx(&g, 16)?;
 
-// a directed graph's triangles (u8 counts) and cycle trusses (u16 trussness); a turbofish names
-// the graph type too (`_`), or it defaults to an undirected `Graph`
-let d: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
-let cycles = DirectedTriangles::new(&d, DirectedTriangleType::Cycle)?;
-let cycle_trusses = AlgoPKT::<_, _, _, u16, _>::new_directed_tx(&d, DirectedTriangleType::Cycle, 16)?;
-let flow_trusses = AlgoBurkhardtEtAl::new_directed(&d, DirectedTriangleType::FeedForward)?;
+    // a directed graph's triangles (u8 counts) and cycle trusses (u16 trussness); a turbofish names
+    // the graph type too (`_`), or it defaults to an undirected `Graph`
+    let d: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
+    let cycles = DirectedTriangles::new(&d, DirectedTriangleType::Cycle)?;
+    let cycle_trusses = AlgoPKT::<_, _, _, u16, _>::new_directed_tx(&d, DirectedTriangleType::Cycle, 16)?;
+    let flow_trusses = AlgoBurkhardtEtAl::new_directed(&d, DirectedTriangleType::FeedForward)?;
+    Ok(())
+}
 ```
 
 ## Coreness Widths
@@ -653,18 +655,21 @@ the same way trussness is stored as `Tx` integers. `u8` is the default (used by 
 fit `Cx`, because the decompositions peel degrees stored as `Cx`. A larger degree fails with an
 error and never wraps around. A cached result of another width is recomputed, not misread.
 
-```rust
+```rust no_run
 use sparx::graph::{DiGraph, Graph};
 use sparx::k_core::batagelj_zaversnik::AlgoBatageljZaversnik;
 use sparx::k_core::directed::{CoreDegree, DirectedKCores};
 use sparx::k_core::liu_et_al::AlgoLiuEtAl;
 
-let g: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?;
-let cores = AlgoBatageljZaversnik::<_, _, _, u32>::new_cx(&g)?;
-let cores = AlgoLiuEtAl::<_, _, _, u16>::new_cx(&g, 16)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?;
+    let cores = AlgoBatageljZaversnik::<_, _, _, u32>::new_cx(&g)?;
+    let cores = AlgoLiuEtAl::<_, _, _, u16>::new_cx(&g, 16)?;
 
-let d: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
-let total_cores = DirectedKCores::<_, _, _, u32>::new_cx(&d, CoreDegree::Total)?;
+    let d: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
+    let total_cores = DirectedKCores::<_, _, _, u32>::new_cx(&d, CoreDegree::Total)?;
+    Ok(())
+}
 ```
 
 ## GPU HyperBall & Triangles
@@ -677,19 +682,28 @@ the CPU --- *HyperBall*'s counters bit for bit, while its distance accumulators 
 `f32` (relative error ~`1e-6`, far below *HyperLogLog*'s own). Triangles counted on the GPU can
 feed the k-truss decompositions and clustering coefficients (`new_with_triangles`).
 
-```rust
+```rust ignore
+// (with the `gpu` feature)
 use sparx::centralities::hyper_ball::{HyperBallInner, Precision6};
 use sparx::gpu::{GpuBackend, WgpuBackend};
+use sparx::graph::Graph;
 use sparx::k_truss::{pkt::AlgoPKT, triangles::Triangles};
 
-let backend = WgpuBackend::new()?;
-let device_graph = backend.upload_graph(&g)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g = Graph::<(), (), u32>::from_file("./datasets/graphs/kmer_V2a.mtx", None, None)?;
+    let backend = WgpuBackend::new()?;
+    let device_graph = backend.upload_graph(&g)?;
 
-let mut hyperball = HyperBallInner::<_, _, _, Precision6>::new_gpu(&g, &backend, &device_graph, None)?;
-let closeness = hyperball.get_or_compute_closeness_centrality(true)?;
+    let mut hyperball =
+        HyperBallInner::<_, _, _, Precision6>::new_gpu(&g, &backend, &device_graph, None)?;
+    let closeness = hyperball.get_or_compute_closeness_centrality(true)?;
+    println!("closeness of node 0: {:.4}", closeness[0]);
 
-let triangles = Triangles::new_gpu(&g, &backend, &device_graph)?;
-let pkt = AlgoPKT::new_with_triangles(&g, triangles)?;
+    let triangles = Triangles::new_gpu(&g, &backend, &device_graph)?;
+    let pkt = AlgoPKT::new_with_triangles(&g, triangles)?;
+    println!("max trussness: {:?}", pkt.k_trusses().iter().max());
+    Ok(())
+}
 ```
 
 A run's data must fit in GPU memory (*HyperBall*: `2 * |V| * 2^precision` bytes of counters,
@@ -746,23 +760,26 @@ graph is a compile error, not a runtime check: undirected graphs pay nothing for
 support. Whether a file's arcs are symmetric is recorded once, when its cache entry is built
 (MatrixMarket `symmetric` files are by construction), so loading a `Graph` checks it for free.
 
-```rust
+```rust no_run
 use sparx::graph::{AnyGraph, DiGraph, Direction, Graph};
 use sparx::k_truss::pkt::AlgoPKT;
 use sparx::trails::bfs::BFSDists;
 
-let roads: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?; // errors if directed
-let web: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let roads: Graph<(), (), u32> = Graph::from_file("roads.mtx", None, Some(16))?; // errors if directed
+    let web: DiGraph<(), (), u32> = DiGraph::from_file("web.mtx", None, Some(16))?;
 
-web.in_degree(0)?;                       // arcs into node 0 (`node_degree` counts arcs out)
-let t: &DiGraph<_, _, _> = web.transpose()?;      // every arc reversed
-let u: &Graph<_, _, _> = web.to_undirected()?;    // the underlying undirected graph
-let trussness = AlgoPKT::new(u)?;        // undirected algorithms run on it
-let to_0 = BFSDists::new_directed(&web, 0, Direction::In)?; // distances *to* node 0
+    web.in_degree(0)?;                       // arcs into node 0 (`node_degree` counts arcs out)
+    let t: &DiGraph<_, _, _> = web.transpose()?;      // every arc reversed
+    let u: &Graph<_, _, _> = web.to_undirected()?;    // the underlying undirected graph
+    let trussness = AlgoPKT::new(u)?;        // undirected algorithms run on it
+    let to_0 = BFSDists::new_directed(&web, 0, Direction::In)?; // distances *to* node 0
 
-match AnyGraph::<(), (), u32>::from_file("unknown.mtx", None, Some(16))? {
-    AnyGraph::Undirected(g) => { /* symmetric: a Graph */ }
-    AnyGraph::Directed(g) => { /* a DiGraph */ }
+    match AnyGraph::<(), (), u32>::from_file("unknown.mtx", None, Some(16))? {
+        AnyGraph::Undirected(g) => { /* symmetric: a Graph */ }
+        AnyGraph::Directed(g) => { /* a DiGraph */ }
+    }
+    Ok(())
 }
 ```
 
@@ -796,17 +813,27 @@ a node). On a `DiGraph`, their `new_directed(.., Direction::In)` follows them in
 * the **2-edge-connected components**: the connected components of the graph without its
   bridges.
 
-```rust
+```rust no_run
 use sparx::components::biconnected::Biconnectivity;
+use sparx::graph::Graph;
 
-let mut b = Biconnectivity::new(&g)?;
-let count = b.count();                        // biconnected components, numbered 0..count
-let c = b.component(7);                       // node 7's (None if it heads all of its)
-let nodes = b.component_nodes(c.unwrap());    // its nodes, its head included
-let cut = b.articulation_points();            // sorted node ids
-let bridges = b.bridges();                    // sorted [smaller, larger] pairs
-let two_edge = b.two_edge_components();       // per node
-b.drop_cache()?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let g = Graph::<(), (), u32>::from_file("./datasets/graphs/kmer_V2a.mtx", None, None)?;
+    let mut b = Biconnectivity::new(&g)?;
+    let count = b.count(); // biconnected components, numbered 0..count
+    if let Some(c) = b.component(7) {
+        // node 7's (None if it heads all of its)
+        let nodes = b.component_nodes(c); // its nodes, its head included
+        println!("node 7 is in component {c} of {count}, of {} nodes", nodes.len());
+    }
+    let cut = b.articulation_points(); // sorted node ids
+    let bridges = b.bridges(); // sorted [smaller, larger] pairs
+    let two_edge = b.two_edge_components(); // per node
+    println!("{} articulation points, {} bridges", cut.len(), bridges.len());
+    println!("node 0's 2-edge-connected component: {}", two_edge[0]);
+    b.drop_cache()?;
+    Ok(())
+}
 ```
 
 It implements *FAST-BCC* ([Dong, Wang, Gu and Sun, PPoPP 2023](https://doi.org/10.48550/arXiv.2301.01356)).
@@ -847,19 +874,30 @@ to Hopcroft–Tarjan's):
 `sparx::assortativity` measures how alike linked nodes are: the correlation, over every arc (each
 undirected edge counting both ways), of a value of the nodes at either end.
 
-```rust
+```rust no_run
 use sparx::assortativity::*;
+use sparx::graph::{DiGraph, Graph};
 
-// Newman's degree assortativity (networkx's degree_assortativity_coefficient)
-let r = degree_assortativity(&g, Correlation::Pearson)?;
-// the same of the degrees' ranks
-let rho = degree_assortativity(&g, Correlation::Spearman)?;
-// directed graphs: any of out- and in-degree at either end (networkx's defaults: out, in)
-let r = directed_degree_assortativity(&d, DegreeType::Out, DegreeType::In, Correlation::Pearson)?;
-// a number per node (networkx's numeric_assortativity_coefficient)
-let r = numeric_assortativity(&g, &values)?;
-// a category per node (networkx's attribute_assortativity_coefficient)
-let r = attribute_assortativity(&g, &labels)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = "./datasets/graphs/kmer_V2a.mtx";
+    let g = Graph::<(), (), u32>::from_file(path, None, None)?;
+    let d = DiGraph::<(), (), u32>::from_file(path, None, None)?;
+
+    // Newman's degree assortativity (networkx's degree_assortativity_coefficient)
+    let r = degree_assortativity(&g, Correlation::Pearson)?;
+    // the same of the degrees' ranks
+    let rho = degree_assortativity(&g, Correlation::Spearman)?;
+    // directed graphs: any of out- and in-degree at either end (networkx's defaults: out, in)
+    let r_d = directed_degree_assortativity(&d, DegreeType::Out, DegreeType::In, Correlation::Pearson)?;
+    // a number per node (networkx's numeric_assortativity_coefficient)
+    let values: Vec<f64> = (0..g.size()).map(|u| g.node_degree(u) as f64).collect();
+    let r_num = numeric_assortativity(&g, &values)?;
+    // a category per node (networkx's attribute_assortativity_coefficient)
+    let labels: Vec<usize> = (0..g.size()).map(|u| u % 3).collect();
+    let r_attr = attribute_assortativity(&g, &labels)?;
+    println!("{r} {rho} {r_d} {r_num} {r_attr}");
+    Ok(())
+}
 ```
 
 Results match networkx's, multigraphs included: parallel edges count each, and an undirected
@@ -1009,7 +1047,7 @@ eigenvalues, residuals), matching a dense eigendecomposition's to `1e-7`. A dire
 clustered or embedded by its symmetrization, `A + A^T` (`new_directed`: its underlying undirected
 multigraph, built once and cached).
 
-```rust
+```rust no_run
 use sparx::communities::spectral::{SpectralClustering, SpectralOptions};
 use sparx::graph::Graph;
 
@@ -1047,7 +1085,7 @@ split into their connected parts and numbered by their least node.
 | compacted de Bruijn graph, 0.5M nodes | 0.468, 0.54 s | 0.685, 1.3 s |
 | de Bruijn graph, 4M nodes, 33.5M edges | 0.467, 2.4 s (12.4 s on 1 thread) | 0.725, 5.8 s |
 
-```rust
+```rust no_run
 use sparx::communities::label_propagation::LabelPropagation;
 use sparx::graph::Graph;
 
@@ -1102,7 +1140,7 @@ one parallel BFS of every component at once), the largest component's size other
 | de Bruijn graph (`graph_8_15`, 21.9M nodes), `epsilon = 0.01` | 6.7 s (55.6 s on 1 thread) | 15,390 (46,513) |
 | the same, top 10, `epsilon = 0.001` | 114 s | 491,628 (4,651,293) |
 
-```rust
+```rust no_run
 use sparx::centralities::betweenness::{Betweenness, BetweennessEngine, BetweennessOptions};
 use sparx::graph::Graph;
 
@@ -1211,6 +1249,44 @@ pip install ./python        # or, for development: cd python && maturin develop 
 pytest python/tests         # checked against networkx
 ```
 
+## Testing
+
+Each algorithm is checked against a reference that is simple enough to trust, on graphs small enough
+for it, and then run on the same graphs at every configuration it supports:
+
+* **Brute-force oracles.** k-cores, k-trusses, triangle counts, betweenness, PageRank, Louvain's
+  modularity, shortest paths and biconnectivity are checked against straightforward
+  implementations (peeling, all-pairs triangle enumeration, Brandes' algorithm, power iteration,
+  Dijkstra's algorithm, removing each node and edge in turn) on small random and hand-built graphs;
+  the HyperLogLog counters against Ertl's estimator.
+* **Equivalence across configurations.** Every algorithm is run at each index width (`u8` to
+  `usize`) against the `usize` baseline (`src/cross_ix_sweep_test.rs`), at each coreness and
+  trussness width, with each engine (sequential vs parallel, Dijkstra vs Δ-stepping, both label
+  propagation engines) and on directed graphs against their undirected counterparts. Deterministic
+  algorithms are checked to return the same result bit for bit at every thread count.
+* **Real inputs.** 18 bundled de Bruijn graphs (`tests/fixtures/ggcat/`, regenerated with GGCAT by
+  `generate.sh`) and Matrix Market edge cases (symmetric, skew-symmetric, Hermitian and
+  malformed files, accumulator overflows, indices too wide for the chosen `Ix`) exercise the parsers and the algorithms on the graphs they're built for.
+* **No leaked files.** Tests run their graphs through a guard that removes the cache entry when
+  dropped, and failed parses are checked to leave no cache files behind.
+* **Documentation.** This README's Rust examples are compiled as doctests, and the
+  [`examples/`](examples/) are built in CI.
+* **Python.** The bindings' results are checked against networkx's (`python/tests/`), with a
+  fixture asserting the cache directory is empty after every test.
+* **Performance regressions.** `tests/perf_regression.rs` holds ignored tests that fail when a
+  parallel algorithm stops scaling with its threads, run in CI on their own.
+
+```sh
+cargo test --release                                       # unit, integration and README tests
+cargo test --release --features gpu                        # also the GPU kernels (any Vulkan device)
+cargo test --release --test perf_regression -- --ignored --test-threads=1
+pytest python/tests
+```
+
+CI runs all of these, and also checks formatting, the documentation (with warnings as errors), the
+minimum supported Rust version (1.95), that every target builds with the optional features, and
+each input format feature on its own.
+
 # Reproducibility
 
 ## Scripts
@@ -1291,8 +1367,8 @@ cargo run --features bench --release -- -t16 -v -mf ./datasets/graphs/graph.mtx 
 
 To bench wall-time with different thread counts the `-t16` can be altered to change the number of threads to be used in parallel algorithms:
 
-    1. If `-t0` or `-t1` are supplied, the program runs single-threaded.
-    2. If `-tx`, where `x > 1`, is supplied, the program runs with `x` threads.
+1. If `-t0` or `-t1` are supplied, the program runs single-threaded.
+2. If `-tx`, where `x > 1`, is supplied, the program runs with `x` threads.
 
 # License
 

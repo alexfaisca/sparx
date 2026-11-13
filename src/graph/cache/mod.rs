@@ -68,9 +68,11 @@ const_assert!(std::mem::size_of::<usize>() >= std::mem::size_of::<u64>());
 
 /// Error returned when a chosen [`AccumulatorAtomic`] width is too narrow for the graph actually
 /// being parsed (either a single node's degree, or the cumulative total, exceeds the chosen
-/// width's range). Never the result of silent wraparound: every write path that could overflow
-/// checks for it explicitly (see [`AccumulatorAtomic::checked_increment`]/[`checked_store`]).
+/// width's range). Never the result of silent wraparound: a node's degree wrapping around is caught
+/// by the parsed total falling short of the true edge count (see [`increment`]), and stored values
+/// are checked ([`checked_store`]).
 ///
+/// [`increment`]: AccumulatorAtomic::increment
 /// [`checked_store`]: AccumulatorAtomic::checked_store
 #[derive(Debug)]
 pub struct AccumulatorOverflow;
@@ -96,18 +98,18 @@ impl std::error::Error for AccumulatorOverflow {}
 /// Node degrees fitting the chosen width implies per-node edge-position counters do too (a
 /// counter only ever counts up to its own node's degree), so [`fetch_add_one_widened`] and
 /// [`load_widened`] are intentionally unchecked: their safety is inherited from degrees having
-/// already been validated via [`checked_increment`]/[`checked_store`].
+/// already been validated (their total against the true edge count, see [`increment`]; values
+/// stored, by [`checked_store`]).
 ///
 /// # Safety
 ///
 /// Implementors must guarantee `Self` and `Self::Plain` have identical size and alignment, so a
-/// buffer of `Self` may be soundly reinterpreted in place as a buffer of `Self::Plain` (see
-/// [`SharedSliceMut::cast`]) once parallel accumulation has finished and no concurrent writers
-/// remain.
+/// buffer of `Self` may be soundly reinterpreted in place as a buffer of `Self::Plain` once parallel
+/// accumulation has finished and no concurrent writers remain.
 ///
 /// [`fetch_add_one_widened`]: AccumulatorAtomic::fetch_add_one_widened
 /// [`load_widened`]: AccumulatorAtomic::load_widened
-/// [`checked_increment`]: AccumulatorAtomic::checked_increment
+/// [`increment`]: AccumulatorAtomic::increment
 /// [`checked_store`]: AccumulatorAtomic::checked_store
 pub unsafe trait AccumulatorAtomic: Default + Send + Sync + 'static {
     /// Non-atomic counterpart with identical size/layout as `Self`.
@@ -120,8 +122,8 @@ pub unsafe trait AccumulatorAtomic: Default + Send + Sync + 'static {
 
     /// Atomically increments by one. Unchecked/uncounted: a per-node degree exceeding
     /// `Self::Plain`'s range wraps silently *here*, but is always caught downstream, loudly, by
-    /// comparing the prefix-summed total against an independently-tallied true edge count (see
-    /// [`finalize_ix_offsets`](GraphCache::finalize_ix_offsets)) --- wrapping can only ever make a
+    /// comparing the prefix-summed total against an independently-tallied true edge count, once
+    /// parsing is done --- wrapping can only ever make a
     /// node's apparent degree *smaller*, so any single node overflowing strictly reduces that
     /// total below the true count, with no false negatives. This keeps the (far hotter, once
     /// per edge) accumulation path free of a per-call branch, at the cost of a single O(threads)
