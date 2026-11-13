@@ -1,7 +1,7 @@
 [package]
 # published as `sparx-graph` (`sparx` is taken on crates.io), used as `sparx` (see `[lib]`)
 name = "sparx-graph"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Memory-mapped analytics for large static sparse graphs (de Bruijn graphs in particular): k-cores, k-trusses, triangles, communities (Louvain, Leiden, label propagation, spectral clustering), weighted shortest paths, centralities, Euler trails"

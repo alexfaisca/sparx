@@ -9,6 +9,25 @@ use std::{
     },
 };
 
+/// Writes a map's changes back to its file. `msync` of 0 bytes is a no-op on Linux but `EINVAL`
+/// on macOS, and an empty map has nothing to write, so it's skipped.
+pub(crate) fn flush_mmap(mmap: &MmapMut) -> std::io::Result<()> {
+    if mmap.is_empty() {
+        Ok(())
+    } else {
+        mmap.flush()
+    }
+}
+
+/// [`flush_mmap`], without waiting for the writes to finish.
+pub(crate) fn flush_mmap_async(mmap: &MmapMut) -> std::io::Result<()> {
+    if mmap.is_empty() {
+        Ok(())
+    } else {
+        mmap.flush_async()
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AbstractedProceduralMemory<T> {
@@ -164,7 +183,7 @@ impl<T> AbstractedProceduralMemoryMut<T> {
             file.set_len(mmap_len)?;
         }
         let (slice, mmap) = SharedSliceMut::<T>::from_file(file)?;
-        mmap.flush()?;
+        flush_mmap(&mmap)?;
 
         Ok(AbstractedProceduralMemoryMut {
             slice,
@@ -236,7 +255,7 @@ impl<T> AbstractedProceduralMemoryMut<T> {
 
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.mmapped {
-            Ok(self.mmap.flush()?)
+            Ok(flush_mmap(&self.mmap)?)
         } else {
             Ok(())
         }
@@ -244,7 +263,7 @@ impl<T> AbstractedProceduralMemoryMut<T> {
 
     pub(crate) fn flush_async(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.mmapped {
-            Ok(self.mmap.flush_async()?)
+            Ok(flush_mmap_async(&self.mmap)?)
         } else {
             Ok(())
         }

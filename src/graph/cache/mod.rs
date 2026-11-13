@@ -484,7 +484,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                     };
 
                     // ensure changes are flushed to disk
-                    mmap.flush()?;
+                    crate::shared_slice::flush_mmap(&mmap)?;
 
                     (
                         mmap.make_read_only()

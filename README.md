@@ -215,7 +215,7 @@ sparx = { package = "sparx-graph", version = "0.2" }
 
 ```toml
 [dependencies]
-sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", tag = "v0.2.0" }
+sparx = { package = "sparx-graph", git = "https://github.com/alexfaisca/sparx.git", tag = "v0.2.1" }
 ```
 
 #### 3. Installing and linking *SparX* directly inside a Rust project.

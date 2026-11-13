@@ -71,7 +71,7 @@ use super::{DiGraph, Graph, GraphMemoryMap, IndexType};
 
 use crossbeam::thread;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod sealed {
     pub trait Sealed {}
@@ -238,7 +238,9 @@ pub(crate) fn find_asymmetric_arc<Ix: IndexType>(
     let node_count = offsets.len().saturating_sub(1);
     let threads = threads.max(1);
     let thread_load = node_count.div_ceil(threads).max(1);
-    let found = AtomicBool::new(false);
+    // the smallest `u` found so far: threads stop once past it, so the arc found is always the
+    // one of the smallest `u`, however the threads are scheduled
+    let first = AtomicUsize::new(usize::MAX);
 
     let neighbours_of = |w: usize| -> &[Ix] {
         neighbours
@@ -247,7 +249,7 @@ pub(crate) fn find_asymmetric_arc<Ix: IndexType>(
     };
 
     let per_thread = thread::scope(|scope| {
-        let found = &found;
+        let first = &first;
         let neighbours_of = &neighbours_of;
         let handles: Vec<_> = (0..threads)
             .map(|tid| {
@@ -255,7 +257,7 @@ pub(crate) fn find_asymmetric_arc<Ix: IndexType>(
                     let begin = std::cmp::min(tid * thread_load, node_count);
                     let end = std::cmp::min(begin + thread_load, node_count);
                     for u in begin..end {
-                        if found.load(Ordering::Relaxed) {
+                        if u > first.load(Ordering::Relaxed) {
                             return None;
                         }
                         let n_u = neighbours_of(u);
@@ -269,7 +271,7 @@ pub(crate) fn find_asymmetric_arc<Ix: IndexType>(
                                 let lo = n_v.partition_point(|w| w.index() < u);
                                 let hi = n_v.partition_point(|w| w.index() <= u);
                                 if hi - lo < run {
-                                    found.store(true, Ordering::Relaxed);
+                                    first.fetch_min(u, Ordering::Relaxed);
                                     return Some((u, v));
                                 }
                             }
