@@ -39,6 +39,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Spectral clustering](#spectral-clustering)
   - [Label propagation](#label-propagation)
   - [Betweenness centrality](#betweenness-centrality)
+- [Benchmarks against NetworKit](#benchmarks-against-networkit)
 - [Python](#python)
 - [Reproducibility](#reproducibility)
   - [Scripts](#scripts)
@@ -1108,6 +1109,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Benchmarks against NetworKit
+
+sparx's algorithms against [NetworKit](https://networkit.github.io/) 11.3's (the closest parallel
+library), on ten graphs from 100k nodes to 50M nodes and 148M edges: two random graphs of 100k
+nodes (Barabási–Albert and Erdős–Rényi), de Bruijn graphs (`graph_*`) and synthetic DNA and
+protein k-mer graphs (`synth_*`). Wall time, best of 3 to 5 runs (one, past a minute), 32 threads,
+on a 32-vCPU KVM guest (Xeon E5-2670, 101 GB of RAM). Both libraries run on the same graph:
+sparx parses each dataset, and NetworKit's graph is built from sparx's CSR. The exact centralities
+and betweenness run on the 100k-node graphs only, and HyperBall, spectral clustering and KADABRA up
+to 75M edges (NetworKit's KADABRA up to 2M: it took 19 minutes on 1.8M edges, and was stopped
+after 2 hours 45 minutes on 2.1M).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/bench/speedup-dark.png">
+  <img alt="NetworKit's time over sparx's, per algorithm and graph" src="docs/bench/speedup-light.png">
+</picture>
+
+sparx is faster at most algorithms on every graph from half a million nodes on, and at the
+all-pairs ones (closeness, harmonic, KADABRA) by orders of magnitude. Shortest paths on unweighted
+graphs are 2x to 47x as fast: sparx searches them with a parallel BFS, NetworKit with a sequential
+Dijkstra's algorithm. Where NetworKit is faster:
+
+* **On the 100k-node graphs**, at the fastest algorithms (milliseconds each): sparx maps its
+  results and scratch memory to files and spawns its threads per call, fixed costs these graphs
+  don't amortize.
+* **PageRank on regular graphs** (`synth_*`), which converge in one or two iterations: what's
+  timed is mostly setup. On the other graphs from half a million nodes on (35 to 63 iterations),
+  sparx is 1.1x to 1.9x as fast.
+* **Label propagation**: sparx's default engine is semi-synchronous (colors of nodes take turns),
+  for the same communities whatever the threads; its asynchronous engine (`engine="asynchronous"`,
+  as NetworKit's PLP) is faster than PLP on every graph from half a million nodes on. Their
+  communities differ in quality too: PLP's modularity varies widely from run to run on the same
+  graph (0.01 to 0.59 on `graph_4_10`; a single community in at least one run on five of the ten
+  graphs), while sparx's engines find 0.41 to 0.64 on every graph from half a million nodes on,
+  run after run; when PLP doesn't collapse, its modularity on the de Bruijn graphs is higher (0.59
+  to 0.72).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/bench/walltime-dark.png">
+  <img alt="Wall time of both libraries on the two largest graphs" src="docs/bench/walltime-light.png">
+</picture>
+
+On the graph with the most nodes (`graph_9_15`), sparx's connected components, clustering
+coefficients and shortest paths take 1 to 2.5 seconds where NetworKit's take 14 to 82, and its
+Louvain and Leiden 1 to 1.5 minutes rather than 4 to 5. On the one with the most edges
+(`synth_prot23`), sparx is as fast or faster at all but label propagation's semi-synchronous
+engine and PageRank (which converges at once there, see above): from even (label propagation's
+asynchronous engine) to 47x (shortest paths).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/bench/sparx-only-dark.png">
+  <img alt="sparx's wall time on the algorithms NetworKit has no counterpart of" src="docs/bench/sparx-only-light.png">
+</picture>
+
+The algorithms NetworKit has no counterpart of, by graph size: triangle counts and k-trusses take
+seconds on the largest graph; exact spectral clustering is the costliest (15 minutes on 17M
+edges), the compressive engine a fraction of it.
+
+To reproduce (with sparx's Python package and `networkit` installed; datasets from
+`scripts/datasets/build_datasets.sh`):
+
+```bash
+python3 scripts/bench/bench.py --out results/bench/bench.csv      # every dataset, both libraries
+python3 scripts/bench/summarize.py results/bench/bench.csv         # Markdown tables
+python3 scripts/plot/plot_bench.py results/bench/bench.csv         # these figures, in docs/bench/
+```
+
+`bench.py --list` lists the datasets and algorithms, and `--datasets`, `--algorithms` and
+`--libraries` select some. Each (dataset, library) runs in a process of its own, stopped after
+`--timeout`; rows are appended to the CSV as runs end.
 
 ## Python
 
