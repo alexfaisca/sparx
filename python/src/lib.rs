@@ -2491,7 +2491,7 @@ graph_class!(UGraph, "Graph", {
         self.inner.run(py, |g| {
             with_graph!(g, g => {
                 let size = target_size.unwrap_or(g.size().div_ceil(2));
-                let volume = target_volume.unwrap_or(g.width().div_ceil(4));
+                let volume = target_volume.unwrap_or(g.width().div_ceil(4).max(1));
                 let hkpr = ApproxDirHKPR::new(g, eps, seed, size, volume, target_conductance)?
                     .with_random_seed(random_seed);
                 Ok(community_out(hkpr.compute()?))

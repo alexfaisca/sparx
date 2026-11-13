@@ -432,7 +432,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
             total_triangles += triangles;
         }
 
-        self.local_average = local_clustering_sum / node_count as f64;
+        // 0 on a graph without nodes, as the weighted and the directed averages
+        self.local_average = if node_count > 0 {
+            local_clustering_sum / node_count as f64
+        } else {
+            0.
+        };
         // every triangle counts once for each of its 6 (directed) edges, so the sum of all
         // edges' counts is 6 * triangles, and transitivity = 3 * triangles / connected triples
         // (0 without connected triples, as networkx's `transitivity`)

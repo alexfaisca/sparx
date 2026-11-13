@@ -128,6 +128,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
                 ),
             t_formula,
         )?;
+        if t <= 0. {
+            return Err(format!(
+                "error approx-dirichlet-hkpr invalid parameters: the targets give a heat kernel time t = {t} <= 0 ({t_formula}): raise target_size or target_vol"
+            )
+            .into());
+        }
         Ok(ApproxDirHKPR {
             random_seed: 0x5eed,
             g,
@@ -156,7 +162,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             Ok(dist) => dist,
             Err(e) => {
                 return Err(format!(
-                    "error approx-dirchlet-hkpr couldn't sample poission distribution: {e}",
+                    "error approx-dirichlet-hkpr couldn't sample the Poisson distribution: {e}",
                 )
                 .into());
             }
@@ -166,6 +172,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             .take(n)
             .map(OrderedFloat)
             .collect())
+    }
+
+    /// The empty community, when the walks can't leave the seed: a single node graph (no samples,
+    /// as `ln(|V|) = 0`) or a seed without arcs (or whose arcs all weigh nothing), as HK-Relax's.
+    fn trivial(&self) -> Result<Option<Community<usize>>, Box<dyn std::error::Error>> {
+        if self.g.size() > 1 && self.g.weighted_degree(self.seed)? > 0. {
+            return Ok(None);
+        }
+        Ok(Some(self.g.sweep_cut(
+            &mut Vec::new(),
+            Some(self.target_size),
+            Some(self.target_vol),
+        )?))
     }
 
     /// The neighbour of `u` a uniform draw `r` (in `[0, 1)`) picks: uniformly among its arcs, or
@@ -236,11 +255,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
         big_k: ApproxDirichletHeatKernelK,
     ) -> Result<Community<usize>, Box<dyn std::error::Error>> {
         let node_count = match self.g.size() {
-            0 => return Err("error approx-dirchlet-hkpr |V| == 0".into()),
+            0 => return Err("error approx-dirichlet-hkpr |V| == 0".into()),
             i => i as f64,
         };
         // (checks weighted edges' weights: finite, non-negative)
         self.g.total_weight()?;
+        if let Some(empty) = self.trivial()? {
+            return Ok(empty);
+        }
 
         let r = f64_is_nomal(
             (16. / self.eps.powi(2)) * f64::ln(node_count),
@@ -258,7 +280,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             ApproxDirichletHeatKernelK::Unlim => f64::INFINITY,
             #[expect(unreachable_patterns)]
             _ => {
-                return Err(format!("error approx-dirchlet-hkpr unknown K {:?}", big_k).into());
+                return Err(format!("error approx-dirichlet-hkpr unknown K {:?}", big_k).into());
             }
         };
         let k = OrderedFloat(k);
@@ -267,7 +289,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             Some(s) => s,
             None => {
                 return Err(
-                    format!("error approx-dirchlet-hkpr couldn't cast {r} to usize").into(),
+                    format!("error approx-dirichlet-hkpr couldn't cast {r} to usize").into(),
                 );
             }
         };
@@ -278,14 +300,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
 
         for little_k in steps {
             let OrderedFloat(little_k) = std::cmp::min(little_k, k);
-            let little_k_usize = match f64_to_usize_safe(little_k) {
-                Some(val) => val,
-                None => {
-                    return Err(format!(
-                        "error approx-dirchlet-hkpr couldn't cast {little_k} to usize"
-                    )
-                    .into());
-                }
+            // a walk's length, a Poisson draw: 0 too (the walk stays at the seed), which
+            // `f64_to_usize_safe` refuses
+            let little_k_usize = if little_k == 0. {
+                0
+            } else {
+                f64_to_usize_safe(little_k).ok_or_else(|| -> Box<dyn std::error::Error> {
+                    format!("error approx-dirichlet-hkpr couldn't cast {little_k} to usize").into()
+                })?
             };
             let v = self.random_walk_seed(little_k_usize, self.seed, &mut rng)?;
             match aprox_hkpr_samples.get_mut(&v) {
@@ -320,11 +342,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
     ///
     pub fn compute(&self) -> Result<Community<usize>, Box<dyn std::error::Error>> {
         let node_count = match self.g.size() {
-            0 => return Err("error approx-dirchlet-hkpr |V| == 0".into()),
+            0 => return Err("error approx-dirichlet-hkpr |V| == 0".into()),
             i => i as f64,
         };
         // (checks weighted edges' weights: finite, non-negative)
         self.g.total_weight()?;
+        if let Some(empty) = self.trivial()? {
+            return Ok(empty);
+        }
 
         let r = f64_is_nomal(
             (16. / self.eps.powi(2)) * f64::ln(node_count),
@@ -339,7 +364,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
             Some(s) => s,
             None => {
                 return Err(
-                    format!("error approx-dirchlet-hkpr couldn't cast {r} to usize").into(),
+                    format!("error approx-dirichlet-hkpr couldn't cast {r} to usize").into(),
                 );
             }
         };
@@ -350,14 +375,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ApproxDirHKPR<'a, N, E,
 
         for little_k in steps {
             let OrderedFloat(little_k) = std::cmp::min(little_k, k);
-            let little_k_usize = match f64_to_usize_safe(little_k) {
-                Some(val) => val,
-                None => {
-                    return Err(format!(
-                        "error approx-dirchlet-hkpr couldn't cast {little_k} to usize"
-                    )
-                    .into());
-                }
+            // a walk's length, a Poisson draw: 0 too (the walk stays at the seed), which
+            // `f64_to_usize_safe` refuses
+            let little_k_usize = if little_k == 0. {
+                0
+            } else {
+                f64_to_usize_safe(little_k).ok_or_else(|| -> Box<dyn std::error::Error> {
+                    format!("error approx-dirichlet-hkpr couldn't cast {little_k} to usize").into()
+                })?
             };
             let v = self.random_walk_seed(little_k_usize, self.seed, &mut rng)?;
             match aprox_hkpr_samples.get_mut(&v) {
@@ -450,5 +475,58 @@ mod test {
             .unwrap()
             .to_string();
         assert!(err.contains("finite and non-negative"), "{err}");
+    }
+
+    /// Walks that can't leave the seed (a single node graph, a seed without edges, or with edges
+    /// weighing nothing) find the empty community, as HK-Relax's, rather than an error; targets
+    /// giving no positive heat kernel time are refused with the reason.
+    #[test]
+    fn trivial_seeds_find_the_empty_community() {
+        let single = undirected::<()>("hkpr_single", 1, &[]);
+        // node 0 alone, and two triangles (1, 2, 3 and 4, 5, 6) joined by an edge
+        let isolated = undirected::<()>(
+            "hkpr_isolated",
+            7,
+            &[
+                (1, 2, "1"),
+                (1, 3, "1"),
+                (2, 3, "1"),
+                (4, 5, "1"),
+                (4, 6, "1"),
+                (5, 6, "1"),
+                (3, 4, "1"),
+            ],
+        );
+        let weightless = undirected::<Weighted<f64>>("hkpr_weightless", 3, &[(0, 1, "0")]);
+        for c in [
+            ApproxDirHKPR::new(&single, 0.1, 0, 1, 1, 0.1)
+                .unwrap()
+                .compute(),
+            ApproxDirHKPR::new(&isolated, 0.1, 0, 2, 2, 0.1)
+                .unwrap()
+                .compute(),
+        ] {
+            let c = c.unwrap();
+            assert_eq!((c.size, c.nodes.len()), (0, 0));
+        }
+        let c = ApproxDirHKPR::new(&weightless, 0.1, 0, 2, 2, 0.1)
+            .unwrap()
+            .compute()
+            .unwrap();
+        assert_eq!(c.size, 0);
+        // a seed with edges still finds its community: its triangle
+        let c = ApproxDirHKPR::new(&isolated, 0.1, 1, 3, 7, 0.5)
+            .unwrap()
+            .compute()
+            .unwrap();
+        let mut nodes: Vec<_> = c.nodes.iter().map(|&(u, _)| u).collect();
+        nodes.sort_unstable();
+        assert_eq!(nodes, [1, 2, 3]);
+        // ln(2 * sqrt(0) / 0.9 + 2 * 0.1 * 1) < 0
+        let err = ApproxDirHKPR::new(&isolated, 0.1, 0, 1, 0, 0.1)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("raise target_size or target_vol"), "{err}");
     }
 }

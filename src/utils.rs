@@ -23,7 +23,7 @@ pub(crate) fn f64_is_nomal(
     op_description: &str,
 ) -> Result<f64, Box<dyn std::error::Error>> {
     if !val.is_normal() {
-        return Err(format!("error hk-relax abnormal value at {op_description} = {val}",).into());
+        return Err(format!("error: abnormal value at {op_description} = {val}",).into());
     }
     Ok(val)
 }

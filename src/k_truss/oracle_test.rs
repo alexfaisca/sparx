@@ -453,3 +453,20 @@ fn wide_triangle_counts() {
     .unwrap();
     assert!(cc.get_graph_transitivity().is_finite());
 }
+
+/// The average clustering coefficient of a graph without nodes is 0 (not 0 / 0), as the directed
+/// and the weighted averages are.
+#[test]
+fn clustering_of_the_empty_graph_is_zero() {
+    let g = crate::communities::hk_relax::test::undirected::<()>("cc_empty", 0, &[]);
+    let cc = ClusteringCoefficient::new(&g).unwrap();
+    assert_eq!(cc.get_average_clustering_coefficient(), 0.);
+    assert_eq!(cc.get_graph_transitivity(), 0.);
+    let w = crate::communities::hk_relax::test::undirected::<crate::graph::Weighted<f64>>(
+        "cc_empty_w",
+        0,
+        &[],
+    );
+    let cc = ClusteringCoefficient::new(&w).unwrap();
+    assert_eq!(cc.get_average_clustering_coefficient(), 0.);
+}

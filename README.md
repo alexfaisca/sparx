@@ -1267,6 +1267,10 @@ for it, and then run on the same graphs at every configuration it supports:
 * **Real inputs.** 18 bundled de Bruijn graphs (`tests/fixtures/ggcat/`, regenerated with GGCAT by
   `generate.sh`) and Matrix Market edge cases (symmetric, skew-symmetric, Hermitian and
   malformed files, accumulator overflows, indices too wide for the chosen `Ix`) exercise the parsers and the algorithms on the graphs they're built for.
+* **Degenerate graphs.** Every algorithm runs on graphs without nodes, with a single node, with
+  nodes but no edges and with a single edge, undirected and directed, weighted and not, and its
+  result there is checked (`python/tests/test_edge_cases.py`); multigraphs and self-loops are
+  checked against networkx's.
 * **No leaked files.** Tests run their graphs through a guard that removes the cache entry when
   dropped, and failed parses are checked to leave no cache files behind.
 * **Documentation.** This README's Rust examples are compiled as doctests, and the

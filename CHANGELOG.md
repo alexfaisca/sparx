@@ -24,6 +24,16 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 * `BFSDists::recheable`, renamed `reachable`.
 
+### Fixed
+
+* `ApproxDirHKPR::compute` failed whenever a random walk's sampled length was 0, which small heat
+  kernel times (high target conductances) made near certain.
+* `ApproxDirHKPR` finds the empty community (as HK-Relax) on a single node graph or from a seed
+  without edges, rather than failing on a degenerate sample count, and refuses targets giving no
+  positive heat kernel time with the reason. The Python `hkpr`'s default target volume is at least 1.
+* The undirected average clustering coefficient of a graph without nodes is 0 (was NaN), as the
+  directed and the weighted ones.
+
 ## 0.2.0 — 2026-11-11
 
 ### Added
