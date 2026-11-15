@@ -1,7 +1,7 @@
 # SparX
 
 > **Biconnected components (articulation points and bridges) of a 148M-edge graph in 2.2 seconds, where NetworKit takes 49: 23× faster**, with the same exact result.
-> On the same graph: k-truss in 6.7 s, Louvain in 22 s, unweighted shortest paths 45× faster than NetworKit. See [Benchmarks](#benchmarks-against-networkit).
+> On the same graph: k-truss in 6.7 s, Louvain in 22 s, unweighted shortest paths 47× faster than NetworKit. See [Benchmarks](#benchmarks-against-networkit).
 
 High-performance **Rust** library for large-scale **static sparse graphs analytics** on commodity hardware. Built on a memory-mapped core. It includes implementations of:
 
@@ -1254,29 +1254,38 @@ pytest python/tests         # checked against networkx
 ## Testing
 
 Each algorithm is checked against a reference that is simple enough to trust, on graphs small enough
-for it, and then run on the same graphs at every configuration it supports:
+for it, and then run on the same graphs in the configurations it supports:
 
-* **Brute-force oracles.** k-cores, k-trusses, triangle counts, betweenness, PageRank, Louvain's
-  modularity, shortest paths and biconnectivity are checked against straightforward
-  implementations (peeling, all-pairs triangle enumeration, Brandes' algorithm, power iteration,
-  Dijkstra's algorithm, removing each node and edge in turn) on small random and hand-built graphs;
-  the HyperLogLog counters against Ertl's estimator.
-* **Equivalence across configurations.** Every algorithm is run at each index width (`u8` to
-  `usize`) against the `usize` baseline (`src/cross_ix_sweep_test.rs`), at each coreness and
-  trussness width, with each engine (sequential vs parallel, Dijkstra vs Δ-stepping, both label
-  propagation engines) and on directed graphs against their undirected counterparts. Deterministic
-  algorithms are checked to return the same result bit for bit at every thread count.
+* **Brute-force oracles.** k-cores, k-trusses, triangle counts, clustering coefficients,
+  betweenness, PageRank, Louvain's modularity, shortest paths and biconnectivity are checked
+  against straightforward implementations (peeling, all-pairs triangle enumeration, Brandes'
+  algorithm, power iteration, Floyd–Warshall, removing each node and edge in turn) on small random
+  and hand-built graphs; the HyperLogLog counters against Ertl's estimator.
+* **Equivalence across configurations.** The traversals, k-cores, k-trusses, triangles,
+  clustering coefficients, Euler trails and HyperBall's distances are run at each index width
+  (`u8` to `usize`) against the `usize` baseline (`src/cross_ix_sweep_test.rs`; exact
+  centralities on its smaller graphs, Louvain only checked to give a valid partition), and most
+  other algorithms have width tests of their own. k-cores and k-trusses are checked at each
+  coreness and trussness width, engines against each other (sequential vs parallel, Dijkstra vs
+  Δ-stepping) and directed algorithms against their undirected counterparts. PageRank, label
+  propagation, spectral clustering, KADABRA, biconnectivity, connected and strongly connected
+  components, assortativity, PKT, Liu et al.'s k-cores, Δ-stepping, the parallel BFS, landmarks,
+  triangle counts, clustering coefficients, HyperBall, HK-Relax and the exact closeness, harmonic
+  and Lin centralities are checked to return the same result at every thread count (bit for
+  bit, for floats; exact betweenness, documented to differ in its last bits, to within
+  rounding).
 * **Real inputs.** 18 bundled de Bruijn graphs (`tests/fixtures/ggcat/`, regenerated with GGCAT by
-  `generate.sh`) and Matrix Market edge cases (symmetric, skew-symmetric, Hermitian and
-  malformed files, accumulator overflows, indices too wide for the chosen `Ix`) exercise the parsers and the algorithms on the graphs they're built for.
-* **Degenerate graphs.** Every algorithm runs on graphs without nodes, with a single node, with
-  nodes but no edges and with a single edge, undirected and directed, weighted and not, and its
-  result there is checked (`python/tests/test_edge_cases.py`); multigraphs and self-loops are
-  checked against networkx's.
-* **No leaked files.** Tests run their graphs through a guard that removes the cache entry when
-  dropped, and failed parses are checked to leave no cache files behind.
-* **Documentation.** This README's Rust examples are compiled as doctests, and the
-  [`examples/`](examples/) are built in CI.
+  `generate.sh`) exercise the GGCAT parser and the k-core, k-truss and Euler trail algorithms;
+  Matrix Market edge cases (symmetric, skew-symmetric, Hermitian and malformed files, accumulator
+  overflows, indices too wide for the chosen `Ix`) exercise its parser.
+* **Degenerate graphs.** The algorithms the Python bindings expose run on graphs without nodes,
+  with a single node and with nodes but no edges, undirected and directed, weighted and not, and
+  most of them on a single edge or arc, and their results there are checked
+  (`python/tests/test_edge_cases.py`); multigraphs and self-loops are checked against networkx's.
+* **No leaked files.** Tests run their graphs through a guard that removes the cache entry
+  when dropped, and failed Matrix Market parses are checked to leave no cache files behind.
+* **Documentation.** This README's Rust examples are compiled as doctests (the GPU one as the
+  `gpu` module's, with that feature), and the [`examples/`](examples/) are built in CI.
 * **Python.** The bindings' results are checked against networkx's (`python/tests/`), with a
   fixture asserting the cache directory is empty after every test.
 * **Performance regressions.** `tests/perf_regression.rs` holds ignored tests that fail when a
@@ -1284,14 +1293,18 @@ for it, and then run on the same graphs at every configuration it supports:
 
 ```sh
 cargo test --release                                       # unit, integration and README tests
+cargo test --release --features rayon,petgraph,rustworkx,iter_with_offset  # the optional APIs too
 cargo test --release --features gpu                        # also the GPU kernels (any Vulkan device)
 cargo test --release --test perf_regression -- --ignored --test-threads=1
 pytest python/tests
 ```
 
+GPU tests skip themselves on machines without a GPU adapter, unless `SPARX_REQUIRE_GPU=1` is set,
+as in CI (on lavapipe), where they fail instead.
+
 CI runs all of these, and also checks formatting, the documentation (with warnings as errors), the
-minimum supported Rust version (1.95), that every target builds with the optional features, and
-each input format feature on its own.
+minimum supported Rust version (1.95), that every target builds with the optional features (each
+alone, and all together), and each input format feature on its own.
 
 # Reproducibility
 

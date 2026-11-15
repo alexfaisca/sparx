@@ -56,7 +56,8 @@ ggcat = []
 nodes_edges = []
 iter_with_offset = []
 rayon = ["dep:rayon"]
-# GPU compute backend (wgpu: Vulkan/Metal/DX12) --- currently HyperBall
+# GPU compute backend (wgpu: Vulkan/Metal/DX12) --- HyperBall, per-edge triangle counts and
+# degree assortativity
 gpu = ["dep:wgpu", "dep:pollster"]
 # exports to petgraph's and rustworkx's graphs
 petgraph = ["dep:petgraph"]
