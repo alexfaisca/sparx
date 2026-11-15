@@ -4,7 +4,7 @@ use crate::shared_slice::*;
 
 use crossbeam::thread;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use super::count::{TriangleCount, TriangleCounter};
@@ -215,6 +215,10 @@ fn weighted_directed_local_clustering<N: graph::N, E: graph::E, Ix: graph::Index
 /// normalized weights, see `weighted_local_clustering`); transitivity, as networkx's, ignores
 /// weights.
 ///
+/// On multigraphs, the unweighted coefficients and transitivity are the simple graph's (as
+/// networkx's of `nx.Graph(multigraph)`): parallel edges close no more triangles than one, so
+/// that no coefficient exceeds 1 (weighted ones weigh parallel edges' weights' sum).
+///
 /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -354,10 +358,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         // Thread syncronization
         let synchronize = Arc::new(Barrier::new(threads));
 
-        // each thread's sums: of its nodes' possible triangles (connected triples) and of its
-        // edges' triangle counts --- integers, so exact whatever the threads (a shared atomic sum
-        // would have every thread contend for it at every node). The local coefficients' sum is
-        // taken afterwards, in node order, so that the average is the same whatever the threads
+        // which nodes have parallel edges (to a neighbour other than themselves): the triangles
+        // at a node are counted from `tris` (once per combination of edges) unless it or one of
+        // its neighbours has some --- a triangle's three edges are at it or between two of its
+        // neighbours --- and otherwise by merging rows, each pair of neighbours once (the simple
+        // graph's triangles, as networkx's `clustering` of `nx.Graph(multigraph)`)
+        let parallel_at: Vec<AtomicBool> =
+            (0..node_count).map(|_| AtomicBool::new(false)).collect();
+        let parallel_at = &parallel_at;
+
+        // each thread's sums: of its nodes' possible triangles (connected triples) and of their
+        // triangles --- integers, so exact whatever the threads (a shared atomic sum would have
+        // every thread contend for it at every node). The local coefficients' sum is taken
+        // afterwards, in node order, so that the average is the same whatever the threads
         let sums = thread::scope(|scope| {
             let mut handles = Vec::with_capacity(threads);
             for tid in 0..threads {
@@ -370,22 +383,25 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                 let end = std::cmp::min(begin + thread_load, node_count);
 
                 handles.push(scope.spawn(move |_| -> (f64, usize) {
-                    // sum of the thread's edges' triangle counts
+                    // sum of the thread's nodes' triangles
                     let mut total_triangles_t: usize = 0;
                     let mut possible_triangles_t = 0.;
 
-                    for u in begin..end {
+                    for (u, parallel_at_u) in parallel_at.iter().enumerate().take(end).skip(begin) {
                         // distinct neighbours: lists are sorted, so parallel edges are adjacent
                         let mut n_len = 0;
                         let mut prev = None;
                         for j in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
                             let v = neighbours_ptr.get(j).index();
                             // a self-loop doesn't make `u` its own neighbour
-                            if v != u && prev != Some(v) {
-                                n_len += 1;
+                            if v != u {
+                                if prev != Some(v) {
+                                    n_len += 1;
+                                } else {
+                                    parallel_at_u.store(true, Ordering::Relaxed);
+                                }
                             }
                             prev = Some(v);
-                            total_triangles_t += tris.get(j).count();
                         }
                         // #possible edges between neighbours = k * (k - 1) / 2
                         let n_possible_triangles = if n_len > 1 {
@@ -399,12 +415,27 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
 
                     synchronize.wait();
 
+                    let row = |w: usize| index_ptr.get(w).index()..index_ptr.get(w + 1).index();
                     for u in begin..end {
-                        let mut u_triangles: usize = 0;
-                        for edge_idx in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
-                            u_triangles += tris.get(edge_idx).count();
-                        }
-                        let undirected_triangles = u_triangles.div_ceil(2) as f64;
+                        let near_parallel = parallel_at[u].load(Ordering::Relaxed)
+                            || row(u).any(|j| {
+                                let v = neighbours_ptr.get(j).index();
+                                v != u && parallel_at[v].load(Ordering::Relaxed)
+                            });
+                        let u_triangles = if near_parallel {
+                            // pairs of distinct neighbours adjacent to each other, each pair met
+                            // from both of its ends
+                            distinct_common(&neighbours_ptr, row(u), u, row) / 2
+                        } else {
+                            // each triangle at `u` counted once by each of its two edges at `u`
+                            let mut u_triangles: usize = 0;
+                            for edge_idx in row(u) {
+                                u_triangles += tris.get(edge_idx).count();
+                            }
+                            u_triangles.div_ceil(2)
+                        };
+                        total_triangles_t += u_triangles;
+                        let undirected_triangles = u_triangles as f64;
                         let possible_triangles = *local.get(u);
                         let local_conductivity = if possible_triangles.is_normal() {
                             undirected_triangles / possible_triangles
@@ -435,11 +466,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         } else {
             0.
         };
-        // every triangle counts once for each of its 6 (directed) edges, so the sum of all
-        // edges' counts is 6 * triangles, and transitivity = 3 * triangles / connected triples
-        // (0 without connected triples, as networkx's `transitivity`)
+        // every triangle counts once at each of its 3 nodes, so the sum of the nodes' counts is
+        // 3 * triangles, and transitivity = 3 * triangles / connected triples (0 without
+        // connected triples, as networkx's `transitivity`)
         self.transitivity = if triples > 0. {
-            total_triangles as f64 / 2. / triples
+            total_triangles as f64 / triples
         } else {
             0.
         };
@@ -472,8 +503,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
 ///
 /// where `t(i)` counts the directed triangles through `i`, of any orientation, `d(i)` is `i`'s
 /// in- plus out-degree and `d↔(i)` the number of its reciprocated arcs (with multiplicity: the
-/// product of the arcs each way). Self-loops are ignored. On undirected graphs it's the usual
-/// clustering coefficient ([`ClusteringCoefficient`]).
+/// product of the arcs each way). Self-loops are ignored. On undirected graphs without parallel
+/// edges it's the usual clustering coefficient ([`ClusteringCoefficient`]); parallel arcs count
+/// here, each, where [`ClusteringCoefficient`] counts the simple graph's triangles.
 ///
 /// With weighted arcs, networkx's weighted directed coefficients instead (Fagiolo's, see
 /// `weighted_directed_local_clustering`): parallel arcs weigh their weights' sum.
@@ -671,6 +703,49 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
         crate::shared_slice::remove_if_exists(out_fn)?;
         Ok(())
     }
+}
+
+/// For each distinct neighbour `v` of `u` (but `u`), the number of distinct nodes but `u` and `v`
+/// both are adjacent to, summed: twice the number of triangles at `u`, parallel edges and
+/// self-loops aside. Rows (`row_u`, and `row(v)`) are sorted.
+fn distinct_common<Ix: graph::IndexType>(
+    neighbours: &SharedSlice<Ix>,
+    row_u: std::ops::Range<usize>,
+    u: usize,
+    row: impl Fn(usize) -> std::ops::Range<usize>,
+) -> usize {
+    let mut count = 0;
+    let mut prev_v = None;
+    for j in row_u.clone() {
+        let v = neighbours.get(j).index();
+        if v == u || prev_v == Some(v) {
+            continue;
+        }
+        prev_v = Some(v);
+        // sorted merge of `u`'s and `v`'s rows, each node once
+        let (mut a, mut b) = (row_u.clone().peekable(), row(v).peekable());
+        let mut last = None;
+        while let (Some(&i), Some(&k)) = (a.peek(), b.peek()) {
+            let (x, y) = (neighbours.get(i).index(), neighbours.get(k).index());
+            match x.cmp(&y) {
+                std::cmp::Ordering::Less => {
+                    a.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    b.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    if x != u && x != v && last != Some(x) {
+                        count += 1;
+                    }
+                    last = Some(x);
+                    a.next();
+                    b.next();
+                }
+            }
+        }
+    }
+    count
 }
 
 #[cfg(test)]

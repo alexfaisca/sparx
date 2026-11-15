@@ -135,13 +135,20 @@ fn brute_force_clustering(g: &Graph) -> (Vec<f64>, f64, f64) {
     (local, average, closed / triples)
 }
 
+/// The coefficients are the simple graph's (networkx's `clustering` of `nx.Graph(multigraph)`):
+/// parallel edges, the `multi` fixture's, close no more triangles than one edge, so that no
+/// coefficient exceeds 1.
 #[test]
 fn clustering_coefficient_matches_brute_force() {
-    for (name, g) in simple_fixtures() {
+    for (name, g) in fixtures() {
         let cc = ClusteringCoefficient::new(&g).unwrap();
         let (local, average, transitivity) = brute_force_clustering(&g);
         for (u, expected) in local.iter().enumerate() {
             let got = cc.get_node_clusteringcoefficient(u);
+            assert!(
+                (0. ..=1.).contains(&got),
+                "{name}: node {u}'s coefficient {got} out of [0, 1]"
+            );
             assert!(
                 (got - expected).abs() < 1e-12,
                 "{name}: node {u}'s coefficient {got}, expected {expected}"
