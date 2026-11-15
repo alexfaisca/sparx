@@ -566,7 +566,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                 let b = base[t];
                 if root_of.get(u).index() == u {
                     let f = preorder(b);
-                    *parent.get_mut(u) = none;
+                    // a root is its own parent: every `Ix` value can be a node (`Ix::max()`
+                    // too, in a graph of `Ix::max() + 1` nodes)
+                    *parent.get_mut(u) = Ix::new(u);
                     *first.get_mut(u) = Ix::new(f);
                     *last.get_mut(u) = Ix::new(f + totals[t].load(Ordering::Relaxed) / 2);
                 }
@@ -590,8 +592,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         // its row (sorted)
         let is_tree_edge = |u: usize, v: usize, e: usize| {
             v != u
-                && ((*parent.get(v) != none && parent.get(v).index() == u)
-                    || (*parent.get(u) != none && parent.get(u).index() == v))
+                // (`v != u`, so neither is a root, its own parent, here)
+                && (parent.get(v).index() == u || parent.get(u).index() == v)
                 && (e == row(u).start || neighbours.get(e - 1).index() != v)
         };
 
@@ -610,7 +612,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                 let fu = first.get(u).index();
                 let (mut lo, mut hi) = (fu, fu);
                 let p = parent.get(u);
-                let mut skipped = *p == none;
+                let mut skipped = p.index() == u;
                 for e in row(u) {
                     let v = neighbours.get(e).index();
                     // the tree edge to its parent (its children are in its subtree anyway)
@@ -759,7 +761,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             let mut is_bridge = is_bridge;
             let mut found = 0;
             for v in begin..end {
-                let bridge = *parent.get(v) != none && kept_in(v, v);
+                let bridge = parent.get(v).index() != v && kept_in(v, v);
                 *is_bridge.get_mut(v) = bridge;
                 found += bridge as usize;
             }
@@ -801,7 +803,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                         continue;
                     }
                     let skeleton = if is_tree_edge(u, v, e) {
-                        let (p, c) = if parent.get(v).index() == u && *parent.get(v) != none {
+                        let (p, c) = if parent.get(v).index() == u {
                             (u, v)
                         } else {
                             (v, u)
@@ -825,7 +827,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             in_parallel(threads, n, &|begin, end| {
                 let mut heads = heads;
                 for u in begin..end {
-                    if *parent.get(u) != none {
+                    if parent.get(u).index() != u {
                         let p = parent.get(u).index();
                         let r = uf.find(u);
                         if uf.find(p) != r {
@@ -841,7 +843,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         // (sorted by range, in parallel, then merged: the stable sort merges sorted runs)
         let mut keys: Vec<(usize, usize)> = in_parallel_collect(threads, n, &|begin, end| {
             let mut keys: Vec<(usize, usize)> = (begin..end)
-                .filter(|&u| *parent.get(u) != none && uf.find(u) == u)
+                .filter(|&u| parent.get(u).index() != u && uf.find(u) == u)
                 .map(|r| (r.min(heads_by_root.get(r).index()), r))
                 .collect();
             keys.sort_unstable();
@@ -871,7 +873,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             in_parallel(threads, n, &|begin, end| {
                 let mut components = components;
                 for u in begin..end {
-                    *components.get_mut(u) = if *parent.get(u) != none {
+                    *components.get_mut(u) = if parent.get(u).index() != u {
                         *number.get(uf.find(u))
                     } else {
                         none
@@ -901,7 +903,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             in_parallel(threads, n, &|begin, end| {
                 let mut a = a;
                 for u in begin..end {
-                    let bit = if *parent.get(u) == none { 2 } else { 1 };
+                    let bit = if parent.get(u).index() == u { 2 } else { 1 };
                     *a.get_mut(u) = headed.get(u).load(Ordering::Relaxed) & bit != 0;
                 }
             })?;
@@ -918,11 +920,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                         continue;
                     }
                     if is_tree_edge(u, v, e) {
-                        let c = if parent.get(v).index() == u && *parent.get(v) != none {
-                            v
-                        } else {
-                            u
-                        };
+                        let c = if parent.get(v).index() == u { v } else { u };
                         if *is_bridge.get(c) {
                             continue;
                         }
@@ -1193,6 +1191,62 @@ mod test {
                 }
             }
             b.drop_cache().unwrap();
+        }
+    }
+
+    /// Every `Ix` value can be a node: in a `u8` graph of 256 nodes, node 255 (`u8::MAX`) is a
+    /// parent in the search trees like any other, and the results are those at `usize`.
+    #[test]
+    fn biconnectivity_with_a_node_at_the_index_types_maximum() {
+        // 250 -- 255 -- {251, 252}, a triangle 251 -- 252 -- 255, 252 -- 253 a bridge, and 254
+        // hanging off 255; the other nodes isolated
+        let n = 256;
+        let edges = [
+            (250, 255),
+            (251, 255),
+            (252, 255),
+            (251, 252),
+            (252, 253),
+            (254, 255),
+        ];
+        let dir = unique_test_dir("biconnected_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("max.mtx");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "%%MatrixMarket matrix coordinate pattern symmetric").unwrap();
+        writeln!(f, "{n} {n} {}", edges.len()).unwrap();
+        for &(u, v) in &edges {
+            writeln!(f, "{} {}", u.max(v) + 1, u.min(v) + 1).unwrap();
+        }
+        drop(f);
+        let _guard = crate::graph::test_utils::CacheGuard::dir(dir);
+        /// Components, articulation points, bridges, 2-edge-connected components.
+        type Result = (Vec<Vec<usize>>, Vec<usize>, Vec<[usize; 2]>, Vec<usize>);
+        fn result<Ix: graph::IndexType>(path: &std::path::Path, threads: u8) -> Result {
+            let g = Graph::<(), (), Ix>::from_file(
+                path,
+                Some(format!("biconnected_max_{}", unique_run_tag())),
+                Some(threads),
+            )
+            .unwrap();
+            let mut b = Biconnectivity::new(&g).unwrap();
+            let r = (
+                (0..b.count()).map(|c| b.component_nodes(c)).collect(),
+                b.articulation_points(),
+                b.bridges()
+                    .iter()
+                    .map(|e| [e[0].index(), e[1].index()])
+                    .collect(),
+                b.two_edge_components().iter().map(|c| c.index()).collect(),
+            );
+            b.drop_cache().unwrap();
+            r
+        }
+        for threads in [1, 3] {
+            let want = result::<usize>(&path, threads);
+            assert_eq!(want.1, vec![252, 255], "articulation points");
+            assert_eq!(want.2, vec![[250, 255], [252, 253], [254, 255]], "bridges");
+            assert_eq!(result::<u8>(&path, threads), want, "{threads} threads");
         }
     }
 
