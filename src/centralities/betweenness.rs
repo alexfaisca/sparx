@@ -1004,12 +1004,25 @@ fn kadabra<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>(
 mod tests {
     use super::*;
     use crate::graph::label::VoidLabel;
-    use crate::graph::test_utils::unique_test_dir;
+    use crate::graph::test_utils::{CacheGuard, unique_run_tag, unique_test_dir};
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    fn write_mtx(name: &str, n: usize, edges: &[(usize, usize)], symmetric: bool) -> PathBuf {
-        let dir = unique_test_dir("betweenness");
+    /// A test's fixture directory, and the guard removing it and every graph cache the test
+    /// creates (also when it fails).
+    fn fixtures() -> (CacheGuard, PathBuf) {
+        let root = unique_test_dir("betweenness");
+        (CacheGuard::dir(root.clone()), root)
+    }
+
+    fn write_mtx(
+        root: &Path,
+        name: &str,
+        n: usize,
+        edges: &[(usize, usize)],
+        symmetric: bool,
+    ) -> PathBuf {
+        let dir = root.join(unique_run_tag());
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{name}.mtx"));
         let mut f = std::fs::File::create(&path).unwrap();
@@ -1101,10 +1114,11 @@ mod tests {
 
     #[test]
     fn exact_matches_brute_force() {
+        let (_guard, root) = fixtures();
         for (seed, threads) in [(1, 1), (2, 4), (3, 8)] {
             let n = 40;
             let edges = random_arcs(n, 90, seed);
-            let path = write_mtx(&format!("u{seed}"), n, &edges, true);
+            let path = write_mtx(&root, &format!("u{seed}"), n, &edges, true);
             let mut g = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
                 &path,
                 None,
@@ -1133,9 +1147,10 @@ mod tests {
 
     #[test]
     fn exact_directed_matches_brute_force() {
+        let (_guard, root) = fixtures();
         let n = 35;
         let arcs = random_arcs(n, 120, 7);
-        let path = write_mtx("d", n, &arcs, false);
+        let path = write_mtx(&root, "d", n, &arcs, false);
         let mut g =
             DiGraph::<VoidLabel, VoidLabel, usize>::from_file(&path, None, Some(4)).unwrap();
         let want = brute_force(n, &arcs);
@@ -1152,9 +1167,10 @@ mod tests {
     /// small graphs, the same whatever the threads.
     #[test]
     fn kadabra_is_within_epsilon_and_deterministic() {
+        let (_guard, root) = fixtures();
         let n = 300;
         let edges = random_arcs(n, 900, 11);
-        let path = write_mtx("k", n, &edges, true);
+        let path = write_mtx(&root, "k", n, &edges, true);
         let mut results = vec![];
         for threads in [1, 3, 8] {
             let mut g = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
@@ -1191,6 +1207,7 @@ mod tests {
     /// long before every estimate is within `epsilon`.
     #[test]
     fn kadabra_top_k() {
+        let (_guard, root) = fixtures();
         let (clusters, size) = (4, 15);
         let hub = clusters * size;
         let mut edges = vec![];
@@ -1205,7 +1222,7 @@ mod tests {
             }
             edges.push((base, hub));
         }
-        let path = write_mtx("top", hub + 1, &edges, true);
+        let path = write_mtx(&root, "top", hub + 1, &edges, true);
         let mut g =
             GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, None, Some(4)).unwrap();
         let opts = BetweennessOptions {
@@ -1260,11 +1277,12 @@ mod tests {
 
     #[test]
     fn exact_by_blocks_matches_brute_force() {
+        let (_guard, root) = fixtures();
         use crate::centralities::exact::ExactBetweennessCentrality;
         for (seed, threads) in [(1, 1), (2, 4), (3, 3), (4, 8), (5, 2)] {
             let n = 90;
             let edges = sparse_edges(n, 12 + 4 * seed as usize, seed);
-            let path = write_mtx(&format!("blocks{seed}"), n, &edges, true);
+            let path = write_mtx(&root, &format!("blocks{seed}"), n, &edges, true);
             let mut g = GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(
                 &path,
                 None,
@@ -1290,12 +1308,13 @@ mod tests {
     /// directed one, each edge an arc each way) agree.
     #[test]
     fn exact_weighted_by_blocks_matches_whole_graph() {
+        let (_guard, root) = fixtures();
         use crate::centralities::exact::ExactBetweennessCentrality;
         for seed in 1..4 {
             let n = 70;
             let edges = sparse_edges(n, 25, seed);
             let mut rng = SampleRng::new(seed, 2);
-            let dir = unique_test_dir("betweenness");
+            let dir = root.join(format!("{seed}"));
             std::fs::create_dir_all(&dir).unwrap();
             let (sym, general) = (dir.join("w.mtx"), dir.join("wd.mtx"));
             let weighted: Vec<_> = edges
@@ -1337,10 +1356,11 @@ mod tests {
     /// Exact runs repeat bit for bit on as many threads (each thread's sources are fixed).
     #[test]
     fn exact_repeats_exactly() {
+        let (_guard, root) = fixtures();
         use crate::centralities::exact::ExactBetweennessCentrality;
         let n = 300;
         let edges = sparse_edges(n, 400, 9);
-        let path = write_mtx("repeat", n, &edges, true);
+        let path = write_mtx(&root, "repeat", n, &edges, true);
         let mut g =
             GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, None, Some(6)).unwrap();
         let mut runs = vec![];
@@ -1361,8 +1381,9 @@ mod tests {
     /// A failing run leaves no result file behind.
     #[test]
     fn failures_leave_no_result() {
+        let (_guard, root) = fixtures();
         use crate::centralities::exact::ExactBetweennessCentrality;
-        let dir = unique_test_dir("betweenness");
+        let dir = root.clone();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("zero.mtx");
         std::fs::write(
@@ -1393,7 +1414,8 @@ mod tests {
 
     #[test]
     fn invalid_options_fail() {
-        let path = write_mtx("bad", 3, &[(0, 1), (1, 2)], true);
+        let (_guard, root) = fixtures();
+        let path = write_mtx(&root, "bad", 3, &[(0, 1), (1, 2)], true);
         let mut g =
             GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, None, Some(1)).unwrap();
         for opts in [
