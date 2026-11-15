@@ -354,10 +354,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         // Thread syncronization
         let synchronize = Arc::new(Barrier::new(threads));
 
-        // each thread's sums: of its nodes' possible triangles (connected triples) and local
-        // coefficients, and of its edges' triangle counts --- added up once, in thread order (a
-        // shared atomic sum would have every thread contend for it at every node, and add up in a
-        // different order every run)
+        // each thread's sums: of its nodes' possible triangles (connected triples) and of its
+        // edges' triangle counts --- integers, so exact whatever the threads (a shared atomic sum
+        // would have every thread contend for it at every node). The local coefficients' sum is
+        // taken afterwards, in node order, so that the average is the same whatever the threads
         let sums = thread::scope(|scope| {
             let mut handles = Vec::with_capacity(threads);
             for tid in 0..threads {
@@ -369,11 +369,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                 let begin = std::cmp::min(tid * thread_load, node_count);
                 let end = std::cmp::min(begin + thread_load, node_count);
 
-                handles.push(scope.spawn(move |_| -> (f64, f64, usize) {
+                handles.push(scope.spawn(move |_| -> (f64, usize) {
                     // sum of the thread's edges' triangle counts
                     let mut total_triangles_t: usize = 0;
                     let mut possible_triangles_t = 0.;
-                    let mut clustering_sum_t = 0.;
 
                     for u in begin..end {
                         // distinct neighbours: lists are sorted, so parallel edges are adjacent
@@ -413,9 +412,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
                             0.
                         };
                         *local.get_mut(u) = local_conductivity;
-                        clustering_sum_t += local_conductivity;
                     }
-                    (possible_triangles_t, clustering_sum_t, total_triangles_t)
+                    (possible_triangles_t, total_triangles_t)
                 }));
             }
             handles
@@ -425,16 +423,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         })
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() })?;
-        let (mut triples, mut local_clustering_sum, mut total_triangles) = (0., 0., 0usize);
-        for (possible, clustering, triangles) in sums {
+        let (mut triples, mut total_triangles) = (0., 0usize);
+        for (possible, triangles) in sums {
             triples += possible;
-            local_clustering_sum += clustering;
             total_triangles += triangles;
         }
 
         // 0 on a graph without nodes, as the weighted and the directed averages
         self.local_average = if node_count > 0 {
-            local_clustering_sum / node_count as f64
+            self.local.as_slice()[..node_count].iter().sum::<f64>() / node_count as f64
         } else {
             0.
         };

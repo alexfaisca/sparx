@@ -363,6 +363,16 @@ pub(crate) mod test {
 
     /// Parses `edges` (0-based, undirected) as a symmetric MatrixMarket graph over `n` nodes.
     pub(crate) fn undirected_graph(name: &str, n: usize, edges: &[(usize, usize)]) -> TestGraph {
+        undirected_graph_with_threads(name, n, edges, 4)
+    }
+
+    /// [`undirected_graph`], its algorithms run on `threads` threads.
+    pub(crate) fn undirected_graph_with_threads(
+        name: &str,
+        n: usize,
+        edges: &[(usize, usize)],
+        threads: u8,
+    ) -> TestGraph {
         let dir = unique_test_dir("triangles_test");
         std::fs::create_dir_all(&dir).expect("error creating tmp dir");
         let path = dir.join(format!("{name}.mtx"));
@@ -376,7 +386,7 @@ pub(crate) mod test {
         let graph = GraphMemoryMap::from_file(
             &path,
             Some(format!("tri_{name}_{}", unique_run_tag())),
-            Some(4),
+            Some(threads),
         )
         .expect("graph parse should succeed");
         TestGraph::new(graph, Some(dir))

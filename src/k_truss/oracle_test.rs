@@ -470,3 +470,38 @@ fn clustering_of_the_empty_graph_is_zero() {
     let cc = ClusteringCoefficient::new(&w).unwrap();
     assert_eq!(cc.get_average_clustering_coefficient(), 0.);
 }
+
+/// Triangle counts match the brute force, and clustering coefficients (sums of floats, which
+/// threads could otherwise reorder) are the same bit for bit, whatever the number of threads.
+#[test]
+fn triangles_and_clustering_are_the_same_whatever_the_threads() {
+    use super::triangles::Triangles;
+    use portable_atomic::Ordering;
+    let edges = random_edges(600, 0.03, 11);
+    let mut reference: Option<(Vec<u64>, u64, u64)> = None;
+    for threads in [1, 3, 8, 16] {
+        let g = undirected_graph_with_threads(&format!("threads_{threads}"), 600, &edges, threads);
+        let mut t = Triangles::new(&g).unwrap();
+        let counts: Vec<usize> = t
+            .all_triangles()
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed) as usize)
+            .collect();
+        assert_eq!(counts, brute_force_triangles(&g), "{threads} threads");
+        t.drop_cache().unwrap();
+
+        let mut cc = ClusteringCoefficient::new(&g).unwrap();
+        let got = (
+            (0..g.size())
+                .map(|u| cc.get_node_clusteringcoefficient(u).to_bits())
+                .collect::<Vec<_>>(),
+            cc.get_average_clustering_coefficient().to_bits(),
+            cc.get_graph_transitivity().to_bits(),
+        );
+        cc.drop_cache().unwrap();
+        match &reference {
+            None => reference = Some(got),
+            Some(expected) => assert_eq!(&got, expected, "{threads} threads vs 1"),
+        }
+    }
+}
