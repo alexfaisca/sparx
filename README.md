@@ -787,7 +787,8 @@ A `DiGraph`'s transpose and underlying undirected graph are built once (in `O(|V
 next to it and dropped with it; a symmetric `DiGraph` is its own transpose, and its undirected
 graph is the same cache entry. They keep node ids, so per-node results computed on them are
 results of the graph. `to_undirected` keeps multiplicity: arcs both ways between two nodes become
-parallel edges, which triangle based algorithms count separately. `Graph::into_directed` and
+parallel edges, which triangle based algorithms count separately (but for the undirected clustering
+coefficients, which are the simple graph's). `Graph::into_directed` and
 `DiGraph::try_into_undirected` convert between the types.
 
 | Takes | Algorithms |

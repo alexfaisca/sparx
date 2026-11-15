@@ -6,6 +6,14 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 ### Fixed
 
+* Biconnectivity was wrong on graphs with as many nodes as their `Ix` can number (`Ix::MAX + 1`:
+  256 at `u8`), whose last node was taken for the search trees' "no parent" marker.
+* The unweighted clustering coefficients and transitivity of multigraphs counted triangles once
+  per combination of parallel edges, but possible ones once per pair of neighbours. They're now
+  the simple graph's (networkx's of `nx.Graph(multigraph)`). Results on graphs whose parallel
+  edges close no triangle, the bundled de Bruijn graphs among them, are unchanged.
+* `export_petgraph_stripped` and `export_rustworkx_stripped` return the error of a node whose
+  neighbours can't be read, rather than printing it and exporting the graph without its arcs.
 * A cache entry's metadata (`metadata()`, and its file) counted `|V| + 1` nodes (its offsets).
   Entries cached (and kept) before still show `|V| + 1`: the count is only written once.
 * The (unweighted, undirected) average clustering coefficient is the same whatever the number
@@ -17,6 +25,8 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
   `sweep_cut`) are documented as they work: the sweep stops past twice them, and only prefixes
   of conductance below 1 count (without one, the community is empty). `threads` is documented
   (at most 255, 1 by default). `DiGraph.numeric_assortativity` is over arcs, not edges each way.
+  Betweenness counts parallel arcs as different paths, unlike networkx (now said so), and
+  `DirectedClusteringCoefficient` counts them, unlike `ClusteringCoefficient`.
 * The benchmarking CLI reports the crate's version (was a fixed `0.1`), and its help describes
   `-f`'s input formats and `-e` correctly.
 * Documentation: the Python type stubs only accept `direction="both"` on `Graph.label_propagation`
@@ -32,7 +42,8 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 * Tests of the petgraph and rustworkx exports, of `GraphMemoryMap`'s shorthands (`k_core`,
   `k_truss`, `louvain`, ...), and of triangle counts, clustering coefficients, HyperBall,
   HK-Relax, components and exact centralities across thread counts; the README's GPU example is
-  compiled as a doctest. Betweenness tests remove their files even when they fail.
+  compiled as a doctest. Betweenness tests remove their files even when they fail. Exact
+  betweenness and KADABRA on multigraphs, clustering coefficients on the multigraph fixture.
 * Python tests of the bindings' untested options: sweep cut targets, `hkpr`'s
   `target_conductance`, `label_propagation`'s `max_iterations`, spectral options (including the
   Bethe Hessian embedding), `id`, `metadata` and the thread limit, and `Graph`'s weight parsing;
@@ -44,6 +55,8 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 * With the `bench` feature, `sparx::test_common` is gone: its one public helper is
   `sparx::graph::test_utils::get_or_init_dataset_exact_closeness`, alongside the tests' others.
+  It computes the values with `ExactClosenessCentrality` (the same, checked against the BFS
+  formula it used), and the exact harmonic and Lin values are written where it says they are.
   The unimplemented, unused `degree_dist_impl` is removed.
 
 ## 0.2.1 — 2026-11-13
