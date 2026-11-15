@@ -177,3 +177,71 @@ def test_a_single_arc():
         eq(g.betweenness(engine="exact")["betweenness"], [0.0, 0.0])
         eq(g.k_truss("cycle"), [2])
         eq(g.k_truss("feed_forward"), [2])
+
+
+@pytest.mark.parametrize("n", EDGELESS)
+@pytest.mark.parametrize("directed", BOTH)
+def test_edgeless_graphs_other_methods(n, directed):
+    with load(n, [], directed) as g:
+        # assortativity: no edges, no coefficient
+        assert math.isnan(g.numeric_assortativity(np.arange(n, dtype=float)))
+        assert math.isnan(g.attribute_assortativity(np.zeros(n, dtype=np.int64)))
+        if directed:
+            for kind in ("cycle", "feed_forward"):
+                eq(g.directed_triangles(kind), [])
+            with g.to_undirected() as u:
+                assert (u.num_nodes, u.num_edges) == (n, 0)
+        else:
+            # nothing to sweep, or no prefix of conductance below 1: the empty community
+            for nodes in ([], list(range(n))):
+                cut = g.sweep_cut(nodes, [1.0] * len(nodes))
+                assert (cut["size"], cut["conductance"]) == (0, 1.0)
+                eq(cut["nodes"], [])
+        if n == 0:
+            eq(g.shortest_paths([], []), [])
+            with pytest.raises(RuntimeError, match="eigenpairs"):
+                g.spectral_embedding(1)
+            with pytest.raises(RuntimeError, match="landmark"):
+                g.build_landmarks(2)
+            return
+        # every eigenvalue of an edgeless graph's (regularized) Laplacian is 1
+        e = g.spectral_embedding(1)
+        assert e["converged"]
+        eq(e["eigenvalues"], [1.0])
+        assert np.linalg.norm(e["vectors"][:, 0]) == pytest.approx(1.0)
+        # landmarks: at most one per node, distinct
+        marks = g.build_landmarks(2).tolist()
+        assert len(marks) == min(2, n) == len(set(marks)) and all(0 <= m < n for m in marks)
+        g.drop_landmarks()
+        paths = g.shortest_paths([0], [n - 1])
+        if n == 1:
+            assert paths[0]["distance"] == 0.0
+            eq(paths[0]["nodes"], [0])
+        else:
+            assert paths == [None]
+
+
+@pytest.mark.parametrize("directed", BOTH)
+def test_a_single_edge_other_methods(directed):
+    with load(2, [(0, 1)], directed) as g:
+        # one edge, its ends' values 0 and 1: perfectly disassortative undirected (each end seen
+        # from the other); one arc: no variance at either end
+        r = g.numeric_assortativity(np.array([0.0, 1.0]))
+        if directed:
+            assert math.isnan(r)
+            eq(g.directed_triangles("cycle"), [0])
+            with g.to_undirected() as u:
+                assert (u.num_nodes, u.num_edges) == (2, 2)
+        else:
+            assert r == pytest.approx(-1.0)
+        # one category: no coefficient
+        assert math.isnan(g.attribute_assortativity(np.zeros(2, dtype=np.int64)))
+        # the normalized Laplacian of one edge (regularized by the mean degree, 1): 1 -+ 1/2
+        e = g.spectral_embedding(1)
+        assert e["converged"]
+        assert e["eigenvalues"][0] == pytest.approx(0.5)
+        paths = g.shortest_paths([0], [1])
+        assert paths[0]["distance"] == 1.0
+        eq(paths[0]["nodes"], [0, 1])
+        assert sorted(g.build_landmarks(8).tolist()) == [0, 1]
+        g.drop_landmarks()
