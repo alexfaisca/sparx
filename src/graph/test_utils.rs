@@ -1,5 +1,5 @@
 use crate::{
-    centralities::exact::{ExactHarmonicCentrality, ExactLinCentrality},
+    centralities::exact::{ExactClosenessCentrality, ExactHarmonicCentrality, ExactLinCentrality},
     graph::{
         self, GraphMemoryMap,
         cache::{
@@ -11,10 +11,8 @@ use crate::{
         },
     },
     shared_slice::SharedSliceMut,
-    trails::bfs::BFSDists,
 };
 
-use crossbeam::thread;
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
 use std::path::{Path, PathBuf};
@@ -339,8 +337,9 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
     let e_fn = pers_cache_file_name(&graph.cache_fst_filename(), &value_type, None)?;
 
     // Get or create the per-key OnceLock
+    // (one entry per graph and value type)
     let test_entry = exact_value_cache()
-        .entry(cache_id.clone())
+        .entry(format!("{cache_id}_{value_type}"))
         .or_try_insert_with(|| -> Result<OnceCell<String>, Box<dyn std::error::Error>> {
             let lock = OnceCell::new();
             Ok(lock)
@@ -359,75 +358,37 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                 // return Err(format!("no entry {e_fn}").into());
                 eprintln!("built exact vals for {:?}", graph_path);
                 eprintln!("built in {:?} {e_fn}", exact_value_dir());
-                match value_type {
+                // computed by the library's implementations (checked against networkx's), then
+                // copied to `e_fn`, the path returned, and their own cache files dropped
+                let values: Vec<f64> = match value_type {
                     FileType::ExactClosenessCentrality(H::H) => {
                         println!("compute closeness centrality");
-                        let node_count = graph.size();
-                        let e = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, node_count, true)?;
-                        thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-                            let mut handles = vec![];
-                            let node_load = node_count.div_ceil(50);
-                            for tid in 0..50 {
-                                let graph = graph.clone();
-                                let mut e = e.shared_slice();
-                                let begin = (node_load * tid).min(node_count);
-                                let end = (begin + node_load).min(node_count);
-                                handles.push(scope.spawn(
-                                    move |_| -> Result<
-                                        (),
-                                        Box<dyn std::error::Error + Send + Sync>,
-                                    > {
-                                        for u in begin..end {
-                                            if u % 1000 == 0 {
-                                                println!("reached {u} of {node_count}");
-                                            }
-                                            let bfs = BFSDists::new_t(&graph, u, tid).map_err(
-                                                |e| -> Box<dyn std::error::Error + Send + Sync> {
-                                                    format!("error in BFS for {u}: {:?}", e).into()
-                                                },
-                                            )?;
-                                            if bfs.reachable() <= 1 || bfs.total_distances() == 0. {
-                                                println!("found isolated node at {u}");
-                                                *e.get_mut(u) = 0.0;
-                                            } else {
-                                                // reachable nodes other than `u` itself, as in
-                                                // `ExactClosenessCentrality` and *HyperBall*
-                                                *e.get_mut(u) = (bfs.reachable() - 1) as f64
-                                                    / bfs.total_distances();
-                                            }
-                                        }
-                                        Ok(())
-                                    },
-                                ));
-                            }
-                            // check for errors
-                            for (tid, r) in handles.into_iter().enumerate() {
-                                r.join()
-                                    .map_err(|e| -> Box<dyn std::error::Error> {
-                                        format!("error in thread {tid}: {:?}", e).into()
-                                    })?
-                                    .map_err(|e| -> Box<dyn std::error::Error> {
-                                        format!("error: {:?}", e).into()
-                                    })?;
-                            }
-                            Ok(())
-                        })
-                        .map_err(
-                            |e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() },
-                        )??;
-                        // (written to `e_fn` here, where the values are expected, rather than
-                        // to `ExactClosenessCentrality`'s own cache file)
+                        let mut c =
+                            ExactClosenessCentrality::<_, _, _, f64>::new(graph, Some(true))?;
+                        let values = c.centralities().to_vec();
+                        c.drop_cache()?;
+                        values
                     }
                     FileType::ExactHarmonicCentrality(H::H) => {
                         println!("compute harmonic centrality");
-                        ExactHarmonicCentrality::<_, _, _, f64>::new(graph, Some(true))?;
+                        let mut c =
+                            ExactHarmonicCentrality::<_, _, _, f64>::new(graph, Some(true))?;
+                        let values = c.centralities().to_vec();
+                        c.drop_cache()?;
+                        values
                     }
                     FileType::ExactLinCentrality(H::H) => {
                         println!("compute lin's centrality");
-                        ExactLinCentrality::<_, _, _, f64>::new(graph)?;
+                        let mut c = ExactLinCentrality::<_, _, _, f64>::new(graph)?;
+                        let values = c.centralities().to_vec();
+                        c.drop_cache()?;
+                        values
                     }
-                    _ => {}
+                    _ => unreachable!("value types are checked above"),
                 };
+                let mut e = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, values.len(), true)?;
+                e.as_mut_slice().copy_from_slice(&values);
+                e.flush()?;
                 Ok(e_fn)
             }
         })
@@ -496,3 +457,62 @@ pub static DATASETS: &[(&str, &str)] = &[
     // ("kmer_A2a", "../proteic_dbgs/2/kmer_A2a/kmer_A2a.mtx"),
     // ("kmer_V1r", "../proteic_dbgs/3/kmer_V1r/kmer_V1r.mtx"),
 ];
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::k_truss::triangles::test::{random_edges, undirected_graph};
+
+    /// Each value type's file, at the path returned, holds the library's values (bit for bit),
+    /// and each type gets its own file, also after another type was asked for the same graph.
+    #[test]
+    fn exact_values_are_written_where_they_are_returned() {
+        let g = undirected_graph("exact_values", 120, &random_edges(120, 0.04, 5));
+        // (only its name matters: it keys the values kept in memory)
+        let dataset = PathBuf::from(format!("exact_values_{}.mtx", unique_run_tag()));
+        let read = |path: &str| -> Vec<u64> {
+            std::fs::read(path)
+                .unwrap()
+                .chunks_exact(8)
+                .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+                .collect()
+        };
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let mut paths = vec![];
+        for (value_type, expected) in [
+            (
+                FileType::ExactClosenessCentrality(H::H),
+                ExactClosenessCentrality::<_, _, _, f64>::new(&*g, Some(true))
+                    .unwrap()
+                    .centralities()
+                    .to_vec(),
+            ),
+            (
+                FileType::ExactHarmonicCentrality(H::H),
+                ExactHarmonicCentrality::<_, _, _, f64>::new(&*g, Some(true))
+                    .unwrap()
+                    .centralities()
+                    .to_vec(),
+            ),
+            (
+                FileType::ExactLinCentrality(H::H),
+                ExactLinCentrality::<_, _, _, f64>::new(&*g)
+                    .unwrap()
+                    .centralities()
+                    .to_vec(),
+            ),
+        ] {
+            let path = get_or_init_dataset_exact_value(&dataset, &g, value_type.clone()).unwrap();
+            assert_eq!(read(&path), bits(&expected), "{value_type}");
+            // asked again: the same file, not computed again
+            assert_eq!(
+                get_or_init_dataset_exact_value(&dataset, &g, value_type.clone()).unwrap(),
+                path
+            );
+            paths.push(path);
+        }
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 3, "each value type has its own file");
+    }
+}
