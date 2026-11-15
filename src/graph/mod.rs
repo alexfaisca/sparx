@@ -7,7 +7,6 @@ mod edge_weight;
 mod export_induced_subgraph;
 mod impl_algos;
 mod impl_csc;
-mod impl_dists;
 mod impl_miscelanious;
 mod impl_partition;
 pub(crate) mod impl_traits;

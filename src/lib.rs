@@ -11,9 +11,6 @@ pub mod shared_slice;
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
 
-#[cfg(any(test, feature = "bench"))]
-pub mod test_common;
-
 #[cfg(test)]
 mod cross_ix_sweep_test;
 

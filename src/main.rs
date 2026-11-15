@@ -674,8 +674,8 @@ fn hyperball_profile<N: graph::N, E: graph::E, Ix: graph::IndexType, P: AsRef<Pa
     // This assumes UTF-8 but avoids full conversion
 
     use sparx::{
-        shared_slice::AbstractedProceduralMemory, test_common::get_or_init_dataset_exact_closeness,
-        utils,
+        graph::test_utils::get_or_init_dataset_exact_closeness,
+        shared_slice::AbstractedProceduralMemory, utils,
     };
     let time = Instant::now();
     let graph_mmaped = ScratchGraph(GraphMemoryMap::<N, E, Ix>::from_file(

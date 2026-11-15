@@ -1,5 +1,5 @@
 use crate::{
-    centralities::exact::{ExactClosenessCentrality, ExactHarmonicCentrality, ExactLinCentrality},
+    centralities::exact::{ExactHarmonicCentrality, ExactLinCentrality},
     graph::{
         self, GraphMemoryMap,
         cache::{
@@ -10,8 +10,11 @@ use crate::{
             },
         },
     },
+    shared_slice::SharedSliceMut,
+    trails::bfs::BFSDists,
 };
 
+use crossbeam::thread;
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
 use std::path::{Path, PathBuf};
@@ -305,6 +308,15 @@ pub(crate) fn get_or_init_dataset_cache_entry(
     Ok(cache.clone())
 }
 
+/// The path of `graph_path`'s exact closeness centralities, computed once (and kept across runs).
+#[cfg(feature = "bench")]
+pub fn get_or_init_dataset_exact_closeness<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    graph_path: &Path,
+    graph: &GraphMemoryMap<N, E, Ix>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    get_or_init_dataset_exact_value(graph_path, graph, FileType::ExactClosenessCentrality(H::H))
+}
+
 #[allow(dead_code)]
 pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: graph::IndexType>(
     graph_path: &Path,
@@ -350,7 +362,61 @@ pub(crate) fn get_or_init_dataset_exact_value<N: graph::N, E: graph::E, Ix: grap
                 match value_type {
                     FileType::ExactClosenessCentrality(H::H) => {
                         println!("compute closeness centrality");
-                        ExactClosenessCentrality::<_, _, _, f64>::new(graph, Some(true))?;
+                        let node_count = graph.size();
+                        let e = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, node_count, true)?;
+                        thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+                            let mut handles = vec![];
+                            let node_load = node_count.div_ceil(50);
+                            for tid in 0..50 {
+                                let graph = graph.clone();
+                                let mut e = e.shared_slice();
+                                let begin = (node_load * tid).min(node_count);
+                                let end = (begin + node_load).min(node_count);
+                                handles.push(scope.spawn(
+                                    move |_| -> Result<
+                                        (),
+                                        Box<dyn std::error::Error + Send + Sync>,
+                                    > {
+                                        for u in begin..end {
+                                            if u % 1000 == 0 {
+                                                println!("reached {u} of {node_count}");
+                                            }
+                                            let bfs = BFSDists::new_t(&graph, u, tid).map_err(
+                                                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                                                    format!("error in BFS for {u}: {:?}", e).into()
+                                                },
+                                            )?;
+                                            if bfs.reachable() <= 1 || bfs.total_distances() == 0. {
+                                                println!("found isolated node at {u}");
+                                                *e.get_mut(u) = 0.0;
+                                            } else {
+                                                // reachable nodes other than `u` itself, as in
+                                                // `ExactClosenessCentrality` and *HyperBall*
+                                                *e.get_mut(u) = (bfs.reachable() - 1) as f64
+                                                    / bfs.total_distances();
+                                            }
+                                        }
+                                        Ok(())
+                                    },
+                                ));
+                            }
+                            // check for errors
+                            for (tid, r) in handles.into_iter().enumerate() {
+                                r.join()
+                                    .map_err(|e| -> Box<dyn std::error::Error> {
+                                        format!("error in thread {tid}: {:?}", e).into()
+                                    })?
+                                    .map_err(|e| -> Box<dyn std::error::Error> {
+                                        format!("error: {:?}", e).into()
+                                    })?;
+                            }
+                            Ok(())
+                        })
+                        .map_err(
+                            |e| -> Box<dyn std::error::Error> { format!("{:?}", e).into() },
+                        )??;
+                        // (written to `e_fn` here, where the values are expected, rather than
+                        // to `ExactClosenessCentrality`'s own cache file)
                     }
                     FileType::ExactHarmonicCentrality(H::H) => {
                         println!("compute harmonic centrality");
