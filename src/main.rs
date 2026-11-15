@@ -53,7 +53,7 @@ impl<N: graph::N, E: graph::E, Ix: graph::IndexType> Drop for ScratchGraph<N, E,
 #[derive(Parser)]
 #[command(
     name = "'SparX'",
-    version = "0.1",
+    version,
     long_about = "Very pretentious name, for a library so small. I know... ('~')\n The contents of this crate should be a good start for a solid tool though. :)"
 )]
 struct ProgramArgs {
@@ -83,11 +83,11 @@ struct ProgramArgs {
     #[arg(short, long)]
     output_id: Option<String>,
 
-    /// Required — input file (.txt, .lz4, .mmap are accepted)
+    /// Required — input file (`.mtx`, GGCAT `.lz4` or nodes/edges files)
     #[arg(short, long, required = true)]
     file: String,
 
-    /// Executes a given cache profiling target flow.
+    /// Executes a given wall-time benchmark profile (feature `bench`).
     #[arg(short)]
     error_target: Option<u64>,
 
@@ -107,7 +107,7 @@ fn main() {
     unsafe { std::env::set_var("BRUIJNX_VERBOSE", if args.verbose { "1" } else { "0" }) };
 
     if BITS < BITS_U64 {
-        panic!("error program can't operate on 64-bit systems");
+        panic!("error program only operates on 64-bit systems");
     }
 
     #[cfg(feature = "bench")]

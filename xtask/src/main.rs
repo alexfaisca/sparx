@@ -25,7 +25,7 @@ enum Cmd {
         /// Dataset name (used by your builder)
         #[arg(long, default_value = "default")]
         dataset: String,
-        /// Extra args passed to your binary
+        /// Cache profiling target flow, passed to the binary's `-c`
         #[arg(short)]
         target: usize,
         /// Extra args passed to your binary
