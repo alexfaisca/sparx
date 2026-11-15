@@ -1030,7 +1030,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 /// Its results are the same every run on as many threads, and may differ in their last bits with
 /// the number of threads (each thread's sources' sums are added separately). Each thread maps
 /// memory for its searches and sums (about 40 bytes per node of the largest component searched,
-/// and 8 per node); threads are capped to what half the available memory holds. For estimates on graphs too large for `O(|V| |E|)`, see
+/// and 8 per node); threads are capped to what half the available memory holds (to one, when how
+/// much is available is unknown). For estimates on graphs too large for `O(|V| |E|)`, see
 /// [`Betweenness`](super::betweenness::Betweenness)'s KADABRA engine.
 ///
 /// [`Biconnectivity`]: ../../components/biconnected/struct.Biconnectivity.html
@@ -1361,11 +1362,11 @@ fn brandes_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedn
     // sums, and so the results, are the same every run on as many threads
     const CHUNK: usize = 16;
     // each thread's memory: its search's nodes' states and order (`largest` of each), and its
-    // sums (`total`); as many threads as half the available memory holds, at most
+    // sums (`total`); as many threads as half the available memory holds, at most (a single
+    // one when how much is available is unknown: many might not fit)
     let per_thread = (std::mem::size_of::<Slot>() + 4) * largest + 8 * total;
-    let affordable = sys_info::mem_info()
-        .map(|m| (m.avail as usize * 1024 / 2 / per_thread.max(1)).max(1))
-        .unwrap_or(usize::MAX);
+    let affordable = crate::shared_slice::available_memory()
+        .map_or(1, |available| (available / 2 / per_thread.max(1)).max(1));
     let threads = threads.min(affordable).min(total.div_ceil(CHUNK)).max(1);
     let chunks = total.div_ceil(CHUNK);
     // each thread's nodes' states, visit order and sums
