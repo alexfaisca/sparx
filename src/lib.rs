@@ -17,6 +17,9 @@ mod cross_ix_sweep_test;
 #[cfg(test)]
 mod directed_algorithms_test;
 
+#[cfg(test)]
+mod thread_determinism_test;
+
 pub mod assortativity;
 pub mod centralities;
 pub mod communities;
