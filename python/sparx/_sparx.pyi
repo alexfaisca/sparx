@@ -168,7 +168,7 @@ class Graph:
         max_iterations: int = 40,
         tolerance: float = 0.05,
         exploration: Union[int, Literal["auto"]] = 20,
-        direction: Literal["both", "in", "out"] = "both",
+        direction: Literal["both"] = "both",
         engine: Literal["semi-synchronous", "asynchronous"] = "semi-synchronous",
     ) -> LabelPropagation: ...
     def betweenness(

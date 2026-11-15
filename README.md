@@ -1231,7 +1231,7 @@ python3 scripts/plot/plot_bench.py results/bench/bench.csv         # these figur
 
 ## Python
 
-The [`python/`](python/) bindings (PyO3) expose a `sparx.Graph` whose algorithms run with the GIL
+The [`python/`](python/) bindings (PyO3) expose `sparx.Graph` and `sparx.DiGraph`, whose algorithms run with the GIL
 released and return `numpy` arrays --- see [`python/README.md`](python/README.md).
 
 ```python
@@ -1240,8 +1240,10 @@ import sparx
 with sparx.Graph("./datasets/graphs/kmer_V2a.mtx", index="u32") as g:
     coreness = g.k_core(width="u16")
     trussness = g.k_truss(algorithm="pkt", width="u16")
-    cycle_trusses = g.k_truss(kind="cycle")
     closeness = g.hyperball(precision=8)["closeness"]
+
+with sparx.DiGraph("./datasets/graphs/kmer_V2a.mtx", index="u32") as d:
+    cycle_trusses = d.k_truss(kind="cycle")
 ```
 
 ```sh

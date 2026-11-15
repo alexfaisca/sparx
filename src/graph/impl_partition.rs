@@ -280,24 +280,16 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         Ok(isolated_nodes_comm.load(Ordering::Relaxed) + 1)
     }
 
-    /// Performs a sweep cut over a given diffusion vector[^1] by partition conductance.
-    ///
-    /// # Arguments
-    ///
-    /// * `diffusion` --- the diffusion vector[^1][^2].
-    /// * `target_size` --- the partition's target size[^3].
-    /// * `target_volume` --- the partition's target volume[^4].
-    ///
-    /// [^1]: diffusion vector entries must be of type (node_id: [`usize`], heat: [`f64`]).
-    /// [^2]: entries must be descendingly ordered by diffusion.
-    /// [^3]: if [`None`] is provided defaults to `|V|`, effectively, the overall best partition by conducatance is returned independent on the number of nodes in it.
-    /// [^4]: if [`None`] is provided defaults to `|E|`, effectively, the overall best partition by conducatance is returned independent on the number of edges in it.
     /// The sweep cut of a diffusion vector: its nodes, by decreasing diffusion, added one by one
     /// to a set `S`, the best prefix by conductance `ϕ(S) = cut(S) / min(vol(S), vol(V \ S))`.
     /// Weighted edges (see [`E::is_weighted`](crate::graph::E::is_weighted)) count their weight
     /// in cuts and volumes (and must be finite, non-negative, and symmetric: each edge's weight
-    /// the same both ways); unweighted ones count one each. The sweep stops once `S` holds twice
-    /// `target_size` nodes or twice `target_volume` arcs.
+    /// the same both ways); unweighted ones count one each. The sweep stops once `S` holds more
+    /// than twice `target_size` nodes or twice `target_volume` arcs (by default, `|V|` and the
+    /// graph's arcs: no limit). Only prefixes of conductance below 1 count (a single node's, or
+    /// any set without an edge inside, is 1): without one, the community is empty, of
+    /// conductance 1. `diffusion`'s entries are `(node, heat)`, in any order (it's
+    /// sorted here).
     pub(super) fn sweep_cut_over_diffusion_vector_by_conductance(
         &self,
         diffusion: &mut [(usize, f64)],

@@ -1556,7 +1556,8 @@ macro_rules! graph_class {
             /// Builds a graph from a dataset (`.mtx`, `.lz4` ggcat graph, or nodes/edges files).
             ///
             /// `index` is the width of node and edge indices (`"u32"` halves memory traffic for
-            /// graphs with under 4 billion nodes and edges). The graph's cache is dropped when it
+            /// graphs with under 4 billion nodes and edges). `threads` is how many threads its
+            /// algorithms run on, at most 255 (1 by default). The graph's cache is dropped when it
             /// is closed (or garbage collected), unless `keep_cache` is true: then
             /// `open(graph.cache_file)` reopens it later without parsing the dataset again.
             ///
@@ -1958,8 +1959,10 @@ macro_rules! graph_class {
             /// estimates it by KADABRA's adaptive sampling, every node within `epsilon` (as a
             /// fraction of ordered pairs; `epsilon * n / (n - 2)` normalized) with probability
             /// `1 - delta`, or, with `k`, until the `k` most central nodes (`"top"`) are told
-            /// apart; `"auto"` (the default) is exact when `|V| |E| <= 1e10`. The same whatever
-            /// the threads (KADABRA, seeded by `seed`); weights must be positive.
+            /// apart; `"auto"` (the default) is exact when `|V| |E| <= 1e10`. KADABRA's estimates
+            /// (seeded by `seed`) are the same whatever the threads; exact values are the same
+            /// every run on as many threads, but may differ in their last bits with the number
+            /// of threads. Weights must be positive.
             #[pyo3(signature = (*, engine = "auto", epsilon = 0.01, delta = 0.1, k = None, normalized = true, seed = 0x5eed))]
             #[allow(clippy::too_many_arguments)]
             fn betweenness<'py>(
@@ -2446,8 +2449,9 @@ graph_class!(UGraph, "Graph", {
     }
 
     /// A local community around `seeds`, by HK-Relax (Kloster and Gleich's heat kernel
-    /// diffusion, at temperature `t` and to error `eps`, then a sweep cut by conductance, up to
-    /// `target_size` nodes and `target_volume` volume, when given): `{"nodes" (by descending
+    /// diffusion, at temperature `t` and to error `eps`, then a sweep cut by conductance, which
+    /// stops once its set holds more than twice `target_size` nodes or twice `target_volume`
+    /// arcs, when given): `{"nodes" (by descending
     /// diffusion), "heat", "size", "volume", "width", "conductance"}`. Weighted graphs diffuse by
     /// their weights.
     #[pyo3(signature = (seeds, *, t = 10.0, eps = 1e-4, target_size = None, target_volume = None))]
@@ -2473,7 +2477,9 @@ graph_class!(UGraph, "Graph", {
 
     /// A local community around `seed`, by Chung and Simpson's approximate Dirichlet heat
     /// kernel PageRank (random walks, to error `eps`, their temperature set by the targets),
-    /// then a sweep cut by conductance: the same dict as `hk_relax`. `random_seed` seeds the
+    /// then a sweep cut by conductance, which stops once its set holds more than twice
+    /// `target_size` nodes (half the graph's, by default) or twice `target_volume` arcs (a
+    /// quarter of them): the same dict as `hk_relax`. `random_seed` seeds the
     /// walks (the same seed, the same community).
     #[pyo3(signature = (seed, *, eps = 0.1, target_size = None, target_volume = None, target_conductance = 0.1, random_seed = 0x5eed))]
     #[allow(clippy::too_many_arguments)]
@@ -2500,8 +2506,9 @@ graph_class!(UGraph, "Graph", {
     }
 
     /// The best community by conductance among the prefixes of `nodes` sorted by descending
-    /// `heat` (any diffusion's values), up to `target_size` nodes and `target_volume` volume,
-    /// when given: the same dict as `hk_relax`.
+    /// `heat` (any diffusion's values), the sweep stopping once its set holds more than twice
+    /// `target_size` nodes or twice `target_volume` arcs, when given: the same dict as
+    /// `hk_relax`.
     #[pyo3(signature = (nodes, heat, *, target_size = None, target_volume = None))]
     fn sweep_cut<'py>(
         &self,
@@ -2773,8 +2780,8 @@ graph_class!(DGraph, "DiGraph", {
     }
 
     /// Numeric assortativity: Pearson's correlation of `values[u]` and `values[v]` over every
-    /// edge (each way), networkx's `numeric_assortativity_coefficient`. `values` holds a number
-    /// per node.
+    /// arc `u -> v` (once), networkx's `numeric_assortativity_coefficient` on a `DiGraph`.
+    /// `values` holds a number per node.
     fn numeric_assortativity<'py>(
         &self,
         py: Python<'py>,
@@ -2855,7 +2862,7 @@ graph_class!(DGraph, "DiGraph", {
     ///
     /// On a weighted graph, `merge` (`"sum"`, `"min"` or `"max"`) is how the arcs merged into one
     /// edge (`"collapse"` and `"mutual"`: every arc between two nodes, both ways) are weighed:
-    /// the edge weighs the same from both ends. `"sum"` overflowing integer weights fails.
+    /// the edge weighs the same from both ends.
     #[pyo3(signature = (*, mode = "collapse", merge = "sum"))]
     fn to_undirected(&self, py: Python<'_>, mode: &str, merge: &str) -> PyResult<UGraph> {
         let mode = undirected_mode(mode)?;

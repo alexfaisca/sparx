@@ -39,7 +39,7 @@ with sparx.Graph("graph.mtx", index="u32") as g:  # undirected
     g.attribute_assortativity(labels)          # an integer category per node
 
     lpa = g.label_propagation()                # {"communities", "count", "modularity", ...}
-    sc = g.spectral_clustering(16)             # 16 clusters (engine="exact", k=None: chosen)
+    sc = g.spectral_clustering(16)             # 16 clusters (engine="exact", k=None, max_k <= 512: chosen)
     emb = g.spectral_embedding(8)              # {"eigenvalues", "vectors", "residuals", ...}
     q = g.modularity(lpa["communities"])       # of any partition
     local = g.hk_relax([0])                    # a local community: {"nodes", "conductance", ...}
@@ -70,6 +70,8 @@ with sparx.DiGraph("web.mtx") as d:            # directed
     trussness = u.k_truss()
 ```
 
+* Algorithms run on the graph's `threads` (`sparx.Graph(path, threads=8)`): 1 by default, at
+  most 255.
 * `sparx.Graph` is undirected: loading a directed dataset (one with an arc `u -> v` without a
   reverse `v -> u`) raises `RuntimeError`. `sparx.DiGraph` loads any dataset; `is_symmetric`
   tells whether its arcs all have reverses.
@@ -103,8 +105,8 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   distances, networkx's `distance="weight"`; with `direction="both"`, two nodes are as far
   apart as their lightest arc). `dijkstra(source)` gives weighted distances (`inf` where
   unreachable; hop counts on unweighted graphs), while `bfs` always counts hops. Weights must be
-  finite and non-negative, and a `DiGraph`'s Louvain needs integer weights (it compares gains
-  exactly). HyperBall (it counts hops), k-cores, k-trusses and components ignore weights.
+  finite and non-negative, and a `DiGraph`'s Louvain needs whole-number weights (`3.0`, not
+  `2.5`: it compares gains exactly, in integers). HyperBall (it counts hops), k-cores, k-trusses and components ignore weights.
 * Shortest paths: `dijkstra(source, engine=..., predecessors=False)` runs Dijkstra's algorithm
   (`"sequential"`) or Δ-stepping on the graph's threads (`"delta"`, `delta=` its bucket width;
   `"auto"` picks it on large graphs), with the same distances bit for bit. With
@@ -149,7 +151,7 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   filters random signals by a low-pass graph filter; `engine="exact"` finds the eigenvectors
   themselves (Chebyshev-filtered subspace iteration, with locking; `"eigenvalues"` and
   `"converged"` in the dict), and with `k=None` chooses `k` by the largest eigengap among
-  `max_k`. `matrix="laplacian"` (the default, regularized by the mean degree; any graph) or
+  `max_k` (which must then be lowered to at most 512 from its default, 4096). `matrix="laplacian"` (the default, regularized by the mean degree; any graph) or
   `"bethe"` (the Bethe Hessian: unweighted graphs, weaker clusters). A `DiGraph` is clustered by
   its symmetrization (`A + A^T`). `spectral_embedding(count)` returns the eigenpairs themselves:
   `{"eigenvalues", "vectors" (n × count), "residuals", "iterations", "converged"}`. On planted
@@ -160,8 +162,9 @@ with sparx.DiGraph("web.mtx") as d:            # directed
   adaptive sampling (`engine="kadabra"`): every node within `epsilon` (a fraction of ordered
   pairs: `epsilon * n / (n - 2)` normalized) with probability `1 - delta`, or, with `k`, until
   the `k` most central nodes (`"top"`) are told apart, which takes far fewer samples. `"auto"`
-  (the default) is exact when `|V| |E| <= 1e10`. Results are the same whatever the threads
-  (`seed` seeds KADABRA); weights must be positive.
+  (the default) is exact when `|V| |E| <= 1e10`. KADABRA's results are the same whatever the
+  threads (`seed` seeds it); exact ones are the same every run on as many threads, but may
+  differ in their last bits with the number of threads. Weights must be positive.
 * `louvain()` and `leiden()` communities are connected: any community Louvain leaves
   internally disconnected is split into its parts, which only raises modularity. `leiden()`
   refines each pass's communities into connected sub-communities before aggregating them
