@@ -60,23 +60,15 @@ impl<
         (0..node_count).for_each(|_| {
             graph.add_node(());
         });
-        (0..node_count)
-            .filter_map(|u| match self.neighbours(u) {
-                Ok(neighbours_of_u) => Some((u, neighbours_of_u)),
-                Err(e) => {
-                    eprint!("error getting neihghbours of {u} (proceeding anyways): {e}");
-                    None
-                }
-            })
-            .for_each(|(u, u_n)| {
-                u_n.for_each(|v| {
-                    graph.add_edge(
-                        petgraph::graph::NodeIndex::new(u),
-                        petgraph::graph::NodeIndex::new(v),
-                        (),
-                    );
-                });
-            });
+        for u in 0..node_count {
+            for v in self.neighbours(u)? {
+                graph.add_edge(
+                    petgraph::graph::NodeIndex::new(u),
+                    petgraph::graph::NodeIndex::new(v),
+                    (),
+                );
+            }
+        }
 
         Ok(graph)
     }

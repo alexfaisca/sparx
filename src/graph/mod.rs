@@ -5156,6 +5156,95 @@ mod test {
         assert_eq!(files_of(&other), other_files);
     }
 
+    /// An undirected triangle (0, 1, 2) with a pendant edge (2, 3).
+    #[cfg(any(feature = "petgraph", feature = "rustworkx"))]
+    fn build_undirected_export_graph()
+    -> crate::graph::test_utils::TestGraph<VoidLabel, VoidLabel, usize, crate::graph::Undirected>
+    {
+        let dir = unique_test_dir("export_test");
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let path = dir.join("triangle.mtx");
+        std::fs::write(
+            &path,
+            "%%MatrixMarket matrix coordinate pattern symmetric\n4 4 4\n2 1\n3 1\n3 2\n4 3\n",
+        )
+        .expect("error writing mtx fixture");
+        let cache = GraphCache::<VoidLabel, VoidLabel, usize>::from_file(&path, None, None, None)
+            .expect("parse should succeed");
+        let graph =
+            crate::graph::Graph::init_from_cache(cache, Some(1)).expect("load should succeed");
+        std::fs::remove_dir_all(&dir).ok();
+        crate::graph::test_utils::TestGraph::new(graph, None)
+    }
+
+    /// The arcs of `build_degree_test_graph`'s file (0-based), and of
+    /// `build_undirected_export_graph`'s (each edge both ways), as the exports must reproduce
+    /// them: one edge per stored arc.
+    #[cfg(any(feature = "petgraph", feature = "rustworkx"))]
+    const DIRECTED_EXPORT_ARCS: [(usize, usize); 7] =
+        [(0, 1), (0, 2), (0, 3), (1, 2), (3, 0), (5, 0), (5, 1)];
+    #[cfg(any(feature = "petgraph", feature = "rustworkx"))]
+    const UNDIRECTED_EXPORT_ARCS: [(usize, usize); 8] = [
+        (0, 1),
+        (1, 0),
+        (0, 2),
+        (2, 0),
+        (1, 2),
+        (2, 1),
+        (2, 3),
+        (3, 2),
+    ];
+
+    #[cfg(any(feature = "petgraph", feature = "rustworkx"))]
+    fn sorted(mut arcs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+        arcs.sort_unstable();
+        arcs
+    }
+
+    #[cfg(feature = "petgraph")]
+    #[test]
+    fn petgraph_export_reproduces_every_arc() {
+        fn arcs(g: &petgraph::graph::DiGraph<(), ()>) -> Vec<(usize, usize)> {
+            sorted(
+                g.raw_edges()
+                    .iter()
+                    .map(|e| (e.source().index(), e.target().index()))
+                    .collect(),
+            )
+        }
+        let directed = build_degree_test_graph();
+        let exported = directed.export_petgraph_stripped().unwrap();
+        assert_eq!(exported.node_count(), 6);
+        assert_eq!(arcs(&exported), sorted(DIRECTED_EXPORT_ARCS.to_vec()));
+
+        let undirected = build_undirected_export_graph();
+        let exported = undirected.export_petgraph_stripped().unwrap();
+        assert_eq!(exported.node_count(), 4);
+        assert_eq!(arcs(&exported), sorted(UNDIRECTED_EXPORT_ARCS.to_vec()));
+    }
+
+    #[cfg(feature = "rustworkx")]
+    #[test]
+    fn rustworkx_export_reproduces_every_arc() {
+        fn arcs(g: &rustworkx_core::petgraph::graph::DiGraph<(), ()>) -> Vec<(usize, usize)> {
+            sorted(
+                g.raw_edges()
+                    .iter()
+                    .map(|e| (e.source().index(), e.target().index()))
+                    .collect(),
+            )
+        }
+        let directed = build_degree_test_graph();
+        let exported = directed.export_rustworkx_stripped().unwrap();
+        assert_eq!(exported.node_count(), 6);
+        assert_eq!(arcs(&exported), sorted(DIRECTED_EXPORT_ARCS.to_vec()));
+
+        let undirected = build_undirected_export_graph();
+        let exported = undirected.export_rustworkx_stripped().unwrap();
+        assert_eq!(exported.node_count(), 4);
+        assert_eq!(arcs(&exported), sorted(UNDIRECTED_EXPORT_ARCS.to_vec()));
+    }
+
     /// The metadata counts the graph's nodes and arcs (not its `|V| + 1` offsets).
     #[test]
     fn metadata_counts_nodes_and_arcs() {
