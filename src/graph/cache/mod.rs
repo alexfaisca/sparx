@@ -1495,7 +1495,9 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         symmetric: bool,
     ) -> Result<CacheMetadata, Box<dyn std::error::Error>> {
         let edges = self.neighbors_file.metadata()?.len() as usize / size_of::<Ix>();
-        let nodes = self.offsets_file.metadata()?.len() as usize / size_of::<Ix>();
+        // `|V| + 1` offsets
+        let nodes =
+            (self.offsets_file.metadata()?.len() as usize / size_of::<Ix>()).saturating_sub(1);
         let dataset_str =
             dataset
                 .as_ref()

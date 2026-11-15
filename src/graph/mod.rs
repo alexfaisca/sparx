@@ -5155,4 +5155,13 @@ mod test {
         assert!(files.iter().all(|f| !f.exists()), "left behind: {files:?}");
         assert_eq!(files_of(&other), other_files);
     }
+
+    /// The metadata counts the graph's nodes and arcs (not its `|V| + 1` offsets).
+    #[test]
+    fn metadata_counts_nodes_and_arcs() {
+        let graph = build_degree_test_graph();
+        let meta = graph.metadata().unwrap();
+        assert_eq!((meta.nodes, meta.edges), (6, 7));
+        assert_eq!((meta.nodes, meta.edges), (graph.size(), graph.width()));
+    }
 }
