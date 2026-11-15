@@ -383,8 +383,7 @@ fn verifier_rejects_wrong_trussness() {
 #[test]
 fn gpu_triangles_at_every_count_width() {
     use crate::gpu::GpuBackend;
-    let Ok(backend) = crate::gpu::WgpuBackend::new() else {
-        eprintln!("skipping GPU test, no GPU adapter");
+    let Some(backend) = crate::gpu::test_backend() else {
         return;
     };
     let mut edges = vec![];

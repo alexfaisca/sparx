@@ -209,7 +209,7 @@ fn k_truss_support_range() {
         "unexpected error: {error}"
     );
     #[cfg(feature = "gpu")]
-    if let Ok(backend) = crate::gpu::WgpuBackend::new() {
+    if let Some(backend) = crate::gpu::test_backend() {
         use crate::gpu::GpuBackend;
         let device_graph = backend.upload_graph(&g).unwrap();
         let error = Triangles::new_gpu(&g, &backend, &device_graph)
@@ -228,12 +228,8 @@ fn k_truss_support_range() {
 fn k_truss_from_gpu_triangles() {
     use super::triangles::Triangles;
     use crate::gpu::GpuBackend;
-    let backend = match crate::gpu::WgpuBackend::new() {
-        Ok(backend) => backend,
-        Err(e) => {
-            eprintln!("skipping GPU test, no GPU adapter: {e}");
-            return;
-        }
+    let Some(backend) = crate::gpu::test_backend() else {
+        return;
     };
     for (name, g) in fixtures() {
         let device_graph = backend.upload_graph(&g).unwrap();

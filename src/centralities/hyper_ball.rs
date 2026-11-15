@@ -1704,19 +1704,12 @@ mod test {
         edges.into_iter().collect()
     }
 
-    /// The GPU backend, or `None` (skipping the test) on machines without any GPU adapter.
+    /// The GPU backend, or `None` (skipping the test) on machines without any GPU adapter (see
+    /// [`crate::gpu::test_backend`]).
     #[cfg(feature = "gpu")]
     fn gpu_backend() -> Option<crate::gpu::WgpuBackend> {
-        match crate::gpu::WgpuBackend::new() {
-            Ok(backend) => {
-                eprintln!("GPU tests run on {:?}", backend.adapter_info().name);
-                Some(backend)
-            }
-            Err(e) => {
-                eprintln!("skipping GPU test, no GPU adapter: {e}");
-                None
-            }
-        }
+        crate::gpu::test_backend()
+            .inspect(|backend| eprintln!("GPU tests run on {:?}", backend.adapter_info().name))
     }
 
     /// Runs `HyperBall` on the CPU and on the GPU (separate graph ids, so separate cache files),

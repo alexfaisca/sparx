@@ -83,3 +83,20 @@ pub trait GpuBackend {
         y: &[u32],
     ) -> Result<u128, Box<dyn std::error::Error>>;
 }
+
+/// The GPU backend tests run on, or `None` (the test then skips) on machines without any GPU
+/// adapter --- unless `SPARX_REQUIRE_GPU` is set, non-empty (as in CI, which installs a software Vulkan
+/// driver), where a missing adapter fails the test rather than letting it pass unrun.
+#[cfg(test)]
+pub(crate) fn test_backend() -> Option<WgpuBackend> {
+    match WgpuBackend::new() {
+        Ok(backend) => Some(backend),
+        Err(e) if std::env::var_os("SPARX_REQUIRE_GPU").is_some_and(|v| !v.is_empty()) => {
+            panic!("no GPU adapter, while SPARX_REQUIRE_GPU is set: {e}")
+        }
+        Err(e) => {
+            eprintln!("skipping GPU test, no GPU adapter: {e}");
+            None
+        }
+    }
+}

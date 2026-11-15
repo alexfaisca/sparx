@@ -52,6 +52,9 @@ jobs:
           done
           exit 1
       - name: Test
+        # (on the GPU leg, tests fail rather than skip when they find no GPU adapter)
+        env:
+          SPARX_REQUIRE_GPU: ${{ matrix.gpu && '1' || '' }}
         run: cargo test --release ${{ matrix.gpu && '--features gpu' || '' }}
 
   performance:

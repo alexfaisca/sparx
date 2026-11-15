@@ -340,13 +340,7 @@ mod gpu {
     use crate::gpu::{GpuBackend, WgpuBackend};
 
     fn backend() -> Option<WgpuBackend> {
-        match WgpuBackend::new() {
-            Ok(backend) => Some(backend),
-            Err(e) => {
-                eprintln!("skipping GPU test, no GPU adapter: {e}");
-                None
-            }
-        }
+        crate::gpu::test_backend()
     }
 
     #[test]

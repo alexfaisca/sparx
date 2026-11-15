@@ -537,12 +537,8 @@ pub(crate) mod test {
     #[test]
     fn triangles_gpu_match_brute_force() {
         use crate::gpu::GpuBackend;
-        let backend = match crate::gpu::WgpuBackend::new() {
-            Ok(backend) => backend,
-            Err(e) => {
-                eprintln!("skipping GPU test, no GPU adapter: {e}");
-                return;
-            }
+        let Some(backend) = crate::gpu::test_backend() else {
+            return;
         };
         for (name, g) in fixtures() {
             let device_graph = backend.upload_graph(&g).unwrap();
