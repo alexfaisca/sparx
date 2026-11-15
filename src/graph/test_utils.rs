@@ -473,8 +473,10 @@ mod test {
         let read = |path: &str| -> Vec<u64> {
             std::fs::read(path)
                 .unwrap()
-                .chunks_exact(8)
-                .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| u64::from_ne_bytes(*b))
                 .collect()
         };
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
@@ -514,5 +516,39 @@ mod test {
         paths.sort();
         paths.dedup();
         assert_eq!(paths.len(), 3, "each value type has its own file");
+    }
+
+    /// The closeness the benchmarking CLI reads (`get_or_init_dataset_exact_closeness`'s values,
+    /// once `test_common`'s own BFS loop) is that loop's: `(reached - 1) / Σ distances` by BFS
+    /// from each node, 0 for nodes reaching no other.
+    #[test]
+    fn exact_closeness_values_are_the_bfs_formula() {
+        use crate::trails::bfs::BFSDists;
+        // several components and isolated nodes
+        let g = undirected_graph("exact_closeness", 90, &random_edges(90, 0.03, 8));
+        let dataset = PathBuf::from(format!("exact_closeness_{}.mtx", unique_run_tag()));
+        let path =
+            get_or_init_dataset_exact_value(&dataset, &g, FileType::ExactClosenessCentrality(H::H))
+                .unwrap();
+        let got: Vec<f64> = std::fs::read(&path)
+            .unwrap()
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| f64::from_ne_bytes(*b))
+            .collect();
+        for (u, got) in got.iter().enumerate() {
+            let bfs = BFSDists::new(&*g, u).unwrap();
+            let want = if bfs.reachable() <= 1 || bfs.total_distances() == 0. {
+                0.
+            } else {
+                (bfs.reachable() - 1) as f64 / bfs.total_distances()
+            };
+            assert!(
+                (got - want).abs() <= 1e-12 * want.max(1.),
+                "node {u}: {got} != {want}"
+            );
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

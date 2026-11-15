@@ -34,7 +34,8 @@
 //! Paths follow arcs out of nodes; on a [`DiGraph`], `(s, t)` and `(t, s)` are different pairs,
 //! with different paths. On weighted graphs (whose weights must be positive and finite), paths
 //! are shortest by weight, and two paths are equally short when their weights' sums, in `f64`,
-//! are equal (as networkx's). Parallel arcs are different paths, as in a multigraph.
+//! are equal (as networkx's). Parallel arcs are different paths, as in a multigraph (unlike
+//! networkx's, which counts each pair of adjacent nodes' arcs as one).
 //!
 //! Values follow networkx's `betweenness_centrality` (`endpoints=False`): normalized by the
 //! `(|V| - 1) (|V| - 2)` ordered pairs of other nodes, or, unnormalized, the number of shortest
@@ -1251,6 +1252,74 @@ mod tests {
         top.drop_cache().unwrap();
         all.drop_cache().unwrap();
         g.drop_cache().unwrap();
+    }
+
+    /// Parallel edges are different paths (see the module docs), whether the graph is searched
+    /// by biconnected blocks (sparse, many blocks) or whole (one block of nearly every node), and
+    /// whatever the engine: exact betweenness matches the brute force, which counts them.
+    #[test]
+    fn exact_counts_parallel_edges_as_different_paths() {
+        let (_guard, root) = fixtures();
+        for (name, n, mut edges) in [
+            ("blocks", 60, sparse_edges(60, 12, 5)),
+            ("whole", 40, random_arcs(40, 160, 6)),
+        ] {
+            // doubled (and tripled) edges, bridges among them
+            let extra: Vec<_> = edges.iter().step_by(4).copied().collect();
+            edges.extend(&extra);
+            edges.extend(extra.iter().step_by(3));
+            let path = write_mtx(&root, name, n, &edges, true);
+            let mut g =
+                GraphMemoryMap::<VoidLabel, VoidLabel, usize>::from_file(&path, None, Some(4))
+                    .unwrap();
+            let both: Vec<_> = edges.iter().flat_map(|&(u, v)| [(u, v), (v, u)]).collect();
+            let want = brute_force(n, &both);
+            // (the parallel edges do change betweenness here: the test tells the two apart)
+            let mut simple = both.clone();
+            simple.sort_unstable();
+            simple.dedup();
+            let collapsed = brute_force(n, &simple);
+            let gap = want
+                .iter()
+                .zip(&collapsed)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0., f64::max);
+            assert!(gap > 1., "{name}: parallel edges change nothing");
+            let mut b =
+                Betweenness::with_options(&g, options(BetweennessEngine::Exact, false)).unwrap();
+            for (u, (got, want)) in b.centralities().iter().zip(&want).enumerate() {
+                assert!(
+                    (got - want / 2.).abs() < 1e-9 * want.max(1.),
+                    "{name}: node {u}, {got} != {}",
+                    want / 2.
+                );
+            }
+            b.drop_cache().unwrap();
+            // KADABRA's samples count them too: within epsilon of the exact values
+            let mut exact =
+                Betweenness::with_options(&g, options(BetweennessEngine::Exact, true)).unwrap();
+            let opts = BetweennessOptions {
+                engine: BetweennessEngine::Kadabra,
+                epsilon: 0.02,
+                ..BetweennessOptions::default()
+            };
+            let mut approx = Betweenness::with_options(&g, opts).unwrap();
+            let bound = 0.02 * n as f64 / (n - 2) as f64;
+            for (u, (a, e)) in approx
+                .centralities()
+                .iter()
+                .zip(exact.centralities())
+                .enumerate()
+            {
+                assert!(
+                    (a - e).abs() <= bound,
+                    "{name}: node {u}, KADABRA {a} vs {e}"
+                );
+            }
+            approx.drop_cache().unwrap();
+            exact.drop_cache().unwrap();
+            g.drop_cache().unwrap();
+        }
     }
 
     /// A sparse graph with much block structure: random trees joined by a few extra edges into
