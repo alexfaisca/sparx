@@ -8,6 +8,33 @@
 //! so it must fit there: backends check their device's limits up front and fail with an error
 //! (rather than run out of memory midway) when it doesn't.
 //!
+//! # Example
+//!
+//! (The README's GPU example, compiled here as it needs this feature.)
+//!
+//! ```no_run
+//! use sparx::centralities::hyper_ball::{HyperBallInner, Precision6};
+//! use sparx::gpu::{GpuBackend, WgpuBackend};
+//! use sparx::graph::Graph;
+//! use sparx::k_truss::{pkt::AlgoPKT, triangles::Triangles};
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let g = Graph::<(), (), u32>::from_file("./datasets/graphs/kmer_V2a.mtx", None, None)?;
+//!     let backend = WgpuBackend::new()?;
+//!     let device_graph = backend.upload_graph(&g)?;
+//!
+//!     let mut hyperball =
+//!         HyperBallInner::<_, _, _, Precision6>::new_gpu(&g, &backend, &device_graph, None)?;
+//!     let closeness = hyperball.get_or_compute_closeness_centrality(true)?;
+//!     println!("closeness of node 0: {:.4}", closeness[0]);
+//!
+//!     let triangles = Triangles::new_gpu(&g, &backend, &device_graph)?;
+//!     let pkt = AlgoPKT::new_with_triangles(&g, triangles)?;
+//!     println!("max trussness: {:?}", pkt.k_trusses().iter().max());
+//!     Ok(())
+//! }
+//! ```
+//!
 //! [`GraphMemoryMap`]: ../graph/struct.GraphMemoryMap.html#
 use crate::graph::{self, GraphMemoryMap};
 

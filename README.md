@@ -683,7 +683,7 @@ the CPU --- *HyperBall*'s counters bit for bit, while its distance accumulators 
 feed the k-truss decompositions and clustering coefficients (`new_with_triangles`).
 
 ```rust ignore
-// (with the `gpu` feature)
+// (with the `gpu` feature; compiled as the `gpu` module's doctest)
 use sparx::centralities::hyper_ball::{HyperBallInner, Precision6};
 use sparx::gpu::{GpuBackend, WgpuBackend};
 use sparx::graph::Graph;
