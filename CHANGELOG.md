@@ -2,6 +2,50 @@
 
 All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
+## Unreleased
+
+### Fixed
+
+* A cache entry's metadata (`metadata()`, and its file) counted `|V| + 1` nodes (its offsets).
+  Entries cached (and kept) before still show `|V| + 1`: the count is only written once.
+* The (unweighted, undirected) average clustering coefficient is the same whatever the number
+  of threads, as the directed and weighted ones (its last bits depended on how nodes were shared
+  out among threads).
+* The documentation of exact betweenness in the Python bindings promised results the same
+  whatever the number of threads, which only KADABRA's are (exact ones may differ in their last
+  bits, as the Rust documentation says); the sweep cut's targets (`hk_relax`, `hkpr`,
+  `sweep_cut`) are documented as they work: the sweep stops past twice them, and only prefixes
+  of conductance below 1 count (without one, the community is empty). `threads` is documented
+  (at most 255, 1 by default). `DiGraph.numeric_assortativity` is over arcs, not edges each way.
+* The benchmarking CLI reports the crate's version (was a fixed `0.1`), and its help describes
+  `-f`'s input formats and `-e` correctly.
+* Documentation: the Python type stubs only accept `direction="both"` on `Graph.label_propagation`
+  (as the bindings); the README's Python example called `Graph.k_truss(kind=...)`, a `DiGraph`'s;
+  the README's testing section claimed more coverage than the tests have; the shortest paths
+  speedup in its summary is 47x, as in the benchmarks.
+
+### Testing
+
+* CI tests the `rayon`, `petgraph`, `rustworkx` and `iter_with_offset` features (whose tests
+  never ran), builds each alone, and documents them; GPU tests fail in CI when they find no
+  adapter, rather than passing unrun.
+* Tests of the petgraph and rustworkx exports, of `GraphMemoryMap`'s shorthands (`k_core`,
+  `k_truss`, `louvain`, ...), and of triangle counts, clustering coefficients, HyperBall,
+  HK-Relax, components and exact centralities across thread counts; the README's GPU example is
+  compiled as a doctest. Betweenness tests remove their files even when they fail.
+* Python tests of the bindings' untested options: sweep cut targets, `hkpr`'s
+  `target_conductance`, `label_propagation`'s `max_iterations`, spectral options (including the
+  Bethe Hessian embedding), `id`, `metadata` and the thread limit, and `Graph`'s weight parsing;
+  and of the methods `test_edge_cases.py` didn't call on degenerate graphs (spectral embeddings,
+  sweep cuts, numeric and attribute assortativity, landmarks, `shortest_paths`, directed
+  triangles, `to_undirected`).
+
+### Changed
+
+* With the `bench` feature, `sparx::test_common` is gone: its one public helper is
+  `sparx::graph::test_utils::get_or_init_dataset_exact_closeness`, alongside the tests' others.
+  The unimplemented, unused `degree_dist_impl` is removed.
+
 ## 0.2.1 — 2026-11-13
 
 ### Added
@@ -43,7 +87,8 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
   out- and total degree), k-trusses (cycle and feed-forward triangles), triangle counting,
   Fagiolo's clustering, strongly connected components, Louvain and Leiden (Leicht and Newman's
   directed modularity, multithreaded) and label propagation.
-* **Edge weights:** `Weighted<T>` edge labels (`f64` or `f32`), read from Matrix Market values.
+* **Edge weights:** `Weighted<T>` edge labels (any integer or float type), read from Matrix Market
+  values.
   PageRank, Louvain and Leiden, clustering (Onnela's and Fagiolo's coefficients), degree
   assortativity (strengths), exact closeness, harmonic and Lin centralities, HK-Relax, HKPR and
   sweep cuts use them. Unweighted graphs run the same code as before (dispatch is resolved at
