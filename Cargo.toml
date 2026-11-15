@@ -31,7 +31,7 @@ required-features = ["cli"]
 
 [package.metadata.docs.rs]
 # the optional APIs documented too (not `bench`, which makes internal methods public, nor `gpu`,
-# not documented yet)
+# which CI's documentation check builds too)
 features = ["rayon", "petgraph", "rustworkx"]
 
 [workspace]

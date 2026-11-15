@@ -56,6 +56,11 @@ jobs:
         env:
           SPARX_REQUIRE_GPU: ${{ matrix.gpu && '1' || '' }}
         run: cargo test --release ${{ matrix.gpu && '--features gpu' || '' }}
+      # the optional APIs (parallel iterators, petgraph/rustworkx exports, offset iterators) and
+      # the tests gated on them
+      - name: Test the optional features
+        if: ${{ !matrix.gpu }}
+        run: cargo test --release --features rayon,petgraph,rustworkx,iter_with_offset
 
   performance:
     name: Performance regressions
@@ -79,13 +84,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Every target, with the optional features
         run: |
-          cargo build --release --all-targets --features bench
-          cargo build --release --all-targets --features gpu,bench
+          cargo build --release --all-targets --features bench,rayon,petgraph,rustworkx,iter_with_offset
+          cargo build --release --all-targets --features gpu,bench,rayon,petgraph,rustworkx,iter_with_offset
       - name: Each input format alone
         run: |
           cargo build --release --lib --no-default-features --features mtx
           cargo build --release --lib --no-default-features --features ggcat
           cargo build --release --lib --no-default-features --features nodes_edges
+      - name: Each optional feature alone
+        run: |
+          for f in rayon petgraph rustworkx iter_with_offset; do
+            cargo check --all-targets --features $f
+          done
 
   msrv:
     name: Minimum supported Rust version
@@ -94,7 +104,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets --features gpu,bench
+      - run: cargo check --all-targets --features gpu,bench,rayon,petgraph,rustworkx,iter_with_offset
 
   docs:
     name: Documentation
@@ -105,7 +115,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --features gpu
+      # docs.rs's features (`Cargo.toml`) and `gpu`
+      - run: cargo doc --no-deps --features gpu,rayon,petgraph,rustworkx
 
   python:
     name: Python bindings (${{ matrix.python }})
