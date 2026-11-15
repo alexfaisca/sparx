@@ -501,3 +501,68 @@ fn triangles_and_clustering_are_the_same_whatever_the_threads() {
         }
     }
 }
+
+/// `GraphMemoryMap`'s shorthands (`k_core`, `k_truss`, `louvain`, ...) run the algorithms they
+/// name: k-cores and k-trusses as the brute force references, the others as their own
+/// constructors.
+#[test]
+fn graph_shorthands_run_the_algorithms_they_name() {
+    use crate::centralities::hyper_ball::HyperBall8;
+    use crate::communities::hk_relax::HKRelax;
+    use crate::k_core::_verify::reference_coreness;
+    use crate::trails::hierholzer::AlgoHierholzer;
+
+    let g = undirected_graph("shorthands", 120, &random_edges(120, 0.06, 23));
+    let coreness = reference_coreness(&g).unwrap();
+    let cores = |c: &[u8]| c.iter().map(|&c| c as usize).collect::<Vec<_>>();
+    assert_eq!(cores(g.k_core().unwrap().k_cores()), coreness);
+    assert_eq!(cores(g.k_core_lea().unwrap().k_cores()), coreness);
+    assert_eq!(cores(g.k_core_bz().unwrap().k_cores()), coreness);
+
+    let trussness = brute_force_trussness(&g);
+    assert_eq!(g.k_truss().unwrap().k_trusses(), trussness);
+    assert_eq!(g.k_truss_bea().unwrap().k_trusses(), trussness);
+    assert_eq!(g.k_truss_pkt().unwrap().k_trusses(), trussness);
+
+    let trails = |h: &AlgoHierholzer<_, _, _>| {
+        (0..h.trail_number())
+            .map(|i| h.get_trail(i).unwrap().to_vec())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        trails(&g.euler_trail().unwrap()),
+        trails(&AlgoHierholzer::new(&g).unwrap())
+    );
+
+    // (each result copied, and its instance dropped, before the next is built: both map the
+    // same cache files)
+    let shorthand = g.hyperball().unwrap().geodesic_distances().to_vec();
+    let direct = HyperBall8::new(&g).unwrap().geodesic_distances().to_vec();
+    assert!(shorthand.iter().any(|&d| d > 0.));
+    assert_eq!(shorthand, direct);
+
+    // a valid partition
+    let louvain = g.louvain().unwrap();
+    assert_eq!(louvain.communities().len(), g.size());
+    assert!((-0.5..=1.).contains(&louvain.partition_modularity()));
+
+    let community = |c: crate::graph::Community<usize>| format!("{:?}", c.nodes);
+    assert_eq!(
+        community(g.hk_relax(3, 5., 1e-4).unwrap().compute().unwrap()),
+        community(
+            HKRelax::new(&g, 5., 1e-4, vec![3], None, None)
+                .unwrap()
+                .compute()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        community(g.hk_relax_ms(&[3, 7], 5., 1e-4).unwrap().compute().unwrap()),
+        community(
+            HKRelax::new(&g, 5., 1e-4, vec![3, 7], None, None)
+                .unwrap()
+                .compute()
+                .unwrap()
+        )
+    );
+}

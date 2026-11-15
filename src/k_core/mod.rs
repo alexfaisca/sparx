@@ -10,7 +10,7 @@ mod width_test;
 use _verify::verify_k_cores;
 
 #[cfg(test)]
-mod _verify {
+pub(crate) mod _verify {
     use crate::{
         graph::{self, GraphMemoryMap},
         k_core::count::CoreCount,
@@ -24,7 +24,7 @@ mod _verify {
     /// (once per neighbour list entry, i.e. per parallel edge) where higher. A node's degree is
     /// its neighbour list's length, self-loops and parallel edges included --- the convention the
     /// decompositions follow.
-    pub(super) fn reference_coreness<N: graph::N, E: graph::E, Ix: graph::IndexType>(
+    pub(crate) fn reference_coreness<N: graph::N, E: graph::E, Ix: graph::IndexType>(
         graph: &GraphMemoryMap<N, E, Ix>,
     ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
         let node_count = graph.size();
