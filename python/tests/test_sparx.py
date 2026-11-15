@@ -3,6 +3,7 @@
 import gc
 import itertools
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1760,3 +1761,131 @@ def test_label_propagation_asynchronous():
     D = nx.DiGraph(G)
     with sparx.DiGraph(directed(D)) as d:
         assert d.label_propagation(engine="asynchronous", direction="in")["modularity"] > 0.4
+
+
+# --- options otherwise untested ---
+
+
+def sweep_reference(G, nodes, heat, target_size=None, target_volume=None):
+    """The best prefix by conductance of `nodes` by descending heat (ties by node), the sweep
+    stopping once its set holds more than twice `target_size` nodes or twice `target_volume`
+    arcs. Only prefixes of conductance below 1 count: without one, the community is empty."""
+    arcs = 2 * G.number_of_edges()
+    size = len(G) if target_size is None else target_size
+    volume = arcs if target_volume is None else target_volume
+    order = sorted(range(len(nodes)), key=lambda i: (-heat[i], nodes[i]))
+    best, S, vol = (1.0, []), [], 0
+    for i in order:
+        S.append(int(nodes[i]))
+        vol += G.degree(int(nodes[i]))
+        if 0 < vol < arcs:
+            phi = nx.cut_size(G, S) / min(vol, arcs - vol)
+            if phi < best[0]:
+                best = (phi, list(S))
+        if len(S) > 2 * size or vol > 2 * volume:
+            break
+    return best
+
+
+def test_sweep_cut_targets_stop_the_sweep():
+    G = nx.planted_partition_graph(4, 50, 0.3, 0.005, seed=13)
+    rng = np.random.default_rng(3)
+    nodes, heat = rng.permutation(200), rng.uniform(0, 1, 200)
+    with sparx.Graph(undirected(G)) as g:
+        for size, volume in [(None, None), (10, None), (None, 60), (5, 40)]:
+            phi, S = sweep_reference(G, nodes, heat, size, volume)
+            cut = g.sweep_cut(nodes, heat, target_size=size, target_volume=volume)
+            assert cut["conductance"] == pytest.approx(phi, abs=1e-12), (size, volume)
+            assert set(cut["nodes"].tolist()) == set(S), (size, volume)
+
+
+def test_local_community_targets():
+    G = nx.planted_partition_graph(4, 50, 0.3, 0.005, seed=13)
+    max_degree = max(d for _, d in G.degree())
+    with sparx.Graph(undirected(G)) as g:
+        for c, size, volume in [
+            (g.hk_relax([3], target_size=10), 10, None),
+            (g.hk_relax([3], target_volume=60), None, 60),
+            (g.hkpr(3, target_size=10, target_volume=10**6), 10, None),
+        ]:
+            nodes = set(c["nodes"].tolist())
+            assert c["size"] == len(nodes)
+            assert c["conductance"] == pytest.approx(nx.conductance(G, nodes), abs=1e-12)
+            # the sweep stops once past twice the targets: its best prefix is at most one node
+            # beyond them
+            if size is not None:
+                assert c["size"] <= 2 * size + 1
+            if volume is not None:
+                assert c["volume"] <= 2 * volume + max_degree
+        found = g.hkpr(3, target_conductance=0.3)
+        nodes = set(found["nodes"].tolist())
+        assert found["conductance"] == pytest.approx(nx.conductance(G, nodes), abs=1e-12)
+        for bad in [0.0, 1.0, -0.5]:
+            with pytest.raises(RuntimeError, match="target_conductance"):
+                g.hkpr(3, target_conductance=bad)
+
+
+def test_label_propagation_max_iterations():
+    G = nx.planted_partition_graph(5, 150, 0.15, 0.004, seed=6)
+    with sparx.Graph(undirected(G)) as g:
+        for limit in [1, 2]:
+            lp = g.label_propagation(max_iterations=limit, tolerance=0.0)
+            assert 1 <= len(lp["moves"]) <= limit
+            parts = [set(np.flatnonzero(lp["communities"] == c).tolist()) for c in range(lp["count"])]
+            assert lp["modularity"] == pytest.approx(nx.community.modularity(G, parts), abs=1e-9)
+
+
+def test_spectral_options():
+    G = nx.planted_partition_graph(5, 60, 0.25, 0.01, seed=9)
+    truth = [u // 60 for u in range(len(G))]
+    with sparx.Graph(undirected(G)) as g:
+        options = dict(regularization=2.0, filter_degree=48, features=24, sample=200, restarts=2, refine=2)
+        a = g.spectral_clustering(5, seed=11, **options)
+        b = g.spectral_clustering(5, seed=11, **options)
+        assert np.array_equal(a["communities"], b["communities"])
+        assert nmi(a["communities"], truth) > 0.9
+        exact = g.spectral_clustering(5, engine="exact", subspace_degree=8, tolerance=1e-6, max_iterations=1000)
+        assert exact["converged"] and nmi(exact["communities"], truth) > 0.95
+        # the regularized Laplacian, by a given `τ`
+        A = nx.to_numpy_array(G, nodelist=range(len(G)))
+        s = 1 / np.sqrt(A.sum(1) + 2.0)
+        want = np.linalg.eigvalsh(np.eye(len(G)) - s[:, None] * A * s[None, :])
+        e = g.spectral_embedding(6, regularization=2.0, tolerance=1e-9, degree=24, oversampling=4, seed=3)
+        assert e["converged"]
+        np.testing.assert_allclose(e["eigenvalues"], want[:6], atol=1e-7)
+        # the Bethe Hessian: its least eigenvalues, in order, negative for each of the 5 planted
+        # communities
+        bethe = g.spectral_embedding(5, matrix="bethe", tolerance=1e-9)
+        assert bethe["converged"] and bethe["vectors"].shape == (len(G), 5)
+        assert np.all(np.diff(bethe["eigenvalues"]) >= -1e-9)
+        assert np.all(bethe["eigenvalues"] < 0)
+
+
+def test_id_metadata_and_thread_limit(cache_dir):
+    G = nx.karate_club_graph()
+    path = undirected(G)
+    with sparx.Graph(path, id="mine", keep_cache=True) as g:
+        text = g.metadata()
+        assert int(re.search(r"nodes\s*: (\d+)", text).group(1)) == g.num_nodes == len(G)
+        cache_file = g.cache_file
+    # the cache entry is named by the id: the same id, the same entry; another, another
+    with sparx.Graph(path, id="mine", keep_cache=True) as g:
+        assert g.cache_file == cache_file
+    with sparx.Graph(path, id="other") as g:
+        assert g.cache_file != cache_file
+    with sparx.Graph.open(cache_file) as g:
+        assert g.metadata() == text
+    for f in os.listdir(cache_dir):
+        os.remove(cache_dir / f)
+    with pytest.raises(OverflowError):
+        sparx.Graph(path, threads=256)
+    with sparx.Graph(path, threads=255) as g:
+        assert g.threads == 255
+
+
+def test_graph_weight_parsing(cache_dir):
+    path = write_weighted_mtx("bad_sym.mtx", 2, [(1, 0, "abc")], True)
+    with sparx.Graph(path, weighted=True) as g:
+        assert np.isnan(g.edge_weights()).all()
+    with pytest.raises(RuntimeError, match="abc"):
+        sparx.Graph(path, weighted=True, weight_parsing="checked")
