@@ -102,11 +102,11 @@ pub struct HyperBallInner<
 > {
     /// Graph for which *HyperBall* is computed.
     g: &'a GraphMemoryMap<N, E, Ix, Dir>,
-    /// Memmapped slice containing each node's *HyperLogLog* counter.
+    /// Each node's *HyperLogLog* counter (in RAM or the cache, see `in_ram`).
     counters: AbstractedProceduralMemoryMut<HyperLogLog<P>>,
-    /// Memmapped slice containing each node's distance accumulator.
+    /// Each node's distance accumulator.
     distances: AbstractedProceduralMemoryMut<W>,
-    /// Memmapped slice containing each node's inverse distance accumulator.
+    /// Each node's inverse distance accumulator.
     inverse_distances: AbstractedProceduralMemoryMut<W>,
     /// Maximum number of iteration --- default is 100, max is 1024 (details on how these values are ludicrously big are found in the abovementioned paper).
     max_t: usize,
@@ -117,6 +117,10 @@ pub struct HyperBallInner<
     /// Lin's centrality's cached values.
     lin: Option<AbstractedProceduralMemoryMut<W>>,
     threads: usize,
+    /// Whether the counters, accumulators and scratch arrays are in anonymous memory rather than
+    /// in the graph's cache (see [`MemoryPolicy`]); the cached results are then written at the
+    /// end, once.
+    in_ram: bool,
     #[cfg(any(test, feature = "bench"))]
     iters: usize,
     /// Wall time of each iteration (measured by thread 0, up to the iteration's barrier).
@@ -156,14 +160,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut hyper_ball = Self::new_no_compute(g, None, g.thread_num())?;
-
-        let proc_mem = hyper_ball.init_cache_mem()?;
-        hyper_ball.compute_with_proc_mem(proc_mem)?;
-
-        hyper_ball.g.cleanup_cache(CacheFile::HyperBall)?;
-
-        Ok(hyper_ball)
+        Self::new_with_memory(g, None, g.thread_num(), MemoryPolicy::Auto)
     }
 
     /// Performs the *HyperBall Algorithm* as described in ["In-Core Computation of Geometric Centralities with HyperBall: A Hundred Billion Nodes and Beyond"](https://doi.org/10.48550/arXiv.1308.2144) by Boldi P. and Vigna S.
@@ -180,10 +177,26 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut hyper_ball = Self::new_no_compute(g, max_depth, threads.max(1))?;
+        Self::new_with_memory(g, max_depth, threads, MemoryPolicy::Auto)
+    }
+
+    /// [`new_with_conf`](Self::new_with_conf), its working memory (two counters and three
+    /// accumulators per node) kept where `memory` says: by default
+    /// ([`MemoryPolicy::Auto`]) in RAM when it takes at most half the memory available, in the
+    /// graph's cache otherwise. The counters and distance accumulators are cached (for
+    /// [`get_or_compute`](Self::get_or_compute)) either way: kept in RAM, they're written to
+    /// the cache once, at the end.
+    pub fn new_with_memory(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        max_depth: Option<usize>,
+        threads: usize,
+        memory: MemoryPolicy,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut hyper_ball = Self::new_no_compute_impl(g, max_depth, threads.max(1), memory)?;
 
         let proc_mem = hyper_ball.init_cache_mem()?;
         hyper_ball.compute_with_proc_mem(proc_mem)?;
+        hyper_ball.write_results()?;
 
         hyper_ball.g.cleanup_cache(CacheFile::HyperBall)?;
 
@@ -217,6 +230,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                         inverse_distances,
                         max_t: Self::DEAFULT_MAX_DEPTH,
                         threads: g.thread_num().max(1),
+                        in_ram: false,
                         closeness: [None, None],
                         harmonic: [None, None],
                         lin: None,
@@ -677,7 +691,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
-        let mut hb = Self::new_no_compute_impl(g, max_depth, g.thread_num())?;
+        let mut hb = Self::new_no_compute_impl(g, max_depth, g.thread_num(), MemoryPolicy::Auto)?;
 
         let params = crate::gpu::HyperBallGpuParams {
             registers: HyperLogLog::<P>::REGISTERS,
@@ -699,9 +713,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             hb.iters = _iters;
         }
 
-        hb.counters.flush_async()?;
-        hb.distances.flush_async()?;
-        hb.inverse_distances.flush_async()?;
+        hb.write_results()?;
         Ok(hb)
     }
 }
@@ -718,7 +730,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_no_compute_impl(g, max_depth, threads)
+        Self::new_no_compute_impl(g, max_depth, threads, MemoryPolicy::Auto)
     }
 
     #[cfg(not(feature = "bench"))]
@@ -728,7 +740,39 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_no_compute_impl(g, max_depth, threads)
+        Self::new_no_compute_impl(g, max_depth, threads, MemoryPolicy::Auto)
+    }
+
+    /// [`new_no_compute`](Self::new_no_compute), its working memory kept where `memory` says
+    /// (see [`new_with_memory`](Self::new_with_memory)).
+    #[cfg(feature = "bench")]
+    pub fn new_no_compute_with_memory(
+        g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        max_depth: Option<usize>,
+        threads: usize,
+        memory: MemoryPolicy,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_no_compute_impl(g, max_depth, threads, memory)
+    }
+
+    /// Whether the working memory is in anonymous memory (see
+    /// [`new_with_memory`](Self::new_with_memory)).
+    #[cfg(feature = "bench")]
+    pub fn in_ram(&self) -> bool {
+        self.in_ram
+    }
+
+    /// Writes the counters and distance accumulators to the graph's cache (see
+    /// [`new_with_memory`](Self::new_with_memory)): what [`new`](Self::new) does once they're
+    /// computed.
+    #[cfg(feature = "bench")]
+    pub fn write_results(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.write_results_impl()
+    }
+
+    #[cfg(not(feature = "bench"))]
+    fn write_results(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.write_results_impl()
     }
 
     #[cfg(feature = "bench")]
@@ -790,6 +834,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
 
     fn init_cache(
         g: &'a GraphMemoryMap<N, E, Ix, Dir>,
+        in_ram: bool,
     ) -> Result<ProceduralMemoryHB<P, W>, Box<dyn std::error::Error>> {
         let node_count = g.size();
 
@@ -797,9 +842,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let d_fn = g.build_cache_filename(CacheFile::HyperBallDistances, None)?;
         let i_fn = g.build_cache_filename(CacheFile::HyperBallInvDistances, None)?;
 
-        let counters = SharedSliceMut::<HyperLogLog<P>>::abst_mem_mut(&c_fn, node_count, true)?;
-        let distances = SharedSliceMut::<W>::abst_mem_mut(&d_fn, node_count, true)?;
-        let inverse_distances = SharedSliceMut::<W>::abst_mem_mut(&i_fn, node_count, true)?;
+        let counters = SharedSliceMut::<HyperLogLog<P>>::abst_mem(&c_fn, node_count, in_ram)?;
+        let distances = SharedSliceMut::<W>::abst_mem(&d_fn, node_count, in_ram)?;
+        let inverse_distances = SharedSliceMut::<W>::abst_mem(&i_fn, node_count, in_ram)?;
 
         Ok((counters, distances, inverse_distances))
     }
@@ -808,13 +853,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         g: &'a GraphMemoryMap<N, E, Ix, Dir>,
         max_depth: Option<usize>,
         threads: usize,
+        memory: MemoryPolicy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let threads = threads.max(1);
         let node_count = g.size();
+        let in_ram = memory.in_ram(Self::working_memory(node_count));
         // make sure depth is within bounds
         let max_t = max_depth.map_or(Self::DEAFULT_MAX_DEPTH, |p| p.clamp(1, Self::MAX_MAX_DEPTH));
         // init cached vecs for distances and inverse distances accumulation
-        let (counters, distances, inverse_distances) = Self::init_cache(g)?;
+        let (counters, distances, inverse_distances) = Self::init_cache(g, in_ram)?;
         // init counters: foreach v in 0..=n { add(c[v], v) } & distances and inverse_distances
         let node_load = node_count.div_ceil(threads);
         thread::scope(|scope| {
@@ -851,7 +898,43 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             #[cfg(feature = "bench")]
             iter_times: vec![],
             threads,
+            in_ram,
         })
+    }
+
+    /// The bytes of a run's working memory: each node's two counters (current and next), three
+    /// accumulators (distances, inverse distances, and the last estimate) and two marks bits.
+    fn working_memory(node_count: usize) -> usize {
+        let per_node = 2 * std::mem::size_of::<HyperLogLog<P>>()
+            + 2 * std::mem::size_of::<W>()
+            + std::mem::size_of::<f64>();
+        node_count
+            .saturating_mul(per_node)
+            .saturating_add(2 * node_count.div_ceil(64) * std::mem::size_of::<u64>())
+    }
+
+    /// Writes the counters and distance accumulators to the graph's cache: once, at the end, if
+    /// kept in RAM, or (mapped from it) by scheduling their writeback.
+    fn write_results_impl(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.in_ram {
+            let c_fn = self.g.build_cache_filename(CacheFile::HyperBall, None)?;
+            let d_fn = self
+                .g
+                .build_cache_filename(CacheFile::HyperBallDistances, None)?;
+            let i_fn = self
+                .g
+                .build_cache_filename(CacheFile::HyperBallInvDistances, None)?;
+            write_new_file(c_fn, self.counters.as_slice())?;
+            write_new_file(d_fn, self.distances.as_slice())?;
+            write_new_file(i_fn, self.inverse_distances.as_slice())?;
+        } else {
+            // results stay in the page cache (visible to later processes) whether or not they
+            // reach the disk, so writeback is scheduled rather than waited for
+            self.counters.flush_async()?;
+            self.distances.flush_async()?;
+            self.inverse_distances.flush_async()?;
+        }
+        Ok(())
     }
 
     fn init_cache_mem_impl(
@@ -860,7 +943,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let node_count = self.g.size();
 
         let s_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(0))?;
-        let swap = SharedSliceMut::<HyperLogLog<P>>::abst_mem_mut(&s_fn, node_count, true)?;
+        let swap = SharedSliceMut::<HyperLogLog<P>>::abst_mem(&s_fn, node_count, self.in_ram)?;
 
         Ok(swap)
     }
@@ -889,15 +972,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         // each node's counter's estimate: a changed counter's previous one is never estimated
         // again (each node's is only read and written by its thread)
         let e_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(2))?;
-        let estimates = SharedSliceMut::<f64>::abst_mem_mut(&e_fn, node_count, true)?;
+        let estimates = SharedSliceMut::<f64>::abst_mem(&e_fn, node_count, self.in_ram)?;
         // whether each node's counter changed in the last iteration, and in this one (a bit
         // each): a node none of whose neighbours' counters changed keeps its own, as the union
         // with theirs would give the same one again, and is skipped
         let words = node_count.div_ceil(64);
         let c_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(3))?;
         let n_fn = self.g.build_cache_filename(CacheFile::HyperBall, Some(4))?;
-        let changed_marks = SharedSliceMut::<u64>::abst_mem_mut(&c_fn, words, true)?;
-        let changing_marks = SharedSliceMut::<u64>::abst_mem_mut(&n_fn, words, true)?;
+        let changed_marks = SharedSliceMut::<u64>::abst_mem(&c_fn, words, self.in_ram)?;
+        let changing_marks = SharedSliceMut::<u64>::abst_mem(&n_fn, words, self.in_ram)?;
 
         let mut t: W = W::one(); // first iteration is initialization
         let mut inv_t: W = W::one(); // first iteration is initialization
@@ -1015,7 +1098,14 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
                                         word |= 1 << (u % 64);
                                     }
 
-                                    *swap.get_mut(u) = a;
+                                    // the next counters (those of two iterations ago) already
+                                    // hold `a` but when it changed in this iteration or the last
+                                    // (in the first, they're the initial ones: all are written).
+                                    // Unchanged counters aren't rewritten: cached in a file, each
+                                    // rewrite would be written back to its disk
+                                    if iter == 0 || ball_changed || marked(&last_marks, u) {
+                                        *swap.get_mut(u) = a;
+                                    }
                                 }
                                 if begin < end {
                                     *marks.get_mut((end - 1) / 64) = word;
@@ -1088,11 +1178,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             self.iter_times = iter_times.into_inner().unwrap();
         }
 
-        // results stay in the page cache (visible to later processes) whether or not they reach
-        // the disk, so writeback is scheduled rather than waited for
-        self.counters.flush_async()?;
-        self.distances.flush_async()?;
-        self.inverse_distances.flush_async()?;
+        // (the results are written to the cache by `write_results`)
         self.g.cleanup_cache(CacheFile::HyperBall)?;
 
         Ok(())
@@ -1891,5 +1977,181 @@ mod test {
             &format!("hb_gpu_segmented_grid_depth7_{run_tag}"),
             Some(7),
         );
+    }
+
+    /// A run's counters' registers, distance and inverse distance accumulators (bits), and
+    /// iterations.
+    type Run = (Vec<Vec<u8>>, Vec<u64>, Vec<u64>, usize);
+
+    /// *HyperBall* by its definition, sequentially, with no skipping and every counter copied
+    /// every iteration: each node's counter, and its distance and inverse distance accumulators
+    /// (bit for bit as the library's: the same estimates, added in the same order), and the
+    /// iterations, until no counter changes.
+    fn reference<P: Precision>(g: &GraphMemoryMap<(), (), usize, crate::graph::Directed>) -> Run {
+        let n = g.size();
+        let mut counters: Vec<HyperLogLog<P>> = (0..n)
+            .map(|u| HyperLogLog::<P>::with_element(u as u64))
+            .collect();
+        let mut estimates: Vec<f64> = counters.iter().map(|c| c.estimate_cardinality()).collect();
+        let (mut distances, mut inverse) = (vec![0f64; n], vec![0f64; n]);
+        let (mut t, mut inv_t) = (1f64, 1f64);
+        let mut iterations = 0;
+        loop {
+            iterations += 1;
+            let mut next = counters.clone();
+            let mut changed = 0;
+            for (u, counter) in next.iter_mut().enumerate() {
+                let mut ball_changed = false;
+                for v in g.neighbours(u).unwrap() {
+                    ball_changed |= counter.union(&counters[v]);
+                }
+                if ball_changed {
+                    let estimate = counter.estimate_cardinality();
+                    let diff = estimate - estimates[u];
+                    estimates[u] = estimate;
+                    if diff > 0. {
+                        distances[u] += t * diff;
+                        inverse[u] += inv_t * diff;
+                    }
+                    changed += 1;
+                }
+            }
+            counters = next;
+            if changed == 0 || iterations >= HyperBall8::<(), (), usize>::DEAFULT_MAX_DEPTH {
+                break;
+            }
+            t += 1.;
+            inv_t = 1. / t;
+        }
+        (
+            counters.iter().map(|c| c.registers().to_vec()).collect(),
+            distances.iter().map(|d| d.to_bits()).collect(),
+            inverse.iter().map(|d| d.to_bits()).collect(),
+            iterations,
+        )
+    }
+
+    /// Counters, accumulators (bit for bit) and iterations of a run kept where `memory` says.
+    fn run_with<P: Precision>(
+        g: &GraphMemoryMap<(), (), usize, crate::graph::Directed>,
+        threads: usize,
+        memory: MemoryPolicy,
+    ) -> (Run, bool) {
+        let mut hb =
+            HyperBallInner::<(), (), usize, P, f64, _>::new_with_memory(g, None, threads, memory)
+                .unwrap();
+        let result = (
+            (
+                hb.counters()
+                    .iter()
+                    .map(|c| c.registers().to_vec())
+                    .collect(),
+                hb.geodesic_distances()
+                    .iter()
+                    .map(|d| d.to_bits())
+                    .collect(),
+                hb.harmonic_geodesic_distances()
+                    .iter()
+                    .map(|d| d.to_bits())
+                    .collect(),
+                hb.iters,
+            ),
+            hb.in_ram,
+        );
+        hb.drop_cache().unwrap();
+        result
+    }
+
+    /// Whether working memory is in RAM or in the graph's cache, at any number of threads,
+    /// *HyperBall* is its definition (the reference), bit for bit: counters only rewritten when
+    /// they changed in an iteration or the one before stay right, on graphs whose counters stop
+    /// changing at different iterations (paths of diameter up to 299, components, isolated
+    /// nodes, a node without arcs), and on graphs of no nodes and of one.
+    #[test]
+    fn hyperball_in_ram_or_on_disk_is_its_definition() {
+        use crate::components::test_utils::{graph_with_threads, random_arcs};
+        let path: Vec<_> = (0..299).map(|u| (u, u + 1)).collect();
+        let mut parts = random_arcs(200, 300, 1);
+        parts.extend(path.iter().take(150).map(|&(u, v)| (u + 200, v + 200)));
+        for (name, header, n, arcs) in [
+            ("path", "general", 300, path.clone()),
+            ("path_symmetric", "symmetric", 300, path),
+            ("parts_symmetric", "symmetric", 400, parts),
+            ("random", "general", 1000, random_arcs(1000, 2500, 3)),
+            ("tiny", "general", 3, vec![(0, 1)]),
+            ("single", "general", 1, vec![]),
+            ("empty", "general", 0, vec![]),
+        ] {
+            let g = graph_with_threads(name, header, n, &arcs, 1);
+            let want = (reference::<Precision4>(&g), reference::<Precision8>(&g));
+            for threads in [1, 3, 8] {
+                for memory in [MemoryPolicy::Ram, MemoryPolicy::Disk] {
+                    let (p4, in_ram) = run_with::<Precision4>(&g, threads, memory);
+                    let (p8, _) = run_with::<Precision8>(&g, threads, memory);
+                    assert_eq!(in_ram, memory == MemoryPolicy::Ram, "{name}");
+                    assert!(
+                        (p4.clone(), p8.clone()) == want,
+                        "{name}, {threads} threads, {memory:?}: differs from the reference"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Results kept in RAM are cached too, as on disk: written once at the end, and found by
+    /// `get_or_compute`; and the run leaves none of its scratch files behind.
+    #[test]
+    fn hyperball_in_ram_caches_its_results() {
+        use crate::components::test_utils::{graph, random_arcs};
+        let g = graph("cached", "symmetric", 300, &random_arcs(300, 900, 7));
+        let undirected = g.to_undirected().unwrap();
+        let mut computed =
+            HyperBall8::new_with_memory(undirected, None, 3, MemoryPolicy::Ram).unwrap();
+        assert!(computed.in_ram);
+        let scratch = |g: &GraphMemoryMap<(), (), usize>| {
+            (0..8)
+                .filter(|&k| {
+                    Path::new(
+                        &g.build_cache_filename(CacheFile::HyperBall, Some(k))
+                            .unwrap(),
+                    )
+                    .exists()
+                })
+                .count()
+        };
+        assert_eq!(scratch(undirected), 0, "scratch files left behind");
+        let found = HyperBall8::get_or_compute(undirected).unwrap();
+        assert!(
+            !found.in_ram,
+            "found in the cache rather than computed again"
+        );
+        assert_eq!(found.counters(), computed.counters());
+        assert_eq!(found.geodesic_distances(), computed.geodesic_distances());
+        assert_eq!(
+            found.harmonic_geodesic_distances(),
+            computed.harmonic_geodesic_distances()
+        );
+        computed.drop_cache().unwrap();
+    }
+
+    /// `Auto` keeps working memory in RAM when it takes at most half the memory available, and
+    /// in the cache otherwise, or when how much is available is unknown.
+    #[test]
+    fn memory_policy_thresholds() {
+        use crate::shared_slice::fits_in_memory;
+        assert!(fits_in_memory(50, Some(100)));
+        assert!(!fits_in_memory(51, Some(100)));
+        assert!(!fits_in_memory(1, None));
+        assert!(fits_in_memory(0, Some(0)));
+        assert!(MemoryPolicy::Ram.in_ram(usize::MAX));
+        assert!(!MemoryPolicy::Disk.in_ram(0));
+        // more than half of any machine's memory
+        assert!(!MemoryPolicy::Auto.in_ram(usize::MAX));
+        // working memory: per node, two 2^P byte counters, three 8 byte accumulators, 2 bits
+        assert_eq!(
+            HyperBall8::<(), (), usize>::working_memory(64),
+            64 * (512 + 24) + 16
+        );
+        assert_eq!(HyperBall8::<(), (), usize>::working_memory(0), 0);
     }
 }
