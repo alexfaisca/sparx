@@ -28,6 +28,57 @@ pub(crate) fn flush_mmap_async(mmap: &MmapMut) -> std::io::Result<()> {
     }
 }
 
+/// Where an algorithm keeps its working memory: arrays rewritten as it runs (*HyperBall*'s
+/// counters, say), as opposed to the graph, which is always memory mapped from its cache files.
+///
+/// [`Disk`](Self::Disk) maps them from files in the graph's cache, as the graph: they may be larger
+/// than RAM, but whatever the algorithm rewrites is written back to the disk again and again (the
+/// kernel flushes a shared mapping's dirty pages within seconds, and throttles the writing threads
+/// once there are too many), so its speed is the disk's once they don't fit the kernel's dirty
+/// page limits. [`Ram`](Self::Ram) keeps them in anonymous memory, never written back (but
+/// swapped out under memory pressure, and so slower than [`Disk`](Self::Disk) when they don't fit
+/// RAM). Results kept in the cache are written to it once, at the end, either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoryPolicy {
+    /// [`Ram`](Self::Ram) when the working memory takes at most half the memory available (see
+    /// [`fits_in_memory`]), [`Disk`](Self::Disk) otherwise, or when the memory available is
+    /// unknown.
+    #[default]
+    Auto,
+    /// Anonymous memory, whatever its size.
+    Ram,
+    /// Memory mapped files in the graph's cache.
+    Disk,
+}
+
+impl MemoryPolicy {
+    /// Whether working memory of `bytes` is kept in RAM.
+    pub fn in_ram(self, bytes: usize) -> bool {
+        match self {
+            MemoryPolicy::Ram => true,
+            MemoryPolicy::Disk => false,
+            MemoryPolicy::Auto => fits_in_memory(bytes, available_memory()),
+        }
+    }
+}
+
+/// The memory the system can give out without swapping (Linux's `MemAvailable`: free memory and
+/// the page cache it can reclaim; an approximation on other systems), in bytes, if known. Note
+/// that it ignores containers' memory limits (cgroups), which can be lower.
+pub fn available_memory() -> Option<usize> {
+    sys_info::mem_info()
+        .ok()
+        .map(|m| (m.avail as usize).saturating_mul(1024))
+}
+
+/// Whether `bytes` take at most half of the `available` memory (see [`available_memory`]): the
+/// other half is left to the graph's own pages (read every iteration, and only fast while
+/// cached), other programs, and changes in the memory available while an algorithm runs. Unknown
+/// available memory fits nothing.
+pub fn fits_in_memory(bytes: usize, available: Option<usize>) -> bool {
+    available.is_some_and(|available| bytes <= available / 2)
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AbstractedProceduralMemory<T> {
@@ -590,6 +641,41 @@ impl<T> SharedSliceMut<T> {
         Some(idx + slice.len())
     }
 
+    /// `len` zeroed elements in anonymous memory: the same as [`abst_mem_mut`](Self::abst_mem_mut)'s,
+    /// but backed by no file, so never written back to a disk (see [`MemoryPolicy::Ram`]), and
+    /// given back to the system when dropped. `T` must be valid all zeros.
+    pub fn abst_mem_anon(
+        len: usize,
+    ) -> Result<AbstractedProceduralMemoryMut<T>, Box<dyn std::error::Error>> {
+        // (an anonymous map of 0 bytes is an error: an empty slice maps one)
+        let bytes = len
+            .checked_mul(size_of::<T>())
+            .ok_or("error anonymous memory's size overflows")?;
+        let mut mmap = MmapMut::map_anon(bytes.max(1))?;
+        let slice = SharedSliceMut::<T>::new(mmap.as_mut_ptr() as *mut T, len);
+        Ok(AbstractedProceduralMemoryMut {
+            slice,
+            _vec: Vec::new(),
+            mmap,
+            // nothing to flush
+            mmapped: false,
+        })
+    }
+
+    /// [`abst_mem_anon`](Self::abst_mem_anon) if `in_ram`, [`abst_mem_mut`](Self::abst_mem_mut)'s
+    /// file `mfn` otherwise.
+    pub fn abst_mem(
+        mfn: &str,
+        len: usize,
+        in_ram: bool,
+    ) -> Result<AbstractedProceduralMemoryMut<T>, Box<dyn std::error::Error>> {
+        if in_ram {
+            Self::abst_mem_anon(len)
+        } else {
+            Self::abst_mem_mut(mfn, len, true)
+        }
+    }
+
     /// Truncates file!
     pub fn abst_mem_mut(
         mfn: &str,
@@ -953,6 +1039,23 @@ pub(crate) fn remove_if_exists<P: AsRef<std::path::Path>>(path: P) -> std::io::R
 /// Creates a new, empty file at `path`, in place of any there: readers of the one there keep it.
 /// Never opens another's: if another file appears at `path` between removing the old one and
 /// creating this one (another writer's), that's removed in turn, until this one is created.
+/// Writes `values` to a new file at `path` (as [`create_new_file`]: whoever maps an old one keeps
+/// it), with ordinary writes: unlike stores into a new file's mapping, a full disk is an error
+/// here, rather than a `SIGBUS`.
+pub(crate) fn write_new_file<T: Copy, P: AsRef<std::path::Path>>(
+    path: P,
+    values: &[T],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = create_new_file(path)?;
+    // SAFETY: `values` is `size_of_val(values)` initialized bytes (its elements are plain data)
+    let bytes = unsafe {
+        std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values))
+    };
+    file.write_all(bytes)?;
+    file.flush()
+}
+
 pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(
     path: P,
 ) -> std::io::Result<std::fs::File> {
@@ -973,6 +1076,19 @@ pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Anonymous memory is zeroed, writable, and of any length, empty included.
+    #[test]
+    fn anonymous_memory_is_zeroed_and_writable() {
+        let mut mem = SharedSliceMut::<u64>::abst_mem_anon(1000).unwrap();
+        assert_eq!(mem.as_slice().len(), 1000);
+        assert!(mem.as_slice().iter().all(|&x| x == 0));
+        mem.as_mut_slice()[999] = 7;
+        assert_eq!(mem.as_slice()[999], 7);
+        mem.flush().unwrap();
+        let empty = SharedSliceMut::<u64>::abst_mem_anon(0).unwrap();
+        assert!(empty.as_slice().is_empty());
+    }
     use memmap2::{Mmap, MmapMut};
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
