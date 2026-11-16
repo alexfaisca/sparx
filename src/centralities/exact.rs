@@ -46,16 +46,11 @@ fn reach_of_every_node<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Dire
                 .collect::<Result<_, _>>()?;
             handles.push(scope.spawn(
                 move |_| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                    let nodes =
-                        |k: usize| SharedSliceMut::<Ix>::abst_mem_mut(&files[k], node_count, true);
+                    let nodes = |k: usize| SharedSliceMut::<Ix>::working_mem(&files[k], node_count);
                     let built = (|| {
                         Ok::<_, Box<dyn std::error::Error>>(BatchScratch {
-                            marks: SharedSliceMut::<Marks>::abst_mem_mut(
-                                &files[0], node_count, true,
-                            )?,
-                            visit: SharedSliceMut::<Word>::abst_mem_mut(
-                                &files[1], node_count, true,
-                            )?,
+                            marks: SharedSliceMut::<Marks>::working_mem(&files[0], node_count)?,
+                            visit: SharedSliceMut::<Word>::working_mem(&files[1], node_count)?,
                             frontier: nodes(2)?,
                             next_frontier: nodes(3)?,
                             touched: nodes(4)?,
@@ -198,8 +193,8 @@ fn visit_order<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness
     visited_fn: &str,
 ) -> Result<AbstractedProceduralMemoryMut<Ix>, Box<dyn std::error::Error>> {
     let node_count = g.size();
-    let order_mem = SharedSliceMut::<Ix>::abst_mem_mut(order_fn, node_count, true)?;
-    let visited_mem = SharedSliceMut::<bool>::abst_mem_mut(visited_fn, node_count, true)?;
+    let order_mem = SharedSliceMut::<Ix>::working_mem(order_fn, node_count)?;
+    let visited_mem = SharedSliceMut::<bool>::working_mem(visited_fn, node_count)?;
     let (mut order, mut visited) = (order_mem.shared_slice(), visited_mem.shared_slice());
     // the order is the BFSs' queue: nodes are appended as they're found
     let (mut head, mut tail) = (0, 0);
@@ -554,7 +549,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 
         Ok(Self {
             g,
-            centralities: SharedSliceMut::abst_mem_mut(&e_fn, node_count, true)?,
+            centralities: SharedSliceMut::working_mem(&e_fn, node_count)?,
             normalized,
         })
     }
@@ -597,6 +592,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             },
         )?;
         self.g.cleanup_cache(CacheFile::ExactCloseness)?;
+        // (computed in working memory: saved to the cache once done)
+        self.centralities.persist()?;
         Ok(())
     }
 }
@@ -768,7 +765,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 
         Ok(Self {
             g,
-            centralities: SharedSliceMut::abst_mem_mut(&e_fn, node_count, true)?,
+            centralities: SharedSliceMut::working_mem(&e_fn, node_count)?,
             normalized,
         })
     }
@@ -811,6 +808,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             },
         )?;
         self.g.cleanup_cache(CacheFile::ExactHarmonic)?;
+        // (computed in working memory: saved to the cache once done)
+        self.centralities.persist()?;
         Ok(())
     }
 }
@@ -967,7 +966,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
 
         Ok(Self {
             g,
-            centralities: SharedSliceMut::abst_mem_mut(&e_fn, node_count, true)?,
+            centralities: SharedSliceMut::working_mem(&e_fn, node_count)?,
         })
     }
 
@@ -1000,6 +999,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             };
         })?;
         self.g.cleanup_cache(CacheFile::ExactLin)?;
+        // (computed in working memory: saved to the cache once done)
+        self.centralities.persist()?;
         Ok(())
     }
 }
@@ -1056,7 +1057,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let n = g.size();
         let out_fn = g.build_cache_filename(CacheFile::ExactBetweenness, None)?;
-        let mut centralities = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, n.max(1), true)?;
+        let mut centralities = SharedSliceMut::<f64>::working_mem(&out_fn, n.max(1))?;
         let out = &mut centralities.as_mut_slice()[..n];
         let computed = check_positive_weights(g)
             .and_then(|()| betweenness_sums(g, out, g.thread_num().max(1)));
@@ -1070,7 +1071,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         for c in out.iter_mut() {
             *c *= scale;
         }
-        centralities.flush()?;
+        centralities.persist()?;
         Ok(Self { g, centralities })
     }
 
@@ -1362,11 +1363,12 @@ fn brandes_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedn
     // sums, and so the results, are the same every run on as many threads
     const CHUNK: usize = 16;
     // each thread's memory: its search's nodes' states and order (`largest` of each), and its
-    // sums (`total`); as many threads as half the available memory holds, at most (a single
-    // one when how much is available is unknown: many might not fit)
+    // sums (`total`); as many threads as what's left of the RAM working memory may take holds,
+    // at most (see `ram_left`: the budget other working memory shares; a single thread when how
+    // much is available is unknown: many might not fit)
     let per_thread = (std::mem::size_of::<Slot>() + 4) * largest + 8 * total;
-    let affordable = crate::shared_slice::available_memory()
-        .map_or(1, |available| (available / 2 / per_thread.max(1)).max(1));
+    let affordable =
+        crate::shared_slice::ram_left().map_or(1, |left| (left / per_thread.max(1)).max(1));
     let threads = threads.min(affordable).min(total.div_ceil(CHUNK)).max(1);
     let chunks = total.div_ceil(CHUNK);
     // each thread's nodes' states, visit order and sums
@@ -1375,7 +1377,7 @@ fn brandes_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedn
         .map(|k| g.build_cache_filename(CacheFile::ExactBetweenness, Some(first_file + k)))
         .collect::<Result<_, _>>()?;
     let sums: Vec<AbstractedProceduralMemoryMut<f64>> = (0..threads)
-        .map(|tid| SharedSliceMut::<f64>::abst_mem_mut(&files[FILES * tid + 2], total, true))
+        .map(|tid| SharedSliceMut::<f64>::working_mem(&files[FILES * tid + 2], total))
         .collect::<Result<_, _>>()?;
     let sum_views: Vec<SharedSliceMut<f64>> = sums.iter().map(|s| s.shared_slice()).collect();
     let weighted = E::is_weighted();
@@ -1383,8 +1385,8 @@ fn brandes_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedn
         let f = &files[FILES * tid..FILES * (tid + 1)];
         let memory = (|| -> Result<_, Box<dyn std::error::Error>> {
             Ok((
-                SharedSliceMut::<Slot>::abst_mem_mut(&f[0], largest, true)?,
-                SharedSliceMut::<u32>::abst_mem_mut(&f[1], largest, true)?,
+                SharedSliceMut::<Slot>::working_mem(&f[0], largest)?,
+                SharedSliceMut::<u32>::working_mem(&f[1], largest)?,
             ))
         })()
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -1550,9 +1552,9 @@ fn betweenness_by_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType>(
             return brandes_blocks(g, &Csr::of(g), &[0, n], None, out, threads, 0);
         }
         let file = |seq: usize| g.build_cache_filename(CacheFile::ExactBetweenness, Some(seq));
-        let mut members_mem = SharedSliceMut::<usize>::abst_mem_mut(&file(0)?, total, true)?;
-        let mut reach_mem = SharedSliceMut::<f64>::abst_mem_mut(&file(1)?, total, true)?;
-        let mut position_mem = SharedSliceMut::<usize>::abst_mem_mut(&file(2)?, n, true)?;
+        let mut members_mem = SharedSliceMut::<usize>::working_mem(&file(0)?, total)?;
+        let mut reach_mem = SharedSliceMut::<f64>::working_mem(&file(1)?, total)?;
+        let mut position_mem = SharedSliceMut::<usize>::working_mem(&file(2)?, n)?;
         let (members, reach, position) = (
             members_mem.as_mut_slice(),
             reach_mem.as_mut_slice(),
@@ -1590,7 +1592,7 @@ fn betweenness_by_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType>(
                 None
             }
         };
-        let mut offsets_mem = SharedSliceMut::<usize>::abst_mem_mut(&file(3)?, total + 1, true)?;
+        let mut offsets_mem = SharedSliceMut::<usize>::working_mem(&file(3)?, total + 1)?;
         let offsets = offsets_mem.as_mut_slice();
         offsets[0] = 0;
         for lb in 0..blocks.len() {
@@ -1604,11 +1606,10 @@ fn betweenness_by_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType>(
             }
         }
         let arcs = offsets[total];
-        let mut targets_mem = SharedSliceMut::<u32>::abst_mem_mut(&file(4)?, arcs.max(1), true)?;
-        let mut weights_mem = SharedSliceMut::<f64>::abst_mem_mut(
+        let mut targets_mem = SharedSliceMut::<u32>::working_mem(&file(4)?, arcs.max(1))?;
+        let mut weights_mem = SharedSliceMut::<f64>::working_mem(
             &file(5)?,
             if E::is_weighted() { arcs.max(1) } else { 1 },
-            true,
         )?;
         let (targets, weights) = (targets_mem.as_mut_slice(), weights_mem.as_mut_slice());
         for lb in 0..blocks.len() {
@@ -1631,7 +1632,7 @@ fn betweenness_by_blocks<N: graph::N, E: graph::E, Ix: graph::IndexType>(
             targets,
             weights: E::is_weighted().then_some(&*weights),
         };
-        let mut sums_mem = SharedSliceMut::<f64>::abst_mem_mut(&file(6)?, total, true)?;
+        let mut sums_mem = SharedSliceMut::<f64>::working_mem(&file(6)?, total)?;
         let sums = sums_mem.as_mut_slice();
         brandes_blocks(g, &block_arcs, &starts, Some(reach), sums, threads, 8)?;
         for (l, &s) in sums.iter().enumerate() {

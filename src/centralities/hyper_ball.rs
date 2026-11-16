@@ -160,7 +160,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     ///
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_memory(g, None, g.thread_num(), MemoryPolicy::Auto)
+        Self::new_with_memory(g, None, g.thread_num(), memory_policy())
     }
 
     /// Performs the *HyperBall Algorithm* as described in ["In-Core Computation of Geometric Centralities with HyperBall: A Hundred Billion Nodes and Beyond"](https://doi.org/10.48550/arXiv.1308.2144) by Boldi P. and Vigna S.
@@ -177,13 +177,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_memory(g, max_depth, threads, MemoryPolicy::Auto)
+        Self::new_with_memory(g, max_depth, threads, memory_policy())
     }
 
     /// [`new_with_conf`](Self::new_with_conf), its working memory (two counters and three
-    /// accumulators per node) kept where `memory` says: by default
-    /// ([`MemoryPolicy::Auto`]) in RAM when it takes at most half the memory available, in the
-    /// graph's cache otherwise. The counters and distance accumulators are cached (for
+    /// accumulators per node) kept where `memory` says, rather than where [`memory_policy`] does
+    /// (under [`MemoryPolicy::Auto`], all of it in RAM if it fits what's left of the RAM working
+    /// memory may take, see [`ram_left`], all in the graph's cache otherwise). The counters and distance accumulators are cached (for
     /// [`get_or_compute`](Self::get_or_compute)) either way: kept in RAM, they're written to
     /// the cache once, at the end.
     pub fn new_with_memory(
@@ -506,7 +506,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             Centrality::Closeness,
             normalize,
         ))?;
-        let mut mem = SharedSliceMut::<W>::abst_mem_mut(&c_fn, node_count, true)?;
+        let mut mem = SharedSliceMut::<W>::working_mem(&c_fn, node_count)?;
 
         // normalized by number of reacheable nodes
         if normalize {
@@ -534,6 +534,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         //     println!("{:?}\n centrality", s);
         // }
         let idx = Self::index_by_normalization(normalize);
+        mem.persist()?;
         self.closeness[idx] = Some(mem);
         Ok(self.closeness[idx]
             .as_ref()
@@ -559,7 +560,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             Centrality::Harmonic,
             normalize,
         ))?;
-        let mut mem = SharedSliceMut::<W>::abst_mem_mut(&c_fn, node_count, true)?;
+        let mut mem = SharedSliceMut::<W>::working_mem(&c_fn, node_count)?;
 
         // normalized by number of reacheable nodes
         if normalize {
@@ -586,6 +587,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         //     println!("{:?}\n centrality", s);
         // }
         let idx = Self::index_by_normalization(normalize);
+        mem.persist()?;
         self.harmonic[idx] = Some(mem);
         Ok(self.harmonic[idx]
             .as_ref()
@@ -598,7 +600,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         let node_count = self.g.size(); // |V|
 
         let c_fn = self.centrality_cache_file_name(Centrality::Lin)?;
-        let mut mem = SharedSliceMut::<W>::abst_mem_mut(&c_fn, node_count, true)?;
+        let mut mem = SharedSliceMut::<W>::working_mem(&c_fn, node_count)?;
 
         // lin's centrality is like a closeness centraility doubly normalized by number of
         // reacheable nodes
@@ -612,6 +614,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
             }
         }
 
+        mem.persist()?;
         self.lin = Some(mem);
         // if let Some(s) = mem.slice(0, node_count) {
         //     println!("{:?}\n centrality", s);
@@ -691,7 +694,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_count = g.size();
-        let mut hb = Self::new_no_compute_impl(g, max_depth, g.thread_num(), MemoryPolicy::Auto)?;
+        let mut hb = Self::new_no_compute_impl(g, max_depth, g.thread_num(), memory_policy())?;
 
         let params = crate::gpu::HyperBallGpuParams {
             registers: HyperLogLog::<P>::REGISTERS,
@@ -730,7 +733,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_no_compute_impl(g, max_depth, threads, MemoryPolicy::Auto)
+        Self::new_no_compute_impl(g, max_depth, threads, memory_policy())
     }
 
     #[cfg(not(feature = "bench"))]
@@ -740,7 +743,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
         max_depth: Option<usize>,
         threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_no_compute_impl(g, max_depth, threads, MemoryPolicy::Auto)
+        Self::new_no_compute_impl(g, max_depth, threads, memory_policy())
     }
 
     /// [`new_no_compute`](Self::new_no_compute), its working memory kept where `memory` says

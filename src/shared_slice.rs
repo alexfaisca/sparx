@@ -52,14 +52,126 @@ pub enum MemoryPolicy {
 }
 
 impl MemoryPolicy {
-    /// Whether working memory of `bytes` is kept in RAM.
+    /// Whether working memory of `bytes` is kept in RAM: under [`Auto`](Self::Auto), whether
+    /// it fits what's left of the RAM working memory may take (see [`ram_left`]).
     pub fn in_ram(self, bytes: usize) -> bool {
         match self {
             MemoryPolicy::Ram => true,
             MemoryPolicy::Disk => false,
-            MemoryPolicy::Auto => fits_in_memory(bytes, available_memory()),
+            MemoryPolicy::Auto => ram_left().is_some_and(|left| bytes <= left),
         }
     }
+
+    const fn to_u8(self) -> u8 {
+        match self {
+            MemoryPolicy::Auto => 0,
+            MemoryPolicy::Ram => 1,
+            MemoryPolicy::Disk => 2,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => MemoryPolicy::Ram,
+            2 => MemoryPolicy::Disk,
+            _ => MemoryPolicy::Auto,
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryPolicy {
+    type Err = String;
+
+    /// `auto`, `ram` or `disk` (in any case).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(MemoryPolicy::Auto),
+            "ram" => Ok(MemoryPolicy::Ram),
+            "disk" => Ok(MemoryPolicy::Disk),
+            _ => Err(format!(
+                "unknown memory policy {s:?}: expected 'auto', 'ram' or 'disk'"
+            )),
+        }
+    }
+}
+
+/// The policy set by [`set_memory_policy`], if any (`u8::MAX` if none).
+static MEMORY_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+/// The environment variable [`memory_policy`] defaults to, when set: `auto`, `ram` or `disk`.
+pub const MEMORY_POLICY_VAR: &str = "SPARX_MEMORY";
+
+/// The [`MemoryPolicy`] every algorithm follows (but those given one, as
+/// [`HyperBallInner::new_with_memory`](crate::centralities::hyper_ball::HyperBallInner::new_with_memory)):
+/// the last one [`set_memory_policy`] set, or else [`MEMORY_POLICY_VAR`]'s (`SPARX_MEMORY`), or
+/// else [`Auto`](MemoryPolicy::Auto). An invalid `SPARX_MEMORY` is reported (once, on standard
+/// error) and ignored.
+pub fn memory_policy() -> MemoryPolicy {
+    let set = MEMORY_POLICY.load(Ordering::Relaxed);
+    if set != u8::MAX {
+        return MemoryPolicy::from_u8(set);
+    }
+    static FROM_ENV: std::sync::OnceLock<MemoryPolicy> = std::sync::OnceLock::new();
+    *FROM_ENV.get_or_init(|| match std::env::var(MEMORY_POLICY_VAR) {
+        Ok(value) => value.parse().unwrap_or_else(|e| {
+            eprintln!("sparx: ignoring {MEMORY_POLICY_VAR}: {e}");
+            MemoryPolicy::Auto
+        }),
+        Err(_) => MemoryPolicy::Auto,
+    })
+}
+
+/// Sets the [`MemoryPolicy`] every algorithm follows from now on, in place of `SPARX_MEMORY`'s
+/// (see [`memory_policy`]). Process wide: algorithms already running keep the memory they have.
+pub fn set_memory_policy(policy: MemoryPolicy) {
+    MEMORY_POLICY.store(policy.to_u8(), Ordering::Relaxed);
+}
+
+/// The working memory kept in RAM (anonymous memory, under any policy), and the most it may take
+/// under [`MemoryPolicy::Auto`]: half the [`available_memory`] when it was last none (see
+/// [`ram_left`]).
+struct RamUse {
+    in_use: usize,
+    budget: Option<usize>,
+}
+
+static RAM_USE: std::sync::Mutex<RamUse> = std::sync::Mutex::new(RamUse {
+    in_use: 0,
+    budget: None,
+});
+
+fn ram_use() -> std::sync::MutexGuard<'static, RamUse> {
+    // (the counts stay consistent whatever panicked while they were held)
+    RAM_USE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The bytes more working memory may take in RAM under [`MemoryPolicy::Auto`], if known: half
+/// the [`available_memory`] (see [`fits_in_memory`]), less the working memory already in RAM.
+///
+/// One budget for every algorithm running (nested ones, those on other threads): taken from the
+/// memory available when none was in RAM, as anonymous memory is only counted as used by the
+/// system once written, so that the memory available then is still the one to share. Known only
+/// if the memory available is.
+pub fn ram_left() -> Option<usize> {
+    let mut ram = ram_use();
+    if ram.in_use == 0 {
+        ram.budget = available_memory().map(|available| available / 2);
+    }
+    ram.budget.map(|budget| budget.saturating_sub(ram.in_use))
+}
+
+/// Counts `bytes` of working memory in RAM (until [`release_ram`]).
+fn reserve_ram(bytes: usize) {
+    let mut ram = ram_use();
+    if ram.in_use == 0 {
+        ram.budget = available_memory().map(|available| available / 2);
+    }
+    ram.in_use = ram.in_use.saturating_add(bytes);
+}
+
+fn release_ram(bytes: usize) {
+    let mut ram = ram_use();
+    ram.in_use = ram.in_use.saturating_sub(bytes);
 }
 
 /// The memory the system can give out without swapping (Linux's `MemAvailable`: free memory and
@@ -94,6 +206,45 @@ pub struct AbstractedProceduralMemoryMut<T> {
     mmap: MmapMut,
     _vec: Vec<T>,
     mmapped: bool,
+    /// The bytes of anonymous memory it counts in RAM (see [`ram_left`]), released when dropped.
+    ram_bytes: usize,
+    /// Working memory's cache file (see [`SharedSliceMut::working_mem`]), where
+    /// [`persist`](Self::persist) saves it.
+    file: Option<String>,
+}
+
+impl<T> Drop for AbstractedProceduralMemoryMut<T> {
+    fn drop(&mut self) {
+        if self.ram_bytes != 0 {
+            release_ram(self.ram_bytes);
+        }
+    }
+}
+
+impl<T> AbstractedProceduralMemoryMut<T> {
+    /// Whether it's (nonempty) anonymous memory, counted as working memory in RAM (see
+    /// [`ram_left`]), rather than a file's.
+    pub fn in_ram(&self) -> bool {
+        self.ram_bytes != 0
+    }
+
+    /// Saves a result computed in working memory (see [`SharedSliceMut::working_mem`]) to the
+    /// cache file it was allocated with, for whoever reads it from there (as `get_or_compute`s
+    /// do): kept in RAM, it's written there now, once (in a new file: whoever maps the old one
+    /// keeps it); kept in the file, its changes are flushed (without waiting). Its elements must
+    /// be plain data.
+    pub fn persist(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.mmapped {
+            self.flush_async()
+        } else {
+            let file = self
+                .file
+                .as_ref()
+                .ok_or("error only working memory can be persisted to its cache file")?;
+            write_new_file_raw(file, self.as_slice())?;
+            Ok(())
+        }
+    }
 }
 
 #[derive(Copy, Debug)]
@@ -222,6 +373,8 @@ impl<T> AbstractedProceduralMemoryMut<T> {
             })?,
             _vec: Vec::new(),
             mmapped: true,
+            ram_bytes: 0,
+            file: None,
         })
     }
 
@@ -241,6 +394,8 @@ impl<T> AbstractedProceduralMemoryMut<T> {
             mmap,
             _vec: Vec::new(),
             mmapped: true,
+            ram_bytes: 0,
+            file: None,
         })
     }
 
@@ -653,13 +808,38 @@ impl<T> SharedSliceMut<T> {
             .ok_or("error anonymous memory's size overflows")?;
         let mut mmap = MmapMut::map_anon(bytes.max(1))?;
         let slice = SharedSliceMut::<T>::new(mmap.as_mut_ptr() as *mut T, len);
+        reserve_ram(bytes);
         Ok(AbstractedProceduralMemoryMut {
             slice,
             _vec: Vec::new(),
             mmap,
             // nothing to flush
             mmapped: false,
+            ram_bytes: bytes,
+            file: None,
         })
+    }
+
+    /// An algorithm's working memory of `len` zeroed elements: in RAM or in a new file at `mfn`,
+    /// as [`memory_policy`] says (see [`abst_mem`](Self::abst_mem)). Never read back from `mfn`:
+    /// in RAM, there's no such file. `T` must be valid all zeros.
+    pub fn working_mem(
+        mfn: &str,
+        len: usize,
+    ) -> Result<AbstractedProceduralMemoryMut<T>, Box<dyn std::error::Error>> {
+        Self::working_mem_with(mfn, len, memory_policy())
+    }
+
+    /// [`working_mem`](Self::working_mem), as `policy` says.
+    pub fn working_mem_with(
+        mfn: &str,
+        len: usize,
+        policy: MemoryPolicy,
+    ) -> Result<AbstractedProceduralMemoryMut<T>, Box<dyn std::error::Error>> {
+        let bytes = len.saturating_mul(size_of::<T>());
+        let mut mem = Self::abst_mem(mfn, len, policy.in_ram(bytes))?;
+        mem.file = Some(mfn.to_owned());
+        Ok(mem)
     }
 
     /// [`abst_mem_anon`](Self::abst_mem_anon) if `in_ram`, [`abst_mem_mut`](Self::abst_mem_mut)'s
@@ -714,6 +894,8 @@ impl<T> SharedSliceMut<T> {
             _vec: vec,
             mmap,
             mmapped,
+            ram_bytes: 0,
+            file: None,
         })
     }
 }
@@ -858,9 +1040,9 @@ impl<T: Debug + Copy + Clone + Eq> SharedQueueMut<T> {
     }
 }
 
-/// A scratch array in a memmapped file of its own, removed once the array is dropped: an
-/// algorithm's working memory, kept out of the heap however large the graph. Zeroed when
-/// created.
+/// A scratch array: an algorithm's working memory (see [`MemoryPolicy`]), in RAM or in a
+/// memmapped file of its own, removed once the array is dropped, kept out of the heap however
+/// large the graph. Zeroed when created.
 ///
 /// Its elements are never dropped: meant for plain data.
 #[derive(Debug)]
@@ -871,9 +1053,11 @@ pub(crate) struct ScratchMem<T> {
 
 #[allow(dead_code)]
 impl<T> ScratchMem<T> {
-    /// A zeroed array of `len` elements, in a new file at `file_name` (in place of any there).
+    /// A zeroed array of `len` elements: working memory (see
+    /// [`SharedSliceMut::working_mem`]), in RAM or in a new file at `file_name` (in place of any
+    /// there).
     pub(crate) fn new(file_name: String, len: usize) -> Result<Self, Box<dyn std::error::Error>> {
-        let mem = SharedSliceMut::<T>::abst_mem_mut(&file_name, len, true)?;
+        let mem = SharedSliceMut::<T>::working_mem(&file_name, len)?;
         Ok(Self {
             mem: ManuallyDrop::new(mem),
             file_name,
@@ -1036,9 +1220,6 @@ pub(crate) fn remove_if_exists<P: AsRef<std::path::Path>>(path: P) -> std::io::R
     }
 }
 
-/// Creates a new, empty file at `path`, in place of any there: readers of the one there keep it.
-/// Never opens another's: if another file appears at `path` between removing the old one and
-/// creating this one (another writer's), that's removed in turn, until this one is created.
 /// Writes `values` to a new file at `path` (as [`create_new_file`]: whoever maps an old one keeps
 /// it), with ordinary writes: unlike stores into a new file's mapping, a full disk is an error
 /// here, rather than a `SIGBUS`.
@@ -1046,6 +1227,11 @@ pub(crate) fn write_new_file<T: Copy, P: AsRef<std::path::Path>>(
     path: P,
     values: &[T],
 ) -> std::io::Result<()> {
+    write_new_file_raw(path, values)
+}
+
+/// [`write_new_file`], of any elements' bytes (atomics, say): they must be plain data.
+fn write_new_file_raw<T, P: AsRef<std::path::Path>>(path: P, values: &[T]) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = create_new_file(path)?;
     // SAFETY: `values` is `size_of_val(values)` initialized bytes (its elements are plain data)
@@ -1056,6 +1242,9 @@ pub(crate) fn write_new_file<T: Copy, P: AsRef<std::path::Path>>(
     file.flush()
 }
 
+/// Creates a new, empty file at `path`, in place of any there: readers of the one there keep it.
+/// Never opens another's: if another file appears at `path` between removing the old one and
+/// creating this one (another writer's), that's removed in turn, until this one is created.
 pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(
     path: P,
 ) -> std::io::Result<std::fs::File> {
@@ -1076,6 +1265,42 @@ pub(crate) fn create_new_file<P: AsRef<std::path::Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Policies parse from their names, in any case, and nothing else.
+    #[test]
+    fn memory_policies_parse_from_their_names() {
+        assert_eq!("auto".parse(), Ok(MemoryPolicy::Auto));
+        assert_eq!("RAM".parse(), Ok(MemoryPolicy::Ram));
+        assert_eq!("Disk".parse(), Ok(MemoryPolicy::Disk));
+        assert!("ssd".parse::<MemoryPolicy>().is_err());
+        for p in [MemoryPolicy::Auto, MemoryPolicy::Ram, MemoryPolicy::Disk] {
+            assert_eq!(MemoryPolicy::from_u8(p.to_u8()), p);
+        }
+    }
+
+    /// Working memory is a file's under `Disk` and anonymous under `Ram`, zeroed either way, and
+    /// RAM working memory is counted against `Auto`'s budget until dropped.
+    #[test]
+    fn working_memory_goes_where_its_policy_says() {
+        let dir = std::env::temp_dir().join(format!("working_mem_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.tmp").to_string_lossy().into_owned();
+        let disk = SharedSliceMut::<u64>::working_mem_with(&path, 100, MemoryPolicy::Disk).unwrap();
+        assert!(!disk.in_ram() && Path::new(&path).exists());
+        assert!(disk.as_slice().iter().all(|&x| x == 0));
+        drop(disk);
+        remove_if_exists(&path).unwrap();
+        let ram = SharedSliceMut::<u64>::working_mem_with(&path, 100, MemoryPolicy::Ram).unwrap();
+        assert!(ram.in_ram() && !Path::new(&path).exists());
+        assert!(ram.as_slice().iter().all(|&x| x == 0));
+        // (other tests' working memory comes and goes meanwhile: only this one's bytes are sure
+        // to be counted while it's alive)
+        assert!(ram_use().in_use >= 800);
+        drop(ram);
+        // more than any machine has: on disk under `Auto`
+        assert!(!MemoryPolicy::Auto.in_ram(usize::MAX));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// Anonymous memory is zeroed, writable, and of any length, empty included.
     #[test]
@@ -1105,7 +1330,8 @@ mod tests {
             assert!(mem.iter().all(|&x| x == 0));
             mem[999] = 7;
             assert_eq!(mem[999], 7);
-            assert!(Path::new(&path).exists());
+            // a file only if not in RAM (see `memory_policy`)
+            assert_eq!(Path::new(&path).exists(), !mem.mem.in_ram());
             let filled =
                 ScratchMem::<u32>::filled(dir.join("f.tmp").to_string_lossy().into_owned(), 3, 9)
                     .unwrap();
