@@ -65,3 +65,5 @@ python/sparx/*.so
 .windsurf/
 .clinerules
 .opencode/
+scripts/bench/webgraph/lib/
+scripts/bench/webgraph-rs/cli/

@@ -1,0 +1,21 @@
+# Boldi and Vigna's Rust HyperBall (webgraph-rs's `webgraph-algo`), for
+# scripts/bench/hyperball_webgraph.py. A standalone package, outside sparx's workspace (the empty
+# `[workspace]` below), so that its dependencies don't enter sparx's lockfile.
+[package]
+name = "hyperball-webgraph-rs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+webgraph = "=0.7.0"
+webgraph-algo = "=0.7.1"
+dsi-progress-logger = "0.8"
+rand = { version = "0.10", features = ["small_rng"] }
+rayon = "1.12"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"

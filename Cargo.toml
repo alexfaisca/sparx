@@ -98,3 +98,7 @@ paste = "1.0.15"
 [[example]]
 name = "hyperball_timing"
 required-features = ["bench"]
+
+[[example]]
+name = "hyperball_bench"
+required-features = ["bench"]
