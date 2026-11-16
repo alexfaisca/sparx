@@ -371,7 +371,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::GVELouvain, None)?;
-        let coms = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let coms = SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?;
         Ok(Self {
             g,
             community: coms,
@@ -403,19 +403,19 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         let c_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(9))?;
         let h_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(10))?;
 
-        let k = SharedSliceMut::<W::Atomic>::abst_mem_mut(&k_fn, node_count, true)?;
-        let sigma = SharedSliceMut::<W::Atomic>::abst_mem_mut(&s_fn, node_count, true)?;
-        let gdi = SharedSliceMut::<Ix>::abst_mem_mut(&gdi_fn, 2 * node_count, true)?;
-        let gde = SharedSliceMut::<Ix>::abst_mem_mut(&gde_fn, edge_count, true)?;
-        let gdw = SharedSliceMut::<W>::abst_mem_mut(&gdw_fn, edge_count, true)?;
-        let gddi = SharedSliceMut::<Ix>::abst_mem_mut(&gddi_fn, 2 * node_count, true)?;
-        let gdde = SharedSliceMut::<Ix>::abst_mem_mut(&gdde_fn, edge_count, true)?;
-        let gddw = SharedSliceMut::<W>::abst_mem_mut(&gddw_fn, edge_count, true)?;
-        let processed = SharedSliceMut::<AtomicBool>::abst_mem_mut(&a_fn, node_count, true)?;
-        let coms = SharedSliceMut::<Ix>::abst_mem_mut(&c_fn, node_count, true)?;
+        let k = SharedSliceMut::<W::Atomic>::working_mem(&k_fn, node_count)?;
+        let sigma = SharedSliceMut::<W::Atomic>::working_mem(&s_fn, node_count)?;
+        let gdi = SharedSliceMut::<Ix>::working_mem(&gdi_fn, 2 * node_count)?;
+        let gde = SharedSliceMut::<Ix>::working_mem(&gde_fn, edge_count)?;
+        let gdw = SharedSliceMut::<W>::working_mem(&gdw_fn, edge_count)?;
+        let gddi = SharedSliceMut::<Ix>::working_mem(&gddi_fn, 2 * node_count)?;
+        let gdde = SharedSliceMut::<Ix>::working_mem(&gdde_fn, edge_count)?;
+        let gddw = SharedSliceMut::<W>::working_mem(&gddw_fn, edge_count)?;
+        let processed = SharedSliceMut::<AtomicBool>::working_mem(&a_fn, node_count)?;
+        let coms = SharedSliceMut::<Ix>::working_mem(&c_fn, node_count)?;
         // has to be size max(|V|, |E|) as it is both used to store the 'holey' CSR (O(|E|) space) and
         // renumbered community memberships (O(|V|) space)
-        let help = SharedSliceMut::<Ix>::abst_mem_mut(&h_fn, edge_count.max(node_count), true)?;
+        let help = SharedSliceMut::<Ix>::working_mem(&h_fn, edge_count.max(node_count))?;
 
         let index_ptr = SharedSlice::<Ix>::new(self.g.offsets_ptr(), self.g.offsets_size());
         let neighbours_ptr = SharedSlice::<Ix>::new(self.g.neighbours_ptr(), edge_count);
@@ -1117,6 +1117,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         &mut self,
         proc_mem: ProceduralMemoryGVELouvain<Ix, W>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_with_proc_mem_impl_inner(proc_mem)?;
+        // (computed in working memory: saved to the cache once done)
+        self.community.persist()
+    }
+
+    fn compute_with_proc_mem_impl_inner(
+        &mut self,
+        proc_mem: ProceduralMemoryGVELouvain<Ix, W>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let node_count = self.g.size();
         let edge_count = self.g.width();
 
@@ -1169,15 +1178,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             super::Refinement::Leiden => {
                 let file = |seq| self.build_cache_filename(CacheFile::GVELouvain, Some(seq));
                 Some((
-                    SharedSliceMut::<Ix>::abst_mem_mut(&file(13)?, node_count.max(1), true)?,
-                    SharedSliceMut::<Ix>::abst_mem_mut(&file(14)?, node_count.max(1), true)?,
-                    SharedSliceMut::<W::Atomic>::abst_mem_mut(&file(15)?, node_count.max(1), true)?,
-                    SharedSliceMut::<Ix>::abst_mem_mut(&file(16)?, node_count.max(1), true)?,
-                    SharedSliceMut::<AtomicUsize>::abst_mem_mut(
-                        &file(17)?,
-                        node_count.max(1),
-                        true,
-                    )?,
+                    SharedSliceMut::<Ix>::working_mem(&file(13)?, node_count.max(1))?,
+                    SharedSliceMut::<Ix>::working_mem(&file(14)?, node_count.max(1))?,
+                    SharedSliceMut::<W::Atomic>::working_mem(&file(15)?, node_count.max(1))?,
+                    SharedSliceMut::<Ix>::working_mem(&file(16)?, node_count.max(1))?,
+                    SharedSliceMut::<AtomicUsize>::working_mem(&file(17)?, node_count.max(1))?,
                 ))
             }
         };
@@ -1489,8 +1494,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             // uncommon, so this is not a hot path.
             let id_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(11))?;
             let td_fn = self.build_cache_filename(CacheFile::GVELouvain, Some(12))?;
-            let int_deg_owner = SharedSliceMut::<W>::abst_mem_mut(&id_fn, prev_comm_count, true)?;
-            let tot_deg_owner = SharedSliceMut::<W>::abst_mem_mut(&td_fn, prev_comm_count, true)?;
+            let int_deg_owner = SharedSliceMut::<W>::working_mem(&id_fn, prev_comm_count)?;
+            let tot_deg_owner = SharedSliceMut::<W>::working_mem(&td_fn, prev_comm_count)?;
             let modularity = self.finish_modularity::<W>(
                 int_deg_owner.shared_slice(),
                 tot_deg_owner.shared_slice(),
@@ -1500,8 +1505,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             )?;
             drop(int_deg_owner);
             drop(tot_deg_owner);
-            std::fs::remove_file(&id_fn)?;
-            std::fs::remove_file(&td_fn)?;
+            crate::shared_slice::remove_if_exists(&id_fn)?;
+            crate::shared_slice::remove_if_exists(&td_fn)?;
             modularity
         };
 

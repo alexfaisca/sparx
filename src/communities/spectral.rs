@@ -256,7 +256,7 @@ struct Block<W: Weight> {
 impl<W: Weight> Block<W> {
     fn new(file: &str, n: usize, b: usize) -> Result<Self, Error> {
         Ok(Self {
-            mem: SharedSliceMut::<W>::abst_mem_mut(file, (n * b).max(1), true)?,
+            mem: SharedSliceMut::<W>::working_mem(file, (n * b).max(1))?,
             b,
         })
     }
@@ -342,7 +342,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Operator<'a, N, E, Ix> 
             half: 1.,
             threads,
         };
-        let scale = SharedSliceMut::<f64>::abst_mem_mut(file, n.max(1), true)?;
+        let scale = SharedSliceMut::<f64>::working_mem(file, n.max(1))?;
         let s = scale.shared_slice();
         chunks(n, threads, &|begin, end| {
             let mut s = s;
@@ -1603,7 +1603,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
         let mut number = vec![usize::MAX; labels.iter().max().map_or(0, |&m| m + 1)];
         let mut count = 0;
         let out_fn = g.build_cache_filename(CacheFile::Spectral, None)?;
-        let mut communities = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, n.max(1), true)?;
+        let mut communities = SharedSliceMut::<Ix>::working_mem(&out_fn, n.max(1))?;
         for (u, c) in communities.as_mut_slice()[..n].iter_mut().zip(&labels) {
             if number[*c] == usize::MAX {
                 number[*c] = count;
@@ -1612,7 +1612,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
             *u = Ix::new(number[*c]);
         }
         let _ = labels.len();
-        communities.flush()?;
+        communities.persist()?;
         let modularity = g.modularity(&communities.as_slice()[..n], count)?;
         Ok(Self {
             g,
@@ -1799,7 +1799,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                 .iter()
                 .map(|&r| r * op.half)
                 .collect();
-            let vectors = SharedSliceMut::<W>::abst_mem_mut(&out_fn, (n * count).max(1), true)?;
+            let vectors = SharedSliceMut::<W>::working_mem(&out_fn, (n * count).max(1))?;
             {
                 let (from, to) = (sub.vectors.mem.as_slice(), vectors.shared_slice());
                 chunks(n, threads, &|begin, end| {
@@ -1811,7 +1811,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight>
                     }
                 });
             }
-            vectors.flush()?;
+            vectors.persist()?;
             Ok((vectors, values, residuals, sub.iterations, converged))
         })();
         g.cleanup_cache(CacheFile::Spectral)?;

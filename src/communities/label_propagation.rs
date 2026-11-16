@@ -240,7 +240,7 @@ fn color_classes<Ix: graph::IndexType, E: graph::E>(
     };
     // u before v if u's priority is higher
     let priority = |u: usize| (mix(u as u64), u);
-    let mut colors = SharedSliceMut::<u32>::abst_mem_mut(color_file, n.max(1), true)?;
+    let mut colors = SharedSliceMut::<u32>::working_mem(color_file, n.max(1))?;
     colors.as_mut_slice().iter_mut().for_each(|c| *c = NONE);
     let shared = colors.shared_slice();
     // each node's neighbours of higher priority (colored before it), which it waits for; the
@@ -376,14 +376,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
         };
         let colors = starts.len() - 1;
 
-        let mut labels = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, n.max(1), true)?;
+        let mut labels = SharedSliceMut::<Ix>::working_mem(&out_fn, n.max(1))?;
         for (u, l) in labels.as_mut_slice().iter_mut().enumerate().take(n) {
             *l = Ix::new(u);
         }
         // whether a node is to be looked at (again), mapped as the labels are
         let pending_fn = g.build_cache_filename(CacheFile::LabelPropagation, Some(1))?;
-        let mut pending_mem =
-            SharedSliceMut::<AtomicBool>::abst_mem_mut(&pending_fn, n.max(1), true)?;
+        let mut pending_mem = SharedSliceMut::<AtomicBool>::working_mem(&pending_fn, n.max(1))?;
         for p in pending_mem.as_mut_slice().iter_mut() {
             *p = AtomicBool::new(true);
         }
@@ -601,7 +600,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
             out.targets,
             &mut labels.as_mut_slice()[..n],
         )?;
-        labels.flush()?;
+        labels.persist()?;
         let communities = &labels.as_slice()[..n];
         let modularity = if Dir::DIRECTED {
             super::directed_louvain::directed_modularity(g, communities)?

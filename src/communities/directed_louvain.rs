@@ -348,7 +348,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
             .into());
         }
         let out_fn = g.build_cache_filename(CacheFile::DirectedLouvain, None)?;
-        let communities = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let communities = SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?;
         let mut louvain = Self {
             g,
             communities,
@@ -360,6 +360,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> DirectedLouvain<'a, N, 
             Refinement::None => louvain.compute(max_passes, tolerance)?,
             Refinement::Leiden => louvain.compute_leiden(max_passes, tolerance)?,
         }
+        // (computed in working memory: saved to the cache once done)
+        louvain.communities.persist()?;
         Ok(louvain)
     }
 
