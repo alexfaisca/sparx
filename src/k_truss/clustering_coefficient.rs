@@ -245,7 +245,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
-        let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let local = SharedSliceMut::<f64>::working_mem(&out_fn, g.size())?;
         let mut clustering_coefficient = Self {
             g,
             local,
@@ -253,6 +253,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
             local_average: 0.,
         };
         clustering_coefficient.compute()?;
+        clustering_coefficient.local.persist()?;
         Ok(clustering_coefficient)
     }
 
@@ -266,7 +267,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
         triangles: Triangles<'a, N, E, Ix, Tx>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::ClusteringCoefficient, None)?;
-        let local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let local = SharedSliceMut::<f64>::working_mem(&out_fn, g.size())?;
         let mut clustering_coefficient = Self {
             g,
             local,
@@ -274,6 +275,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> ClusteringCoefficient<'
             local_average: 0.,
         };
         clustering_coefficient.compute_with_triangles(triangles)?;
+        clustering_coefficient.local.persist()?;
         Ok(clustering_coefficient)
     }
 
@@ -555,7 +557,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
         let mut triangles =
             DirectedTriangles::<_, _, _, Tx>::new_tx(g, DirectedTriangleType::CycleFeedForward)?;
         let out_fn = g.build_cache_filename(CacheFile::DirectedClusteringCoefficient, None)?;
-        let mut local = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let mut local = SharedSliceMut::<f64>::working_mem(&out_fn, g.size())?;
 
         let node_count = g.size();
         let threads = g.thread_num().max(1);
@@ -664,7 +666,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType>
             sum = weighted.iter().sum();
             local.as_mut_slice()[..node_count].copy_from_slice(&weighted);
         }
-        local.flush()?;
+        local.persist()?;
 
         Ok(Self {
             g,

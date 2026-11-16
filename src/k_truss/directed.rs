@@ -221,9 +221,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: IndexType> DirectedAdjacency<'a, N, E, Ix
         // in-edges (but self-loops), as (source, edge offset) pairs grouped by destination: count,
         // prefix sum, scatter, then sort each destination's by source (and offset)
         // in-edges number at most the graph's edges, so their offsets fit `Ix`
-        let cursors = SharedSliceMut::<Ix::Atomic>::abst_mem_mut(&file(0)?, node_count, true)?;
-        let in_offsets = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, node_count + 1, true)?;
-        let in_edges = SharedSliceMut::<(Ix, Ix)>::abst_mem_mut(&file(2)?, edge_count, true)?;
+        let cursors = SharedSliceMut::<Ix::Atomic>::working_mem(&file(0)?, node_count)?;
+        let in_offsets = SharedSliceMut::<Ix>::working_mem(&file(1)?, node_count + 1)?;
+        let in_edges = SharedSliceMut::<(Ix, Ix)>::working_mem(&file(2)?, edge_count)?;
         let counts = cursors.shared_slice();
         for_each_node(node_count, threads, |u| {
             for e in index_ptr.get(u).index()..index_ptr.get(u + 1).index() {
@@ -316,7 +316,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: IndexType> DirectedAdjacency<'a, N, E, Ix
                 overflow.store(true, Ordering::Relaxed);
             }
         })?;
-        let offsets = SharedSliceMut::<Ix>::abst_mem_mut(&file(3)?, node_count + 1, true)?;
+        let offsets = SharedSliceMut::<Ix>::working_mem(&file(3)?, node_count + 1)?;
         let total = {
             let mut offsets = offsets.shared_slice();
             let mut total = 0;
@@ -336,7 +336,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: IndexType> DirectedAdjacency<'a, N, E, Ix
             )
             .into());
         }
-        let entries = SharedSliceMut::<Adjacent<Ix>>::abst_mem_mut(&file(4)?, total, true)?;
+        let entries = SharedSliceMut::<Adjacent<Ix>>::working_mem(&file(4)?, total)?;
         let (offsets_ptr, entries_ptr) = (offsets.shared_slice(), entries.shared_slice());
         for_each_node(node_count, threads, |u| {
             let mut entries = entries_ptr;
@@ -371,7 +371,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: IndexType> DirectedAdjacency<'a, N, E, Ix
         let file = self
             .g
             .build_cache_filename(CacheFile::DirectedAdjacency, Some(5))?;
-        SharedSliceMut::<AtomicBool>::abst_mem_mut(&file, self.g.width(), true)
+        SharedSliceMut::<AtomicBool>::working_mem(&file, self.g.width())
     }
 
     /// Offsets of `u`'s entries.
@@ -493,7 +493,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         in_triangle: Option<SharedSliceMut<AtomicBool>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::DirectedTriangles(triangle_type), None)?;
-        let triangles = SharedSliceMut::<Tx::Atomic>::abst_mem_mut(&out_fn, g.width(), true)?;
+        let triangles = SharedSliceMut::<Tx::Atomic>::working_mem(&out_fn, g.width())?;
         let triangles = Self {
             g,
             triangle_type,
@@ -653,7 +653,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
             )
             .into());
         }
-        self.triangles.flush_async()?;
+        self.triangles.persist()?;
         Ok(())
     }
 }

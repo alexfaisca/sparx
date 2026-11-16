@@ -157,7 +157,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::Triangles, None)?;
-        let triangles = SharedSliceMut::<Tx::Atomic>::abst_mem_mut(&out_fn, g.width(), true)?;
+        let triangles = SharedSliceMut::<Tx::Atomic>::working_mem(&out_fn, g.width())?;
         Ok(Self {
             g,
             triangles,
@@ -275,7 +275,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         }
 
         // (counting creates no temporary files)
-        self.triangles.flush_async()?;
+        self.triangles.persist()?;
 
         Ok(())
     }
@@ -339,7 +339,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
             t.set_count(c as usize);
         }
 
-        triangles.triangles.flush_async()?;
+        triangles.triangles.persist()?;
         Ok(triangles)
     }
 }

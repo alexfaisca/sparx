@@ -216,6 +216,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     fn compute_with_triangles(
         &self,
         proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
+        triangles: Triangles<'a, N, E, Ix, Tx>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_with_triangles_inner(proc_mem, triangles)?;
+        // (computed in working memory: saved to the cache once done)
+        self.k_trusses.persist()
+    }
+
+    fn compute_with_triangles_inner(
+        &self,
+        proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
         mut triangles: Triangles<'a, N, E, Ix, Tx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.check_triangles_len(triangles.all_triangles().len())?;
@@ -245,9 +255,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
                 .build_cache_filename(cache_file(self.directed), Some(seq))
         };
 
-        let edge_list = SharedSliceMut::<Ix>::abst_mem_mut(&file(0)?, edge_count, true)?;
-        let edge_index = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, edge_count, true)?;
-        let stack = SharedSliceMut::<(Ix, Ix)>::abst_mem_mut(&file(2)?, edge_count2, true)?;
+        let edge_list = SharedSliceMut::<Ix>::working_mem(&file(0)?, edge_count)?;
+        let edge_index = SharedSliceMut::<Ix>::working_mem(&file(1)?, edge_count)?;
+        let stack = SharedSliceMut::<(Ix, Ix)>::working_mem(&file(2)?, edge_count2)?;
 
         Ok((edge_list, edge_index, stack))
     }
@@ -298,7 +308,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
         directed: Option<DirectedTriangleType>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(cache_file(directed), None)?;
-        let k_trusses = SharedSliceMut::<Tx>::abst_mem_mut(&out_fn, g.width(), true)?;
+        let k_trusses = SharedSliceMut::<Tx>::working_mem(&out_fn, g.width())?;
         Ok(Self {
             g,
             k_trusses,
@@ -547,6 +557,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     fn compute_directed_with_triangles(
         &self,
         proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
+        triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
+        adjacency: Option<FlaggedAdjacency<'_, 'a, N, E, Ix>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_directed_with_triangles_inner(proc_mem, triangles, adjacency)?;
+        // (computed in working memory: saved to the cache once done)
+        self.k_trusses.persist()
+    }
+
+    fn compute_directed_with_triangles_inner(
+        &self,
+        proc_mem: ProceduralMemoryBurkhardtEtAl<Ix>,
         mut triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
         adjacency: Option<FlaggedAdjacency<'_, 'a, N, E, Ix>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -572,7 +593,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         let r_fn = self
             .g
             .build_cache_filename(cache_file(self.directed), Some(3))?;
-        let removed = SharedSliceMut::<bool>::abst_mem_mut(&r_fn, self.g.width(), true)?;
+        let removed = SharedSliceMut::<bool>::working_mem(&r_fn, self.g.width())?;
         let result = self.peel::<false>(
             proc_mem,
             triangles.triangles_shares_slice(),

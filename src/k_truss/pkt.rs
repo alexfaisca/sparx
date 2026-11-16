@@ -240,6 +240,16 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     fn compute_with_triangles(
         &self,
         proc_mem: ProceduralMemoryPKT<Ix>,
+        triangles: Triangles<'a, N, E, Ix, Tx>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_with_triangles_inner(proc_mem, triangles)?;
+        // (computed in working memory: saved to the cache once done)
+        self.k_trusses.persist()
+    }
+
+    fn compute_with_triangles_inner(
+        &self,
+        proc_mem: ProceduralMemoryPKT<Ix>,
         mut triangles: Triangles<'a, N, E, Ix, Tx>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if triangles.all_triangles().len() != self.g.width() {
@@ -275,11 +285,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
                 .build_cache_filename(cache_file(self.directed), Some(seq))
         };
 
-        let curr = SharedSliceMut::<Ix>::abst_mem_mut(&file(0)?, edge_count, true)?;
-        let next = SharedSliceMut::<Ix>::abst_mem_mut(&file(1)?, edge_count, true)?;
-        let processed = SharedSliceMut::<bool>::abst_mem_mut(&file(2)?, edge_count, true)?;
-        let in_curr = SharedSliceMut::<bool>::abst_mem_mut(&file(3)?, edge_count, true)?;
-        let in_next = SharedSliceMut::<bool>::abst_mem_mut(&file(4)?, edge_count, true)?;
+        let curr = SharedSliceMut::<Ix>::working_mem(&file(0)?, edge_count)?;
+        let next = SharedSliceMut::<Ix>::working_mem(&file(1)?, edge_count)?;
+        let processed = SharedSliceMut::<bool>::working_mem(&file(2)?, edge_count)?;
+        let in_curr = SharedSliceMut::<bool>::working_mem(&file(3)?, edge_count)?;
+        let in_next = SharedSliceMut::<bool>::working_mem(&file(4)?, edge_count)?;
 
         Ok((curr, next, processed, in_curr, in_next))
     }
@@ -321,7 +331,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount, Dir:
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(cache_file(directed), None)?;
-        let k_trusses = SharedSliceMut::<Tx>::abst_mem_mut(&out_fn, g.width(), true)?;
+        let k_trusses = SharedSliceMut::<Tx>::working_mem(&out_fn, g.width())?;
         Ok(Self {
             g,
             k_trusses,
@@ -676,6 +686,17 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     /// Decomposes the directed graph from its `triangles`, whose counts are used (and consumed)
     /// as working memory.
     fn compute_directed_with_triangles(
+        &self,
+        proc_mem: ProceduralMemoryPKT<Ix>,
+        triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
+        adjacency: Option<FlaggedAdjacency<'_, 'a, N, E, Ix>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_directed_with_triangles_inner(proc_mem, triangles, adjacency)?;
+        // (computed in working memory: saved to the cache once done)
+        self.k_trusses.persist()
+    }
+
+    fn compute_directed_with_triangles_inner(
         &self,
         proc_mem: ProceduralMemoryPKT<Ix>,
         mut triangles: DirectedTriangles<'a, N, E, Ix, Tx>,
