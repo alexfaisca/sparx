@@ -25,12 +25,11 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         let degrees_fn = self.build_helper_filename(2)?;
         let result = (|| -> Result<f64, Box<dyn std::error::Error>> {
             let mut totals =
-                SharedSliceMut::<f64>::abst_mem_mut(&totals_fn, comms_cardinality.max(1), true)?;
+                SharedSliceMut::<f64>::working_mem(&totals_fn, comms_cardinality.max(1))?;
             let mut degrees = if E::is_weighted() {
-                Some(SharedSliceMut::<f64>::abst_mem_mut(
+                Some(SharedSliceMut::<f64>::working_mem(
                     &degrees_fn,
                     self.size().max(1),
-                    true,
                 )?)
             } else {
                 None
@@ -214,7 +213,7 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType> GraphM
         // helper indexer
         let h_fn = self.build_helper_filename(1)?;
         // allocate |V| + 1 usize's to store the beginning and end offsets for each node's edges
-        let counter = SharedSliceMut::<usize>::abst_mem_mut(&h_fn, comm_count, true)?;
+        let counter = SharedSliceMut::<usize>::working_mem(&h_fn, comm_count)?;
 
         let isolated_nodes_comm = Arc::new(AtomicUsize::new(0));
         thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {

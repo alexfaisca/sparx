@@ -3785,7 +3785,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
         // buffer, +1 per growth generation) so concurrently-alive instances never collide;
         // see `grow`'s doc comment for why 16 is comfortably more headroom than ever needed.
         let file_name = graph.build_cache_filename(target.clone(), Some(instance_id * 16 + 1))?;
-        let mem = SharedSliceMut::<Ix>::abst_mem_mut(&file_name, cap, true)?;
+        let mem = SharedSliceMut::<Ix>::working_mem(&file_name, cap)?;
         Ok(Self {
             graph,
             target,
@@ -3813,7 +3813,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
             self.target.clone(),
             Some(self.instance_id * 16 + 1 + self.generation),
         )?;
-        let mut new_mem = SharedSliceMut::<Ix>::abst_mem_mut(&new_file_name, new_cap, true)?;
+        let mut new_mem = SharedSliceMut::<Ix>::working_mem(&new_file_name, new_cap)?;
         new_mem.as_mut_slice()[..self.len].copy_from_slice(&self.mem.as_slice()[..self.len]);
         let old_file_name = std::mem::replace(&mut self.file_name, new_file_name);
         self.mem = new_mem;
@@ -3901,7 +3901,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
         let instance_id = next_traversal_instance_id();
         let visited_file =
             graph.build_cache_filename(CacheFile::DfsVisitor, Some(instance_id * 16))?;
-        let mut visited = SharedSliceMut::<bool>::abst_mem_mut(&visited_file, node_count, true)?;
+        let mut visited = SharedSliceMut::<bool>::working_mem(&visited_file, node_count)?;
         let mut stack =
             GrowableIdBuffer::new(graph, CacheFile::DfsVisitor, instance_id, node_count)?;
         *visited.get_mut(source) = true;
@@ -3985,7 +3985,7 @@ impl<'a, N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Di
         let instance_id = next_traversal_instance_id();
         let visited_file =
             graph.build_cache_filename(CacheFile::BfsVisitor, Some(instance_id * 16))?;
-        let mut visited = SharedSliceMut::<bool>::abst_mem_mut(&visited_file, node_count, true)?;
+        let mut visited = SharedSliceMut::<bool>::working_mem(&visited_file, node_count)?;
         let mut queue =
             GrowableIdBuffer::new(graph, CacheFile::BfsVisitor, instance_id, node_count)?;
         *visited.get_mut(source) = true;
@@ -4359,11 +4359,14 @@ mod test {
 
         let dfs = graph.dfs(0).unwrap();
         let bfs = graph.bfs(0).unwrap();
-        // both still alive here; their scratch files are expected to exist at this point.
-        assert!(
-            !traversal_scratch_files(&cache_id).is_empty(),
-            "expected at least one dfsvisitor/bfsvisitor scratch file while still alive"
-        );
+        // both still alive here; their scratch files are expected to exist at this point, if
+        // their working memory is on the disk (in RAM, there are none)
+        if crate::shared_slice::memory_policy() == crate::shared_slice::MemoryPolicy::Disk {
+            assert!(
+                !traversal_scratch_files(&cache_id).is_empty(),
+                "expected at least one dfsvisitor/bfsvisitor scratch file while still alive"
+            );
+        }
         drop(dfs);
         drop(bfs);
 

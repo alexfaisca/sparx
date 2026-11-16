@@ -433,7 +433,7 @@ fn degree_correlation<Ix: graph::IndexType, T: Value, Y: Fn(usize) -> u64 + Sync
     arc_products: Option<ArcProducts>,
 ) -> Result<f64, Box<dyn std::error::Error>> {
     // the heads' degrees, narrow
-    let y_mem = SharedSliceMut::<T>::abst_mem_mut(&(a.scratch)(0)?, a.n.max(1), true)?;
+    let y_mem = SharedSliceMut::<T>::working_mem(&(a.scratch)(0)?, a.n.max(1))?;
     {
         let y = y_mem.shared_slice();
         in_parallel(a.threads, a.n, &|begin, end| {
@@ -672,7 +672,7 @@ fn undirected_pearson<Ix: graph::IndexType, T: Value>(
     let (n, offsets, neighbours) = (a.n, a.offsets, a.neighbours);
     let row_len = |u: usize| offsets[u + 1].index() - offsets[u].index();
     // rows' lengths, narrow (failing on one too long)
-    let r_mem = SharedSliceMut::<T>::abst_mem_mut(&(a.scratch)(0)?, n.max(1), true)?;
+    let r_mem = SharedSliceMut::<T>::working_mem(&(a.scratch)(0)?, n.max(1))?;
     let fits = {
         let r = r_mem.shared_slice();
         by_range(a.threads, n, &|begin, end| {
@@ -1200,7 +1200,7 @@ fn attribute_counts<Ix: graph::IndexType, T: Value>(
     symmetric: bool,
 ) -> Result<(Vec<u64>, Option<Vec<u64>>, u64), Box<dyn std::error::Error>> {
     let (n, offsets, neighbours) = (a.n, a.offsets, a.neighbours);
-    let mem = SharedSliceMut::<T>::abst_mem_mut(&(a.scratch)(0)?, n.max(1), true)?;
+    let mem = SharedSliceMut::<T>::working_mem(&(a.scratch)(0)?, n.max(1))?;
     {
         let d = mem.shared_slice();
         in_parallel(a.threads, n, &|begin, end| {
