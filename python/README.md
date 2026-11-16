@@ -180,10 +180,13 @@ with sparx.DiGraph("web.mtx") as d:            # directed
 * The cache lives in `./.cache/` (relative to the working directory) and is dropped when the
   graph is closed or garbage collected. With `keep_cache=True` it stays, and
   `sparx.Graph.open(g.cache_file)` reopens the graph without parsing it again.
-* `hyperball(memory=...)` is where its working memory (two counters and three accumulators per
-  node) is kept: `"auto"` (the default) in RAM when it takes at most half the memory available,
-  `"ram"`, or `"disk"` (memory mapped from the graph's cache: it can exceed RAM, but is written
-  back to the disk as it changes, so it runs at the disk's speed). The results are the same.
+* `sparx.set_memory_policy(...)` sets where every algorithm keeps its working memory (scratch
+  arrays, and its results while it computes them), process wide: `"auto"` (the default) in RAM
+  while it fits half the memory available, `"ram"`, or `"disk"` (memory mapped from the graph's
+  cache: it can exceed RAM, but is written back to the disk as it changes, so it runs at the
+  disk's speed). `sparx.memory_policy()` reads it; the `SPARX_MEMORY` environment variable sets
+  the initial one. Results are the same either way. `hyperball(memory=...)` overrides it for one
+  run.
 * With GPU support (built with the `gpu` feature: `maturin build --features gpu`), `triangles`,
   `hyperball` and `degree_assortativity` take `gpu=True`, and run on any Vulkan, Metal or DX12 GPU.
 

@@ -1013,16 +1013,40 @@ fn hyperball<I: Ix, L: E, P: Precision, Dir: Directedness>(
     })
 }
 
-/// `"auto"`, `"ram"` or `"disk"`: where an algorithm keeps its working memory.
-fn memory_policy(name: &str) -> PyResult<MemoryPolicy> {
+/// `"auto"`, `"ram"` or `"disk"`: where an algorithm keeps its working memory; `None` for the
+/// process's (see `set_memory_policy`).
+fn memory_policy(name: Option<&str>) -> PyResult<MemoryPolicy> {
     match name {
-        "auto" => Ok(MemoryPolicy::Auto),
-        "ram" => Ok(MemoryPolicy::Ram),
-        "disk" => Ok(MemoryPolicy::Disk),
-        _ => Err(PyValueError::new_err(format!(
-            "unknown memory {name:?}: expected 'auto', 'ram' or 'disk'"
-        ))),
+        None => Ok(sparx::shared_slice::memory_policy()),
+        Some(name) => name.parse().map_err(PyValueError::new_err),
     }
+}
+
+fn memory_policy_name(policy: MemoryPolicy) -> &'static str {
+    match policy {
+        MemoryPolicy::Auto => "auto",
+        MemoryPolicy::Ram => "ram",
+        MemoryPolicy::Disk => "disk",
+    }
+}
+
+/// Sets where every algorithm keeps its working memory from now on (process wide), in place of
+/// the `SPARX_MEMORY` environment variable's: `"ram"` (anonymous memory, never written to the
+/// disk), `"disk"` (memory mapped files in the graph's cache: it can then exceed RAM, but is
+/// written back to the disk as it changes, at the disk's speed), or `"auto"` (the default: in
+/// RAM while it fits half the memory available, shared by every algorithm running, on disk
+/// past that). Results kept in the cache are written to it once computed, either way.
+#[pyfunction]
+fn set_memory_policy(policy: &str) -> PyResult<()> {
+    sparx::shared_slice::set_memory_policy(memory_policy(Some(policy))?);
+    Ok(())
+}
+
+/// Where algorithms keep their working memory (see `set_memory_policy`): `"auto"`, `"ram"` or
+/// `"disk"`.
+#[pyfunction(name = "memory_policy")]
+fn get_memory_policy() -> &'static str {
+    memory_policy_name(sparx::shared_slice::memory_policy())
 }
 
 #[cfg(feature = "gpu")]
@@ -2289,17 +2313,16 @@ graph_class!(UGraph, "Graph", {
     /// centralities. `normalized` normalizes closeness and harmonic centralities by each node's
     /// reachable set rather than by `|V|`. `precision` (4 to 16) trades memory (`2^precision`
     /// bytes per node) for accuracy. `memory` is where the working memory (two counters and
-    /// three accumulators per node) is kept: `"ram"`, or `"disk"` (the graph's cache: it can
-    /// then exceed RAM, but is written back to the disk as it changes, at the disk's speed), and
-    /// `"auto"` (the default) in RAM if it takes at most half the memory available.
-    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, memory = "auto"))]
+    /// three accumulators per node) is kept, `"auto"`, `"ram"` or `"disk"` (see
+    /// `set_memory_policy`): by default, where every algorithm's is.
+    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, memory = None))]
     fn hyperball<'py>(
         &self,
         py: Python<'py>,
         precision: u8,
         normalized: bool,
         gpu: bool,
-        memory: &str,
+        memory: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let memory = memory_policy(memory)?;
         if gpu {
@@ -2687,7 +2710,7 @@ graph_class!(DGraph, "DiGraph", {
     /// HyperBall estimates (see `Graph.hyperball`), with distances following arcs in
     /// `direction`: `"out"` (the default) from each node, `"in"` to it (networkx's
     /// convention), `"both"` ignoring directions (on the underlying undirected graph).
-    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, direction = "out", memory = "auto"))]
+    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, direction = "out", memory = None))]
     #[allow(clippy::too_many_arguments)]
     fn hyperball<'py>(
         &self,
@@ -2696,7 +2719,7 @@ graph_class!(DGraph, "DiGraph", {
         normalized: bool,
         gpu: bool,
         direction: &str,
-        memory: &str,
+        memory: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let d = follow(direction)?;
         let memory = memory_policy(memory)?;
@@ -2970,5 +2993,7 @@ fn _sparx(m: &Bound<'_, PyModule>) -> PyResult<()> {
         DirectedTriangleType::ALL.map(|t| t.name()).to_vec(),
     )?;
     m.add("GPU", cfg!(feature = "gpu"))?;
+    m.add_function(wrap_pyfunction!(set_memory_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(get_memory_policy, m)?)?;
     Ok(())
 }

@@ -359,6 +359,51 @@ def test_hyperball_memory_policies_agree(digraph):
             np.testing.assert_array_equal(ram[key], disk[key])
 
 
+def results(value):
+    """`value` (a result: an array, a dict of them, a tuple...) as plain data, equal to another's
+    if bit for bit the same (NaNs included)."""
+    if isinstance(value, dict):
+        return {k: results(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [results(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return (str(value.dtype), value.shape, value.tobytes())
+    if isinstance(value, float):
+        return repr(value)
+    return value
+
+
+def test_every_memory_policy_gives_the_same_results(digraph):
+    # the process's policy, set and read back; every algorithm's results the same, bit for bit,
+    # with its working memory in RAM or in the cache (and its cached results reread from there)
+    assert sparx.memory_policy() in ("auto", "ram", "disk")
+    with pytest.raises(ValueError, match="memory"):
+        sparx.set_memory_policy("ssd")
+    runs = {}
+    initial = sparx.memory_policy()
+    try:
+        for policy in ("auto", "ram", "disk"):
+            sparx.set_memory_policy(policy)
+            assert sparx.memory_policy() == policy
+            with sparx.Graph(undirected(nx.karate_club_graph())) as g:
+                runs[policy] = [results(f()) for f in (
+                    # (not `louvain`: its communities differ from run to run, whatever the
+                    # memory)
+                    g.k_core, g.k_truss, g.triangles, g.components, g.clustering,
+                    g.label_propagation, g.pagerank, g.betweenness, g.closeness, g.hyperball,
+                    lambda: g.bfs(0), lambda: g.dijkstra(0),
+                )]
+            with sparx.DiGraph(directed(digraph)) as d:
+                runs[policy] += [results(f()) for f in (
+                    d.k_core, lambda: d.components(kind="strong"), d.louvain, d.pagerank,
+                    d.closeness, d.hyperball,
+                )]
+    finally:
+        sparx.set_memory_policy(initial)
+    assert runs["ram"] == runs["auto"]
+    assert runs["disk"] == runs["auto"]
+
+
 def test_bfs(nx_graph, index):
     with sparx.Graph(undirected(nx_graph), index=index) as g:
         for source in [0, len(g) - 1]:

@@ -9,6 +9,6 @@
 ...     cycles = d.k_truss("cycle")
 """
 
-from ._sparx import DIRECTED_TRIANGLE_TYPES, GPU, DiGraph, Graph
+from ._sparx import DIRECTED_TRIANGLE_TYPES, GPU, DiGraph, Graph, memory_policy, set_memory_policy
 
-__all__ = ["Graph", "DiGraph", "DIRECTED_TRIANGLE_TYPES", "GPU"]
+__all__ = ["Graph", "DiGraph", "DIRECTED_TRIANGLE_TYPES", "GPU", "memory_policy", "set_memory_policy"]
