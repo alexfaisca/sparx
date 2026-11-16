@@ -218,7 +218,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
             return Err("error PageRank needs at least one iteration".into());
         }
         let out_fn = g.build_cache_filename(CacheFile::PageRank, None)?;
-        let ranks = SharedSliceMut::<W>::abst_mem_mut(&out_fn, g.size(), true)?;
+        // computed in working memory, saved to the cache once done
+        let ranks = SharedSliceMut::<W>::working_mem(&out_fn, g.size())?;
         let mut pagerank = Self {
             g,
             ranks,
@@ -243,7 +244,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         match computed {
             Ok(iterations) => {
                 pagerank.iterations = iterations;
-                pagerank.ranks.flush_async()?;
+                pagerank.ranks.persist()?;
                 Ok(pagerank)
             }
             Err(e) => {
@@ -287,7 +288,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, W: Weight, Dir: Directe
         let file = self
             .g
             .build_cache_filename(CacheFile::PageRank, Some(seq))?;
-        SharedSliceMut::<T>::abst_mem_mut(&file, len.max(1), true)
+        SharedSliceMut::<T>::working_mem(&file, len.max(1))
     }
 
     /// Each node's total out-weight (summed in `f64`), in scratch file `seq`, after checking every

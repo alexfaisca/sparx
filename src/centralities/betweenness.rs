@@ -182,7 +182,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
             }
         };
         let out_fn = g.build_cache_filename(CacheFile::Betweenness, None)?;
-        let mut centralities = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, n.max(1), true)?;
+        let mut centralities = SharedSliceMut::<f64>::working_mem(&out_fn, n.max(1))?;
         let out = &mut centralities.as_mut_slice()[..n];
         out.fill(0.);
         // (the weights checked above)
@@ -207,7 +207,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>
             *c *= scale;
         }
         let top = options.top_k.map_or_else(Vec::new, |k| top_nodes(out, k));
-        centralities.flush()?;
+        centralities.persist()?;
         Ok(Self {
             g,
             centralities,
@@ -700,15 +700,15 @@ fn parallel_levels<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directed
 ) -> Result<Vec<AtomicU32>, Error> {
     let n = g.size();
     let csr = Csr::of(g);
-    let mut levels_mem = SharedSliceMut::<u32>::abst_mem_mut(&files[0], n, true)?;
+    let mut levels_mem = SharedSliceMut::<u32>::working_mem(&files[0], n)?;
     levels_mem.as_mut_slice().fill(u32::MAX);
     let ptr = levels_mem.as_mut_slice().as_mut_ptr();
     assert_eq!(ptr as usize % std::mem::align_of::<AtomicU32>(), 0);
     // `u32`s as atomics (of the same size, and here aligned), each node claimed by one thread
     let levels = unsafe { std::slice::from_raw_parts(ptr as *const AtomicU32, n) };
     let frontiers_mem = [
-        SharedSliceMut::<usize>::abst_mem_mut(&files[1], n, true)?,
-        SharedSliceMut::<usize>::abst_mem_mut(&files[2], n, true)?,
+        SharedSliceMut::<usize>::working_mem(&files[1], n)?,
+        SharedSliceMut::<usize>::working_mem(&files[2], n)?,
     ];
     let frontiers = [
         frontiers_mem[0].shared_slice(),
@@ -885,7 +885,7 @@ fn kadabra<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Reversible>(
     // (each node's estimate too low, or too high)
     let log_delta = (4. * n as f64 / options.delta).ln();
 
-    let mut counts_mem = SharedSliceMut::<u32>::abst_mem_mut(&files[3], n, true)?;
+    let mut counts_mem = SharedSliceMut::<u32>::working_mem(&files[3], n)?;
     counts_mem.as_mut_slice().fill(0);
     let ptr = counts_mem.as_mut_slice().as_mut_ptr();
     assert_eq!(ptr as usize % std::mem::align_of::<AtomicU32>(), 0);
