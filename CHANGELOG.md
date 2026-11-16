@@ -4,6 +4,24 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 ## Unreleased
 
+### Added
+
+* `shared_slice::MemoryPolicy` (`Auto`, `Ram`, `Disk`): where an algorithm keeps the arrays it
+  rewrites as it runs, with `available_memory` and `fits_in_memory` (at most half the memory
+  available). `HyperBallInner::new_with_memory`, and `hyperball(memory=...)` in Python.
+
+### Changed
+
+* *HyperBall* keeps its counters, accumulators and scratch arrays in RAM when they take at most
+  half the memory available (`MemoryPolicy::Auto`, the default), writing its cached results once,
+  at the end. They were memory mapped from the graph's cache, so that every iteration's changes
+  were written back to the disk: once they outgrew the kernel's dirty page limits, runs were
+  bound by the disk's speed (58 minutes rather than 50 seconds on a 21.9M node graph, on a slow
+  disk). On the disk, counters are now only rewritten when they changed in an iteration or the
+  one before, rather than every iteration.
+* Exact betweenness's threads are capped to one, rather than unbounded, when how much memory is
+  available is unknown.
+
 ### Fixed
 
 * Biconnectivity was wrong on graphs with as many nodes as their `Ix` can number (`Ix::MAX + 1`:

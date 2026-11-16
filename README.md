@@ -61,6 +61,10 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 ## Features
 
 - Zero-copy, **memory-mapped** graph store: `GraphMemoryMap<N, E, Ix>`
+- **Working memory in RAM or on disk** (`shared_slice::MemoryPolicy`): *HyperBall* keeps the
+  arrays it rewrites every iteration in RAM when they take at most half the memory available,
+  and in the graph's cache (memory mapped files, so larger than RAM, at the disk's speed)
+  otherwise; `Ram` and `Disk` force either. Results are cached either way
 - Pluggable index types (`usize`/`u32`/`u16`/`u8`) and optional node/edge labels
 - **Narrow-`Ix` throughout**: every algorithm's internal scratch arrays (not just the graph's own
   CSR storage) use the graph's chosen `Ix` width, so picking e.g. `u32` on a sub-4-billion-edge
