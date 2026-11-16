@@ -94,7 +94,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
             }
         };
         let out_fn = g.build_cache_filename(CacheFile::KCoreDirected(degree), None)?;
-        let k_cores = SharedSliceMut::<Cx>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let k_cores = SharedSliceMut::<Cx>::working_mem(&out_fn, g.size())?;
         let mut cores = Self { g, degree, k_cores };
         if let Err(e) = cores.peel(peeled, reverse) {
             let _ = std::fs::remove_file(&out_fn);
@@ -149,13 +149,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             // each node is in a frontier once
             let proc_mem = (
-                SharedSliceMut::<Cx::Atomic>::abst_mem_mut(&files[0], node_count, true)?,
-                SharedSliceMut::<Ix>::abst_mem_mut(&files[1], node_count, true)?,
-                SharedSliceMut::<portable_atomic::AtomicBool>::abst_mem_mut(
-                    &files[2], node_count, true,
-                )?,
-                SharedSliceMut::<Ix>::abst_mem_mut(&files[3], node_count, true)?,
-                SharedSliceMut::<Ix>::abst_mem_mut(&files[4], node_count, true)?,
+                SharedSliceMut::<Cx::Atomic>::working_mem(&files[0], node_count)?,
+                SharedSliceMut::<Ix>::working_mem(&files[1], node_count)?,
+                SharedSliceMut::<portable_atomic::AtomicBool>::working_mem(&files[2], node_count)?,
+                SharedSliceMut::<Ix>::working_mem(&files[3], node_count)?,
+                SharedSliceMut::<Ix>::working_mem(&files[4], node_count)?,
             );
             // in-degrees, without self-loops (rows are sorted)
             let in_degree = |v: usize| {
@@ -174,7 +172,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
                 proc_mem,
                 self.k_cores.shared_slice(),
             )?;
-            self.k_cores.flush_async()?;
+            self.k_cores.persist()?;
             Ok(())
         })();
         for f in &files {

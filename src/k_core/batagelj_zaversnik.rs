@@ -197,7 +197,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         g: &'a GraphMemoryMap<N, E, Ix>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::KCoreBZ, None)?;
-        let k_cores = SharedSliceMut::<Cx>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let k_cores = SharedSliceMut::<Cx>::working_mem(&out_fn, g.size())?;
         Ok(Self { g, k_cores })
     }
 
@@ -210,9 +210,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         let n_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(1))?;
         let p_fn = self.g.build_cache_filename(CacheFile::KCoreBZ, Some(2))?;
 
-        let degree = SharedSliceMut::<Cx>::abst_mem_mut(&d_fn, node_count, true)?;
-        let node = SharedSliceMut::<Ix>::abst_mem_mut(&n_fn, node_count, true)?;
-        let pos = SharedSliceMut::<Ix>::abst_mem_mut(&p_fn, node_count, true)?;
+        let degree = SharedSliceMut::<Cx>::working_mem(&d_fn, node_count)?;
+        let node = SharedSliceMut::<Ix>::working_mem(&n_fn, node_count)?;
+        let pos = SharedSliceMut::<Ix>::working_mem(&p_fn, node_count)?;
 
         Ok((degree, node, pos))
     }
@@ -358,7 +358,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
             println!("k-cores {:?}", r);
         }
         // flush output to ensure all data is written to disk
-        self.k_cores.flush_async()?;
+        self.k_cores.persist()?;
         // cleanup cache
         self.g.cleanup_cache(CacheFile::KCoreBZ)?;
 

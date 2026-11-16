@@ -225,7 +225,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let threads = threads.max(1);
         let out_fn = g.build_cache_filename(CacheFile::KCoreLEA, None)?;
-        let k_cores = SharedSliceMut::<Cx>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let k_cores = SharedSliceMut::<Cx>::working_mem(&out_fn, g.size())?;
         Ok(Self {
             g,
             k_cores,
@@ -245,11 +245,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         let f_fn = self.g.build_cache_filename(CacheFile::KCoreLEA, Some(3))?;
         let fs_fn = self.g.build_cache_filename(CacheFile::KCoreLEA, Some(4))?;
 
-        let degree = SharedSliceMut::<Cx::Atomic>::abst_mem_mut(&d_fn, node_count, true)?;
-        let node_index = SharedSliceMut::<Ix>::abst_mem_mut(&ni_fn, node_count, true)?;
-        let alive = SharedSliceMut::<AtomicBool>::abst_mem_mut(&a_fn, node_count, true)?;
-        let frontier = SharedSliceMut::<Ix>::abst_mem_mut(&f_fn, edge_count, true)?;
-        let frontier_swap = SharedSliceMut::<Ix>::abst_mem_mut(&fs_fn, edge_count, true)?;
+        let degree = SharedSliceMut::<Cx::Atomic>::working_mem(&d_fn, node_count)?;
+        let node_index = SharedSliceMut::<Ix>::working_mem(&ni_fn, node_count)?;
+        let alive = SharedSliceMut::<AtomicBool>::working_mem(&a_fn, node_count)?;
+        let frontier = SharedSliceMut::<Ix>::working_mem(&f_fn, edge_count)?;
+        let frontier_swap = SharedSliceMut::<Ix>::working_mem(&fs_fn, edge_count)?;
 
         Ok((degree, node_index, alive, frontier, frontier_swap))
     }
@@ -293,7 +293,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Cx: CoreCount>
         }
 
         // flush output to ensure all data is written to disk
-        self.k_cores.flush_async()?;
+        self.k_cores.persist()?;
 
         // cleanup cache
         self.g.cleanup_cache(CacheFile::KCoreLEA)?;
