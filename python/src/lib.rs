@@ -64,6 +64,7 @@ use sparx::k_truss::clustering_coefficient::{
 use sparx::k_truss::count::TriangleCount;
 use sparx::k_truss::directed::{DirectedTriangleType, DirectedTriangles};
 use sparx::k_truss::{burkhardt_et_al::AlgoBurkhardtEtAl, pkt::AlgoPKT, triangles::Triangles};
+use sparx::shared_slice::MemoryPolicy;
 use sparx::trails::astar::{
     AStarOptions, Heuristic, Landmarks, NoHeuristic, Reversible, ShortestPath, astar_many_with,
 };
@@ -1003,10 +1004,25 @@ fn hyperball_results<I: Ix, L: E, P: Precision, Dir: Directedness>(
 fn hyperball<I: Ix, L: E, P: Precision, Dir: Directedness>(
     g: &G<I, Dir, L>,
     normalized: bool,
+    memory: MemoryPolicy,
 ) -> Res<Out> {
     cleaning(g, || {
-        hyperball_results(HyperBallInner::<_, _, _, P, f64, _>::new(g)?, normalized)
+        let hb =
+            HyperBallInner::<_, _, _, P, f64, _>::new_with_memory(g, None, g.thread_num(), memory)?;
+        hyperball_results(hb, normalized)
     })
+}
+
+/// `"auto"`, `"ram"` or `"disk"`: where an algorithm keeps its working memory.
+fn memory_policy(name: &str) -> PyResult<MemoryPolicy> {
+    match name {
+        "auto" => Ok(MemoryPolicy::Auto),
+        "ram" => Ok(MemoryPolicy::Ram),
+        "disk" => Ok(MemoryPolicy::Disk),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown memory {name:?}: expected 'auto', 'ram' or 'disk'"
+        ))),
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -2272,20 +2288,25 @@ graph_class!(UGraph, "Graph", {
     /// and of their inverses to reachable nodes), and `closeness`, `harmonic` and `lin`
     /// centralities. `normalized` normalizes closeness and harmonic centralities by each node's
     /// reachable set rather than by `|V|`. `precision` (4 to 16) trades memory (`2^precision`
-    /// bytes per node) for accuracy.
-    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false))]
+    /// bytes per node) for accuracy. `memory` is where the working memory (two counters and
+    /// three accumulators per node) is kept: `"ram"`, or `"disk"` (the graph's cache: it can
+    /// then exceed RAM, but is written back to the disk as it changes, at the disk's speed), and
+    /// `"auto"` (the default) in RAM if it takes at most half the memory available.
+    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, memory = "auto"))]
     fn hyperball<'py>(
         &self,
         py: Python<'py>,
         precision: u8,
         normalized: bool,
         gpu: bool,
+        memory: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let memory = memory_policy(memory)?;
         if gpu {
             return self.hyperball_gpu(py, precision, normalized);
         }
         with_precision!(precision, P => self.inner.run(py, |g| {
-            with_graph!(g, g => hyperball::<_, _, P, _>(g, normalized))
+            with_graph!(g, g => hyperball::<_, _, P, _>(g, normalized, memory))
         }))?
     }
 
@@ -2666,7 +2687,8 @@ graph_class!(DGraph, "DiGraph", {
     /// HyperBall estimates (see `Graph.hyperball`), with distances following arcs in
     /// `direction`: `"out"` (the default) from each node, `"in"` to it (networkx's
     /// convention), `"both"` ignoring directions (on the underlying undirected graph).
-    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, direction = "out"))]
+    #[pyo3(signature = (*, precision = 8, normalized = true, gpu = false, direction = "out", memory = "auto"))]
+    #[allow(clippy::too_many_arguments)]
     fn hyperball<'py>(
         &self,
         py: Python<'py>,
@@ -2674,13 +2696,15 @@ graph_class!(DGraph, "DiGraph", {
         normalized: bool,
         gpu: bool,
         direction: &str,
+        memory: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let d = follow(direction)?;
+        let memory = memory_policy(memory)?;
         if gpu {
             return self.hyperball_gpu(py, precision, normalized, d);
         }
         with_precision!(precision, P => self.inner.run(py, |g| {
-            with_graph!(g, g => with_view!(g, d, v => hyperball::<_, _, P, _>(v, normalized)))
+            with_graph!(g, g => with_view!(g, d, v => hyperball::<_, _, P, _>(v, normalized, memory)))
         }))?
     }
 

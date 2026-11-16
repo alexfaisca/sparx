@@ -344,6 +344,21 @@ def test_hyperball_precisions(precision):
         assert all(len(v) == len(g) and np.isfinite(v).all() for v in hb.values())
 
 
+def test_hyperball_memory_policies_agree(digraph):
+    # working memory in RAM or in the cache: the same estimates, bit for bit
+    with sparx.Graph(undirected(nx.karate_club_graph())) as g:
+        runs = [g.hyperball(memory=memory) for memory in ("auto", "ram", "disk")]
+        for hb in runs[1:]:
+            for key in runs[0]:
+                np.testing.assert_array_equal(hb[key], runs[0][key])
+        with pytest.raises(ValueError, match="memory"):
+            g.hyperball(memory="ssd")
+    with sparx.DiGraph(directed(digraph)) as d:
+        ram, disk = (d.hyperball(memory=m, direction="in") for m in ("ram", "disk"))
+        for key in ram:
+            np.testing.assert_array_equal(ram[key], disk[key])
+
+
 def test_bfs(nx_graph, index):
     with sparx.Graph(undirected(nx_graph), index=index) as g:
         for source in [0, len(g) - 1]:
