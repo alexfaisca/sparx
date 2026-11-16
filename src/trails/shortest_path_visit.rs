@@ -153,7 +153,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             let mut m = DijkstraMemory::<Ix>::new(&scratch, n)?;
             let (_, stopped) =
                 dijkstra_visit(g, source, &mut m, visitor).map_err(|e| e.to_string())?;
-            let mut distances = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, n, true)?;
+            let mut distances = SharedSliceMut::<f64>::working_mem(&out_fn, n)?;
             for (v, d) in distances.as_mut_slice().iter_mut().enumerate() {
                 *d = m.distance(v).unwrap_or(f64::INFINITY);
             }

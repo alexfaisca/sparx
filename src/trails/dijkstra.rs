@@ -91,8 +91,8 @@ impl<Ix: graph::IndexType> DijkstraMemory<Ix> {
     /// bytes per node, give or take alignment.
     pub(crate) fn new(files: &[String], n: usize) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
-            states: SharedSliceMut::<NodeState<Ix>>::abst_mem_mut(&files[0], n, true)?,
-            heap: SharedSliceMut::<HeapEntry<Ix>>::abst_mem_mut(&files[1], n, true)?,
+            states: SharedSliceMut::<NodeState<Ix>>::working_mem(&files[0], n)?,
+            heap: SharedSliceMut::<HeapEntry<Ix>>::working_mem(&files[1], n)?,
             round: 0,
         })
     }
@@ -369,7 +369,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let scratch: Vec<String> = (1..3)
             .map(|k| g.build_cache_filename(CacheFile::Dijkstra, Some(k)))
             .collect::<Result<_, _>>()?;
-        let mut distances = SharedSliceMut::<f64>::abst_mem_mut(&out_fn, n, true)?;
+        let mut distances = SharedSliceMut::<f64>::working_mem(&out_fn, n)?;
         distances_into(
             g,
             source,
@@ -379,7 +379,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             &scratch,
         )?;
         // (written back in the background, as other results are: the map is the result)
-        distances.flush_async()?;
+        distances.persist()?;
         let (reachable, total_distances) = totals(distances.as_slice(), threads);
         Ok(Self {
             g,
@@ -429,8 +429,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
                 .map(|k| g.build_cache_filename(CacheFile::Dijkstra, Some(k)))
                 .collect::<Result<_, _>>()?;
             let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-                let parent = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&scratch[0], n, true)?;
-                let hops = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&scratch[1], n, true)?;
+                let parent = SharedSliceMut::<AtomicUsize>::working_mem(&scratch[0], n)?;
+                let hops = SharedSliceMut::<AtomicUsize>::working_mem(&scratch[1], n)?;
                 let threads = g.thread_num().max(1);
                 shortest_path_tree(
                     g,
@@ -440,7 +440,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
                     hops.as_slice(),
                     threads,
                 );
-                let mut out = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, n, true)?;
+                let mut out = SharedSliceMut::<Ix>::working_mem(&out_fn, n)?;
                 let (parent, out_slice) = (parent.as_slice(), out.as_mut_slice());
                 let load = n.div_ceil(threads);
                 std::thread::scope(|s| {
@@ -703,8 +703,8 @@ fn hop_distances<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedne
     out[source] = 0.;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let fronts = [
-            SharedSliceMut::<usize>::abst_mem_mut(&scratch[0], n, true)?,
-            SharedSliceMut::<usize>::abst_mem_mut(&scratch[1], n, true)?,
+            SharedSliceMut::<usize>::working_mem(&scratch[0], n)?,
+            SharedSliceMut::<usize>::working_mem(&scratch[1], n)?,
         ];
         let views = [fronts[0].shared_slice(), fronts[1].shared_slice()];
         if threads <= 1 {

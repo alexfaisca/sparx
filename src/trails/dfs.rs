@@ -155,7 +155,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<
         Ok(Self {
             g,
             source,
-            order: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
+            order: SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?,
         })
     }
 
@@ -164,12 +164,21 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness> DFS<
 
         let v_fn = self.build_cache_filename(CacheFile::DFS, Some(1))?;
 
-        let visited = SharedSliceMut::<bool>::abst_mem_mut(&v_fn, node_count, true)?;
+        let visited = SharedSliceMut::<bool>::working_mem(&v_fn, node_count)?;
 
         Ok((visited,))
     }
 
     fn compute_with_proc_mem_impl(
+        &mut self,
+        proc_mem: ProceduralMemoryDFS,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_with_proc_mem_inner(proc_mem)?;
+        // (computed in working memory: saved to the cache once done)
+        self.order.persist()
+    }
+
+    fn compute_with_proc_mem_inner(
         &mut self,
         proc_mem: ProceduralMemoryDFS,
     ) -> Result<(), Box<dyn std::error::Error>> {

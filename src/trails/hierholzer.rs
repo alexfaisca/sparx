@@ -276,8 +276,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let t_fn = g.build_cache_filename(CacheFile::EulerTrail, None)?;
         Ok(Self {
             g,
-            euler_trails: SharedSliceMut::<Ix>::abst_mem_mut(&t_fn, g.width(), true)?,
-            euler_indices: SharedSliceMut::<Ix>::abst_mem_mut(&i_fn, 1, true)?,
+            euler_trails: SharedSliceMut::<Ix>::working_mem(&t_fn, g.width())?,
+            euler_indices: SharedSliceMut::<Ix>::working_mem(&i_fn, 1)?,
         })
     }
 
@@ -291,8 +291,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let e_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(0))?;
         let c_fn = self.build_cache_filename(CacheFile::EulerTrail, Some(1))?;
 
-        let edges = SharedSliceMut::<Ix>::abst_mem_mut(&e_fn, node_count, true)?;
-        let count = SharedSliceMut::<Ix>::abst_mem_mut(&c_fn, node_count, true)?;
+        let edges = SharedSliceMut::<Ix>::working_mem(&e_fn, node_count)?;
+        let count = SharedSliceMut::<Ix>::working_mem(&c_fn, node_count)?;
 
         thread::scope(|scope| {
             // initializations always uses at least two threads per core
@@ -411,13 +411,15 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             *self.euler_indices.get_mut(0) = Ix::new(indices[0]);
         } else {
             let i_fn = self.build_cache_filename(CacheFile::EulerIndex, None)?;
-            self.euler_indices = SharedSliceMut::<Ix>::abst_mem_mut(&i_fn, indices.len(), true)?;
+            self.euler_indices = SharedSliceMut::<Ix>::working_mem(&i_fn, indices.len())?;
             indices.iter().enumerate().for_each(|(idx, &val)| {
                 *self.euler_indices.get_mut(idx) = Ix::new(val);
             });
         }
 
-        self.euler_trails.flush()?;
+        // (computed in working memory: saved to the cache once done)
+        self.euler_trails.persist()?;
+        self.euler_indices.persist()?;
 
         // cleanup cache
         self.g.cleanup_cache(CacheFile::EulerTrail)?;

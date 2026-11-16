@@ -88,7 +88,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let mut bfs = Self {
             g,
             source,
-            distances: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
+            distances: SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?,
             reacheable: 0,
             total_distances: 0.,
         };
@@ -97,11 +97,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let q_fn = bfs.build_cache_filename(CacheFile::BFS, Some(3 * thread))?;
         let v_fn = bfs.build_cache_filename(CacheFile::BFS, Some(3 * thread + 1))?;
 
-        let queue = SharedSliceMut::<Ix>::abst_mem_mut(&q_fn, node_count, true)?;
-        let visited = SharedSliceMut::<bool>::abst_mem_mut(&v_fn, node_count, true)?;
+        let queue = SharedSliceMut::<Ix>::working_mem(&q_fn, node_count)?;
+        let visited = SharedSliceMut::<bool>::working_mem(&v_fn, node_count)?;
         bfs.compute_with_proc_mem((queue, visited))?;
-        std::fs::remove_file(q_fn)?;
-        std::fs::remove_file(v_fn)?;
+        // (no files if the working memory was in RAM)
+        remove_if_exists(q_fn)?;
+        remove_if_exists(v_fn)?;
 
         Ok(bfs)
     }
@@ -221,7 +222,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         Ok(Self {
             g,
             source,
-            distances: SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?,
+            distances: SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?,
             reacheable: 0,
             total_distances: 0.,
         })
@@ -235,13 +236,22 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let q_fn = self.build_cache_filename(CacheFile::BFS, Some(0))?;
         let v_fn = self.build_cache_filename(CacheFile::BFS, Some(1))?;
 
-        let queue = SharedSliceMut::<Ix>::abst_mem_mut(&q_fn, node_count, true)?;
-        let visited = SharedSliceMut::<bool>::abst_mem_mut(&v_fn, node_count, true)?;
+        let queue = SharedSliceMut::<Ix>::working_mem(&q_fn, node_count)?;
+        let visited = SharedSliceMut::<bool>::working_mem(&v_fn, node_count)?;
 
         Ok((queue, visited))
     }
 
     fn compute_with_proc_mem_impl(
+        &mut self,
+        proc_mem: ProceduralMemoryBFSDists<Ix>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.compute_with_proc_mem_inner(proc_mem)?;
+        // (computed in working memory: saved to the cache once done)
+        self.distances.persist()
+    }
+
+    fn compute_with_proc_mem_inner(
         &mut self,
         proc_mem: ProceduralMemoryBFSDists<Ix>,
     ) -> Result<(), Box<dyn std::error::Error>> {

@@ -896,9 +896,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         }
         let from_fn = g.build_pers_cache_filename(CacheFile::Landmarks, Some(0))?;
         let to_fn = g.build_pers_cache_filename(CacheFile::Landmarks, Some(1))?;
-        let mut from = SharedSliceMut::<f32>::abst_mem_mut(&from_fn, n * k, true)?;
+        let mut from = SharedSliceMut::<f32>::working_mem(&from_fn, n * k)?;
         let mut to = match transpose {
-            Some(_) => Some(SharedSliceMut::<f32>::abst_mem_mut(&to_fn, n * k, true)?),
+            Some(_) => Some(SharedSliceMut::<f32>::working_mem(&to_fn, n * k)?),
             None => None,
         };
         let threads = g.thread_num().max(1);
@@ -913,8 +913,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
         let file = |seq| g.build_cache_filename(CacheFile::Landmarks, Some(seq));
         let scratch: Vec<String> = (2..8).map(file).collect::<Result<_, _>>()?;
         let result = (|| -> Result<Vec<usize>, Box<dyn std::error::Error>> {
-            let mut out = SharedSliceMut::<f64>::abst_mem_mut(&scratch[0], n, true)?;
-            let mut back = SharedSliceMut::<f64>::abst_mem_mut(&scratch[1], n, true)?;
+            let mut out = SharedSliceMut::<f64>::working_mem(&scratch[0], n)?;
+            let mut back = SharedSliceMut::<f64>::working_mem(&scratch[1], n)?;
             // the first landmark: the node farthest from node 0 (one it doesn't reach, if any)
             let delta = resolve_engine(g, ShortestPathEngine::Auto, threads)?;
             distances_into(g, 0, out.as_mut_slice(), delta, threads, &scratch[2..4])?;
@@ -960,9 +960,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             let _ = std::fs::remove_file(f);
         }
         let nodes = result?;
-        from.flush()?;
+        from.persist()?;
         if let Some(to) = to.as_mut() {
-            to.flush()?;
+            to.persist()?;
         }
         Ok(Self { g, nodes, from, to })
     }
