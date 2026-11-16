@@ -266,12 +266,12 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         //    the two ways it's stored, from its larger end, self-loops aside), reserved in
         //    batches (a shared counter, taken at every one, would be contended for)
         const BATCH: usize = 1024;
-        let parents_mem = SharedSliceMut::<Ix::Atomic>::abst_mem_mut(&scratch(0)?, n.max(1), true)?;
+        let parents_mem = SharedSliceMut::<Ix::Atomic>::working_mem(&scratch(0)?, n.max(1))?;
         let uf = UnionFind::<Ix> {
             parents: parents_mem.shared_slice(),
         };
         uf.reset(threads, n)?;
-        let tree_mem = SharedSliceMut::<[Ix; 2]>::abst_mem_mut(&scratch(1)?, n.max(1), true)?;
+        let tree_mem = SharedSliceMut::<[Ix; 2]>::working_mem(&scratch(1)?, n.max(1))?;
         let tree_count = AtomicUsize::new(0);
         {
             let tree = tree_mem.shared_slice();
@@ -303,7 +303,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         let arcs = 2 * edge_count;
 
         // each node's tree's root (its smallest node), and the trees, by root
-        let root_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(2)?, n.max(1), true)?;
+        let root_mem = SharedSliceMut::<Ix>::working_mem(&scratch(2)?, n.max(1))?;
         let root_of = root_mem.shared_slice();
         in_parallel(threads, n, &|begin, end| {
             let mut root_of = root_of;
@@ -317,7 +317,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                 .collect::<Vec<_>>()
         })?
         .concat();
-        let tree_mem_id = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(3)?, n.max(1), true)?;
+        let tree_mem_id = SharedSliceMut::<Ix>::working_mem(&scratch(3)?, n.max(1))?;
         let tree_id = tree_mem_id.shared_slice();
         in_parallel(threads, roots.len(), &|begin, end| {
             let mut tree_id = tree_id;
@@ -331,11 +331,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         //    the node it leaves, knowing its twin, and an arc to `v` is followed by the arc after
         //    its twin in `v`'s list (`v`'s first after its last). Ranks in the tour, computed in
         //    parallel by walks between sampled arcs, give everything else
-        let degree_mem = SharedSliceMut::<AtomicUsize>::abst_mem_mut(&scratch(4)?, n.max(1), true)?;
-        let start_mem = SharedSliceMut::<usize>::abst_mem_mut(&scratch(5)?, n + 1, true)?;
-        let head_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(6)?, arcs.max(1), true)?;
-        let twin_mem = SharedSliceMut::<usize>::abst_mem_mut(&scratch(7)?, arcs.max(1), true)?;
-        let rank_mem = SharedSliceMut::<usize>::abst_mem_mut(&scratch(8)?, arcs.max(1), true)?;
+        let degree_mem = SharedSliceMut::<AtomicUsize>::working_mem(&scratch(4)?, n.max(1))?;
+        let start_mem = SharedSliceMut::<usize>::working_mem(&scratch(5)?, n + 1)?;
+        let head_mem = SharedSliceMut::<Ix>::working_mem(&scratch(6)?, arcs.max(1))?;
+        let twin_mem = SharedSliceMut::<usize>::working_mem(&scratch(7)?, arcs.max(1))?;
+        let rank_mem = SharedSliceMut::<usize>::working_mem(&scratch(8)?, arcs.max(1))?;
         let degree = degree_mem.shared_slice();
         let (head, twin, rank) = (
             head_mem.shared_slice(),
@@ -398,7 +398,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         const SAMPLE: usize = 64;
         const END: usize = usize::MAX;
         const SAMPLED: usize = 1 << (usize::BITS - 1);
-        let next_mem = SharedSliceMut::<usize>::abst_mem_mut(&scratch(9)?, arcs.max(1), true)?;
+        let next_mem = SharedSliceMut::<usize>::working_mem(&scratch(9)?, arcs.max(1))?;
         let next = next_mem.shared_slice();
         in_parallel(threads, n, &|begin, end| {
             let mut next = next;
@@ -452,8 +452,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         };
         // walks from each sample to the next (the following sample, and the arcs walked),
         // then the arcs before each sample in its tour, and each tour's arcs
-        let walk_mem =
-            SharedSliceMut::<[usize; 2]>::abst_mem_mut(&scratch(10)?, samples.max(1), true)?;
+        let walk_mem = SharedSliceMut::<[usize; 2]>::working_mem(&scratch(10)?, samples.max(1))?;
         let walks = walk_mem.shared_slice();
         // (each arc walked, its successor no longer needed, keeps its walk's sample instead, and
         // its rank in the walk)
@@ -478,8 +477,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             }
         })?;
         let totals: Vec<AtomicUsize> = (0..roots.len()).map(|_| AtomicUsize::new(0)).collect();
-        let offset_mem =
-            SharedSliceMut::<usize>::abst_mem_mut(&scratch(11)?, samples.max(1), true)?;
+        let offset_mem = SharedSliceMut::<usize>::working_mem(&scratch(11)?, samples.max(1))?;
         in_parallel(threads, roots.len(), &|begin, end| {
             let mut offsets = offset_mem.shared_slice();
             for (t, total) in (begin..end).zip(&totals[begin..end]) {
@@ -519,8 +517,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         }
         const W: usize = usize::BITS as usize;
         let words = positions.div_ceil(W);
-        let bits_mem =
-            SharedSliceMut::<AtomicUsize>::abst_mem_mut(&scratch(12)?, words.max(1), true)?;
+        let bits_mem = SharedSliceMut::<AtomicUsize>::working_mem(&scratch(12)?, words.max(1))?;
         let bits = bits_mem.shared_slice();
         let tree_of = |u: usize| tree_id.get(root_of.get(u).index()).index();
         in_parallel(threads, n, &|begin, end| {
@@ -538,7 +535,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                 }
             }
         })?;
-        let before_mem = SharedSliceMut::<usize>::abst_mem_mut(&scratch(13)?, words.max(1), true)?;
+        let before_mem = SharedSliceMut::<usize>::working_mem(&scratch(13)?, words.max(1))?;
         let mut before = before_mem.shared_slice();
         let mut nodes = 0;
         for w in 0..words {
@@ -551,9 +548,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             *before.get(p / W)
                 + (bits.get(p / W).load(Ordering::Relaxed) & mask).count_ones() as usize
         };
-        let parent_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(14)?, n.max(1), true)?;
-        let first_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(15)?, n.max(1), true)?;
-        let last_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(16)?, n.max(1), true)?;
+        let parent_mem = SharedSliceMut::<Ix>::working_mem(&scratch(14)?, n.max(1))?;
+        let first_mem = SharedSliceMut::<Ix>::working_mem(&scratch(15)?, n.max(1))?;
+        let last_mem = SharedSliceMut::<Ix>::working_mem(&scratch(16)?, n.max(1))?;
         let (parent, first, last) = (
             parent_mem.shared_slice(),
             first_mem.shared_slice(),
@@ -603,8 +600,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         //    blocks of `BLOCK` nodes, with minimums and maximums from blocks' starts and to their
         //    ends
         const BLOCK: usize = 64;
-        let own_low_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(17)?, n.max(1), true)?;
-        let own_high_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(18)?, n.max(1), true)?;
+        let own_low_mem = SharedSliceMut::<Ix>::working_mem(&scratch(17)?, n.max(1))?;
+        let own_high_mem = SharedSliceMut::<Ix>::working_mem(&scratch(18)?, n.max(1))?;
         let (own_low, own_high) = (own_low_mem.shared_slice(), own_high_mem.shared_slice());
         in_parallel(threads, n, &|begin, end| {
             let (mut own_low, mut own_high) = (own_low, own_high);
@@ -629,10 +626,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             }
         })?;
         let blocks = n.div_ceil(BLOCK);
-        let from_start_low = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(19)?, n.max(1), true)?;
-        let from_start_high = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(20)?, n.max(1), true)?;
-        let to_end_low = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(21)?, n.max(1), true)?;
-        let to_end_high = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(22)?, n.max(1), true)?;
+        let from_start_low = SharedSliceMut::<Ix>::working_mem(&scratch(19)?, n.max(1))?;
+        let from_start_high = SharedSliceMut::<Ix>::working_mem(&scratch(20)?, n.max(1))?;
+        let to_end_low = SharedSliceMut::<Ix>::working_mem(&scratch(21)?, n.max(1))?;
+        let to_end_high = SharedSliceMut::<Ix>::working_mem(&scratch(22)?, n.max(1))?;
         let (fsl, fsh, tel, teh) = (
             from_start_low.shared_slice(),
             from_start_high.shared_slice(),
@@ -723,8 +720,8 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             }
             (lo, hi)
         };
-        let low_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(23)?, n.max(1), true)?;
-        let high_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(24)?, n.max(1), true)?;
+        let low_mem = SharedSliceMut::<Ix>::working_mem(&scratch(23)?, n.max(1))?;
+        let high_mem = SharedSliceMut::<Ix>::working_mem(&scratch(24)?, n.max(1))?;
         let (low, high) = (low_mem.shared_slice(), high_mem.shared_slice());
         in_parallel(threads, n, &|begin, end| {
             let (mut low, mut high) = (low, high);
@@ -754,7 +751,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         };
 
         // bridges: tree edges from a node's parent to it with no edge of its subtree out of it
-        let bridge_mem = SharedSliceMut::<bool>::abst_mem_mut(&scratch(25)?, n.max(1), true)?;
+        let bridge_mem = SharedSliceMut::<bool>::working_mem(&scratch(25)?, n.max(1))?;
         let is_bridge = bridge_mem.shared_slice();
         let bridge_count = AtomicUsize::new(0);
         in_parallel(threads, n, &|begin, end| {
@@ -767,10 +764,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             }
             bridge_count.fetch_add(found, Ordering::Relaxed);
         })?;
-        let mut bridges = SharedSliceMut::<[Ix; 2]>::abst_mem_mut(
+        let mut bridges = SharedSliceMut::<[Ix; 2]>::working_mem(
             &result(3)?,
             bridge_count.load(Ordering::Relaxed).max(1),
-            true,
         )?;
         let bridge_count = bridge_count.load(Ordering::Relaxed);
         {
@@ -821,7 +817,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
 
         // each component's head: the parent of its top node, the one node of it whose parent is
         // in another (by component root: its smallest node)
-        let head_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(26)?, n.max(1), true)?;
+        let head_mem = SharedSliceMut::<Ix>::working_mem(&scratch(26)?, n.max(1))?;
         {
             let heads = head_mem.shared_slice();
             in_parallel(threads, n, &|begin, end| {
@@ -852,9 +848,9 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         .concat();
         keys.sort();
         let count = keys.len();
-        let number_mem = SharedSliceMut::<Ix>::abst_mem_mut(&scratch(27)?, n.max(1), true)?;
+        let number_mem = SharedSliceMut::<Ix>::working_mem(&scratch(27)?, n.max(1))?;
         let number = number_mem.shared_slice();
-        let heads = SharedSliceMut::<Ix>::abst_mem_mut(&result(1)?, count.max(1), true)?;
+        let heads = SharedSliceMut::<Ix>::working_mem(&result(1)?, count.max(1))?;
         {
             let (keys, heads) = (&keys, heads.shared_slice());
             in_parallel(threads, count, &|begin, end| {
@@ -867,7 +863,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             })?;
         }
         drop(keys);
-        let components = SharedSliceMut::<Ix>::abst_mem_mut(&result(0)?, n.max(1), true)?;
+        let components = SharedSliceMut::<Ix>::working_mem(&result(0)?, n.max(1))?;
         {
             let components = components.shared_slice();
             in_parallel(threads, n, &|begin, end| {
@@ -883,12 +879,10 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
         }
 
         // articulation points: heads, of two components or more if they're roots
-        let articulation_points =
-            SharedSliceMut::<bool>::abst_mem_mut(&result(2)?, n.max(1), true)?;
+        let articulation_points = SharedSliceMut::<bool>::working_mem(&result(2)?, n.max(1))?;
         {
             // whether each node heads a component (bit 1), and another (bit 2)
-            let headed_mem =
-                SharedSliceMut::<AtomicU8>::abst_mem_mut(&scratch(28)?, n.max(1), true)?;
+            let headed_mem = SharedSliceMut::<AtomicU8>::working_mem(&scratch(28)?, n.max(1))?;
             let headed = headed_mem.shared_slice();
             let heads = heads.shared_slice();
             in_parallel(threads, count, &|begin, end| {
@@ -929,7 +923,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
                 }
             }
         })?;
-        let two_edge_components = SharedSliceMut::<Ix>::abst_mem_mut(&result(4)?, n.max(1), true)?;
+        let two_edge_components = SharedSliceMut::<Ix>::working_mem(&result(4)?, n.max(1))?;
         let two_edge_count;
         {
             // roots numbered in order (by range, from the roots before it), then their nodes
@@ -967,11 +961,11 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Biconnectivity<'a, N, E
             })?;
         }
 
-        components.flush_async()?;
-        heads.flush_async()?;
-        articulation_points.flush_async()?;
-        bridges.flush_async()?;
-        two_edge_components.flush_async()?;
+        components.persist()?;
+        heads.persist()?;
+        articulation_points.persist()?;
+        bridges.persist()?;
+        two_edge_components.persist()?;
         Ok(Self {
             g,
             components,

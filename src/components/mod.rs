@@ -30,12 +30,12 @@ pub(super) fn component_sizes<Ix: graph::IndexType>(
     {
         return Ok(sizes);
     }
-    let mut sizes = SharedSliceMut::<usize>::abst_mem_mut(file, count, true)?;
+    let mut sizes = SharedSliceMut::<usize>::working_mem(file, count)?;
     let s = sizes.as_mut_slice();
     for c in components {
         s[c.index()] += 1;
     }
-    sizes.flush_async()?;
+    sizes.persist()?;
     Ok(sizes)
 }
 

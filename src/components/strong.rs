@@ -49,7 +49,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::StronglyConnectedComponents, None)?;
-        let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let components = SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?;
         let count = Self::compute(g, &components)?;
         let sizes = super::component_sizes(
             components.as_slice(),
@@ -169,13 +169,13 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             |seq| g.build_cache_filename(CacheFile::StronglyConnectedComponents, Some(seq));
         let helpers = [helper(0)?, helper(1)?, helper(2)?, helper(3)?, helper(4)?];
         // discovery order (1-based: 0 is undiscovered) and lowest discovery order reachable
-        let mut order = SharedSliceMut::<usize>::abst_mem_mut(&helpers[0], node_count, true)?;
-        let mut low = SharedSliceMut::<usize>::abst_mem_mut(&helpers[1], node_count, true)?;
+        let mut order = SharedSliceMut::<usize>::working_mem(&helpers[0], node_count)?;
+        let mut low = SharedSliceMut::<usize>::working_mem(&helpers[1], node_count)?;
         // Tarjan's stack, and whether a node is on it
-        let mut stack = SharedSliceMut::<Ix>::abst_mem_mut(&helpers[2], node_count, true)?;
-        let mut on_stack = SharedSliceMut::<bool>::abst_mem_mut(&helpers[3], node_count, true)?;
+        let mut stack = SharedSliceMut::<Ix>::working_mem(&helpers[2], node_count)?;
+        let mut on_stack = SharedSliceMut::<bool>::working_mem(&helpers[3], node_count)?;
         // the depth first search's path: each node with its next arc to follow
-        let mut path = SharedSliceMut::<(Ix, Ix)>::abst_mem_mut(&helpers[4], node_count, true)?;
+        let mut path = SharedSliceMut::<(Ix, Ix)>::working_mem(&helpers[4], node_count)?;
         let (order, low, stack, on_stack, path) = (
             order.as_mut_slice(),
             low.as_mut_slice(),
@@ -254,7 +254,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
             }
             *components.get_mut(u) = Ix::new(renumber[c]);
         }
-        components_mem.flush_async()?;
+        components_mem.persist()?;
         for f in &helpers {
             let _ = std::fs::remove_file(f);
         }

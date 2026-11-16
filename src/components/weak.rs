@@ -51,7 +51,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: Directedness>
     /// [`GraphMemoryMap`]: ../../graph/struct.GraphMemoryMap.html#
     pub fn new(g: &'a GraphMemoryMap<N, E, Ix, Dir>) -> Result<Self, Box<dyn std::error::Error>> {
         let out_fn = g.build_cache_filename(CacheFile::ConnectedComponents, None)?;
-        let components = SharedSliceMut::<Ix>::abst_mem_mut(&out_fn, g.size(), true)?;
+        let components = SharedSliceMut::<Ix>::working_mem(&out_fn, g.size())?;
         let count = Self::compute(g, &components)?;
         let sizes = super::component_sizes(
             components.as_slice(),
@@ -178,7 +178,7 @@ pub(super) fn label_components<
     let symmetric = g.is_symmetric()?;
 
     let p_fn = g.build_cache_filename(scratch, Some(0))?;
-    let parent = SharedSliceMut::<Ix::Atomic>::abst_mem_mut(&p_fn, node_count, true)?;
+    let parent = SharedSliceMut::<Ix::Atomic>::working_mem(&p_fn, node_count)?;
 
     let threads = g.thread_num();
     let node_load = node_count.div_ceil(threads);
@@ -259,7 +259,7 @@ pub(super) fn label_components<
         *components.get_mut(u) = Ix::new(component);
     }
 
-    components_mem.flush_async()?;
+    components_mem.persist()?;
     drop(parent);
     let _ = std::fs::remove_file(&p_fn);
     Ok(count)
