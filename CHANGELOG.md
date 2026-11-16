@@ -6,21 +6,30 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 ### Added
 
-* `shared_slice::MemoryPolicy` (`Auto`, `Ram`, `Disk`): where an algorithm keeps the arrays it
-  rewrites as it runs, with `available_memory` and `fits_in_memory` (at most half the memory
-  available). `HyperBallInner::new_with_memory`, and `hyperball(memory=...)` in Python.
+* `shared_slice::MemoryPolicy` (`Auto`, `Ram`, `Disk`): where algorithms keep their working
+  memory, process wide: `set_memory_policy` and `memory_policy`, initially the `SPARX_MEMORY`
+  environment variable's (`auto` by default). `Auto` keeps it in RAM while it fits half the
+  memory available, one budget shared by every algorithm running (`ram_left`, with
+  `available_memory` and `fits_in_memory`). `SharedSliceMut::working_mem` allocates it, and
+  `AbstractedProceduralMemoryMut::persist` writes a result computed there to its cache file.
+  `HyperBallInner::new_with_memory` overrides the policy for one run. In Python,
+  `sparx.set_memory_policy`, `sparx.memory_policy` and `hyperball(memory=...)`.
 
 ### Changed
 
-* *HyperBall* keeps its counters, accumulators and scratch arrays in RAM when they take at most
-  half the memory available (`MemoryPolicy::Auto`, the default), writing its cached results once,
-  at the end. They were memory mapped from the graph's cache, so that every iteration's changes
+* Every algorithm's scratch arrays, and its results while it computes them, follow the memory
+  policy: in RAM while they fit (`MemoryPolicy::Auto`, the default), the results written to the
+  cache once computed. They were all memory mapped from the graph's cache, written back to the
+  disk as they changed. (Graph construction and conversion still write to the cache
+  directly; some algorithms' heap arrays stay in RAM whatever the policy.)
+* *HyperBall* keeps its counters, accumulators and scratch arrays in RAM when they fit
+  (`MemoryPolicy::Auto`, the default), writing its cached results once, at the end. They were memory mapped from the graph's cache, so that every iteration's changes
   were written back to the disk: once they outgrew the kernel's dirty page limits, runs were
   bound by the disk's speed (58 minutes rather than 50 seconds on a 21.9M node graph, on a slow
   disk). On the disk, counters are now only rewritten when they changed in an iteration or the
   one before, rather than every iteration.
-* Exact betweenness's threads are capped to one, rather than unbounded, when how much memory is
-  available is unknown.
+* Exact betweenness's threads are capped by what's left of the RAM working memory may take
+  (`ram_left`), and to one, rather than unbounded, when how much memory is available is unknown.
 
 ### Fixed
 

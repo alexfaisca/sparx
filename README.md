@@ -61,10 +61,13 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
 ## Features
 
 - Zero-copy, **memory-mapped** graph store: `GraphMemoryMap<N, E, Ix>`
-- **Working memory in RAM or on disk** (`shared_slice::MemoryPolicy`): *HyperBall* keeps the
-  arrays it rewrites every iteration in RAM when they take at most half the memory available,
-  and in the graph's cache (memory mapped files, so larger than RAM, at the disk's speed)
-  otherwise; `Ram` and `Disk` force either. Results are cached either way
+- **Working memory in RAM or on disk** (`shared_slice::MemoryPolicy`): every algorithm keeps
+  its scratch arrays, and its results while it computes them, in RAM while they fit half the
+  memory available (one budget, shared by every algorithm running), and in the graph's cache
+  past that (memory mapped files, so larger than RAM, at the disk's speed). `Ram` and `Disk`
+  force either, process wide (`shared_slice::set_memory_policy`, or the `SPARX_MEMORY`
+  environment variable: `auto`, `ram` or `disk`). Results are written to the cache once
+  computed, either way, and are the same bit for bit
 - Pluggable index types (`usize`/`u32`/`u16`/`u8`) and optional node/edge labels
 - **Narrow-`Ix` throughout**: every algorithm's internal scratch arrays (not just the graph's own
   CSR storage) use the graph's chosen `Ix` width, so picking e.g. `u32` on a sub-4-billion-edge
