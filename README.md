@@ -49,6 +49,7 @@ Comes with CSV **benchmark writers** and **plotting scripts** to visualize runti
   - [Label propagation](#label-propagation)
   - [Betweenness centrality](#betweenness-centrality)
 - [Benchmarks against NetworKit](#benchmarks-against-networkit)
+- [HyperBall against WebGraph](#hyperball-against-webgraph)
 - [Python](#python)
 - [Testing](#testing)
 - [Reproducibility](#reproducibility)
@@ -1236,6 +1237,44 @@ python3 scripts/plot/plot_bench.py results/bench/bench.csv         # these figur
 `bench.py --list` lists the datasets and algorithms, and `--datasets`, `--algorithms` and
 `--libraries` select some. Each (dataset, library) runs in a process of its own, stopped after
 `--timeout`; rows are appended to the CSV as runs end.
+
+## HyperBall against WebGraph
+
+sparx's *HyperBall* against Boldi and Vigna's reference implementations: WebGraph's
+(`it.unimi.dsi.webgraph.algo.HyperBall`, Java, 3.6.12) and its Rust port's (webgraph-rs's
+`webgraph-algo` 0.7.1). Wall time from the counters' initialisation to the last iteration (the
+graph's loading aside), best of 3, 32 threads, 2^8 registers per counter, until no counter
+changes, on the same 32-vCPU machine as above. All run on the same undirected graphs (WebGraph's
+as BVGraphs, parallel edges merged), and take the same number of iterations to within 3. sparx's
+working memory is in RAM (`MemoryPolicy::Auto`); WebGraph's JVM runs 2 untimed warm-up runs
+first.
+
+| Graph | Nodes | sparx | webgraph-rs (HLL8)\* | webgraph-rs | WebGraph (Java) |
+|---|---:|---:|---:|---:|---:|
+| `random_graph_9_5` | 511 | 0.025 s | **0.006 s** | 0.007 s | 0.026 s |
+| `bench_ba_100k` | 100k | 0.152 s | **0.136 s** | 0.295 s | 0.614 s |
+| `bench_er_100k` | 100k | **0.106 s** | 0.137 s | 0.275 s | 0.739 s |
+| `graph_9_10` | 525k | **0.512 s** | 0.692 s | 1.669 s | 2.655 s |
+| `synth_dna_k10_edges8_4M` | 1.0M | **0.838 s** | 0.921 s | 2.721 s | 6.316 s |
+| `synth_dna_k11_edges33_5M` | 4.2M | 3.799 s | **3.780 s** | 11.23 s | 25.72 s |
+| `graph_8_15` | 21.9M | **46.1 s** | 53.9 s | 104.1 s | 155.7 s |
+| `graph_9_15` | 50.3M | **97.2 s** | 106.1 s | 221.3 s | 405.3 s |
+
+\* Not webgraph-rs as it comes: our benchmark's own configuration of it, with its
+`HyperLogLog8` counters (a byte per register, merged with SIMD instructions, as sparx's), built
+with `HyperBallBuilder::with_hyper_log_log8` in place of its default `with_hyper_log_log`
+(registers packed into words, as WebGraph's Java ones), the "webgraph-rs" column.
+
+From half a million nodes on, sparx is 2.3x to 3.3x as fast as webgraph-rs, and 3.4x to 7.5x as
+fast as WebGraph's Java implementation. With byte registers, webgraph-rs takes as long as sparx
+to 35% longer (9% longer on the largest graph). On the smallest graphs, fixed costs dominate.
+
+To reproduce (with WebGraph's jars, sparx's Python package and cargo):
+
+```bash
+scripts/bench/webgraph/fetch_jars.sh
+python3 scripts/bench/hyperball_webgraph.py datasets/graphs/graph_9_10.lz4 --threads 32 --log2m 8
+```
 
 ## Python
 

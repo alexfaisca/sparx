@@ -67,3 +67,4 @@ python/sparx/*.so
 .opencode/
 scripts/bench/webgraph/lib/
 scripts/bench/webgraph-rs/cli/
+scripts/bench/webgraph-rs/target/

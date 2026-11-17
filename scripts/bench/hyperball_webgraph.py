@@ -10,7 +10,10 @@ initialisation to the last iteration (the graph's loading aside). sparx runs
 `scripts/bench/webgraph/HyperBallBench.java`, on the graph stored as a BVGraph (parallel edges
 merged: they change no ball), after `--warmups` untimed runs in the same JVM (its JIT compiler
 warmed up, as in a long-lived JVM); webgraph-rs `scripts/bench/webgraph-rs/` on the same BVGraph
-(its `.ef` built by webgraph-cli's `webgraph build ef`), on a rayon pool of as many threads. Each
+(its `.ef` built by webgraph-cli's `webgraph build ef`), on a rayon pool of as many threads,
+with its `HyperLogLog` counters (registers packed as the Java ones: `webgraph-rs`) or its
+`HyperLogLog8` ones (a byte per register, merged with SIMD instructions, as sparx's:
+`webgraph-rs8`). Each
 run's iterations are recorded: runs that stop at sparx's cap haven't converged, and aren't
 comparable.
 
@@ -43,8 +46,9 @@ ROOT = Path(__file__).resolve().parents[2]
 WEBGRAPH = ROOT / "scripts" / "bench" / "webgraph"
 WEBGRAPH_RS = ROOT / "scripts" / "bench" / "webgraph-rs"
 WEBGRAPH_RS_BIN = WEBGRAPH_RS / "target" / "release" / "hyperball-webgraph-rs"
+SPARX_BIN = ROOT / "target" / "release" / "examples" / "hyperball_bench"
 WEBGRAPH_CLI = WEBGRAPH_RS / "cli" / "bin" / "webgraph"
-IMPLS = ("sparx", "webgraph", "webgraph-rs")
+IMPLS = ("sparx", "webgraph", "webgraph-rs", "webgraph-rs8")
 SPARX_MAX_ITERATIONS = 1024
 FIELDS = ["timestamp", "graph", "nodes", "arcs", "impl", "log2m", "threads", "run", "seconds", "iterations",
           "write_seconds", "in_ram"]
@@ -110,6 +114,8 @@ def main() -> int:
     parser.add_argument("--impls", nargs="+", choices=IMPLS, default=list(IMPLS), help="implementations to run")
     parser.add_argument("--sparx-memory", nargs="+", choices=["auto", "ram", "disk"], default=["auto"],
                         help="where sparx keeps its working memory (several: each is run, as `sparx-<memory>`)")
+    parser.add_argument("--write-cache", action="store_true",
+                        help="have sparx also write its results to the graph's cache, timed apart (write_seconds)")
     parser.add_argument("--work", type=Path, default=ROOT / "results" / "hyperball_webgraph")
     parser.add_argument("--csv", type=Path, default=ROOT / "results" / "hyperball_webgraph.csv")
     args = parser.parse_args()
@@ -118,7 +124,7 @@ def main() -> int:
     if not any((WEBGRAPH / "lib").glob("webgraph-*.jar")):
         sys.exit("no WebGraph jars: run scripts/bench/webgraph/fetch_jars.sh (Java's also converts the graphs)")
     subprocess.run(["cargo", "build", "--release", "--features", "bench", "--example", "hyperball_bench"], cwd=ROOT, check=True)
-    if "webgraph-rs" in args.impls:
+    if any(i.startswith("webgraph-rs") for i in args.impls):
         subprocess.run(["cargo", "build", "--release"], cwd=WEBGRAPH_RS, check=True)
         if not WEBGRAPH_CLI.exists():
             # (the release matching webgraph 0.7.0)
@@ -143,7 +149,12 @@ def main() -> int:
                 subprocess.run(java("convert", str(work / "csr.offsets"), str(work / "csr.targets"), str(basename), heap=args.heap), check=True)
                 (work / "csr.offsets").unlink()
                 (work / "csr.targets").unlink()
-            if "webgraph-rs" in args.impls and not Path(f"{basename}.ef").exists():
+            if any(i.startswith("webgraph-rs") for i in args.impls) and not Path(f"{basename}.ef").exists():
+                # webgraph-rs reads the offsets in 4 byte words: Java's are padded to a whole one
+                # with zeros, which Java's reader, reading n + 1 offsets, never gets to
+                offsets = Path(f"{basename}.offsets")
+                with open(offsets, "ab") as padded:
+                    padded.write(b"\0" * (-offsets.stat().st_size % 4))
                 subprocess.run([str(WEBGRAPH_CLI), "build", "ef", str(basename)], check=True)
             for log2m in args.log2m:
                 for threads in args.threads:
@@ -153,13 +164,14 @@ def main() -> int:
                         runs += [(i, None) for i in args.impls if i != "sparx"]
                         for impl, memory in runs:
                             if impl == "sparx":
-                                out = run_json([str(SPARX_BIN), str(graph), str(threads), str(log2m), str(prefix), memory], cwd=ROOT)
+                                out = run_json([str(SPARX_BIN), str(graph), str(threads), str(log2m), str(prefix), memory, *(["write"] if args.write_cache else [])], cwd=ROOT)
                                 if len(args.sparx_memory) > 1:
                                     impl = f"sparx-{memory}"
                             elif impl == "webgraph":
                                 out = run_json(java("run", str(basename), str(log2m), str(threads), "0", str(prefix), str(args.warmups), heap=args.heap))
                             else:
-                                out = run_json([str(WEBGRAPH_RS_BIN), str(basename), str(log2m), str(threads), "0", str(prefix)])
+                                counters = "hll8" if impl == "webgraph-rs8" else "hll"
+                                out = run_json([str(WEBGRAPH_RS_BIN), str(basename), str(log2m), str(threads), "0", str(prefix), counters])
                             row = dict(timestamp=dt.datetime.now().isoformat(timespec="seconds"), graph=name,
                                        nodes=out["nodes"], arcs=out["arcs"], impl=impl, log2m=log2m, threads=threads,
                                        run=r, seconds=out["seconds"], iterations=out["iterations"],

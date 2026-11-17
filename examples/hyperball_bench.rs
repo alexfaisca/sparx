@@ -2,18 +2,20 @@
 //! Vigna's reference implementation (WebGraph's `it.unimi.dsi.webgraph.algo.HyperBall`).
 //!
 //! cargo run --release --features bench --example hyperball_bench -- \
-//!     <graph> <threads> <log2m> <out prefix> [auto|ram|disk]
+//!     <graph> <threads> <log2m> <out prefix> [auto|ram|disk] [write]
 //!
 //! Runs *HyperBall* with `2^log2m` registers per counter (sparx's `Precision<log2m>`, WebGraph's
 //! `log2m`) until no counter changes (the iteration cap raised to its largest, 1024, so that runs
 //! end as WebGraph's do, by stabilisation), and writes each node's estimated sum of distances and
 //! sum of inverse distances, and the estimated number of nodes it reaches (itself included), to
 //! `<out prefix>.sparx.{dist,harm,reach}` (`f64`s, native endianness).
-//! The working memory is kept where the last argument says (see `MemoryPolicy`; `auto` by
-//! default). Prints one line of JSON: the run's seconds (counters' initialisation included, as
-//! WebGraph's `init()` + `run()`), and apart, the seconds taken to write its results to the
-//! graph's cache (which WebGraph's timing has no counterpart of), whether its working memory was
-//! in RAM, its iterations, and the graph's size.
+//! The working memory is kept where the fifth argument says (see `MemoryPolicy`; `auto` by
+//! default). With `write`, the results are also written to the graph's cache, as
+//! `HyperBallInner::new` does (`2^log2m` bytes per node: 13 GB at `log2m` 8 on 50M nodes), and
+//! that's timed apart. Prints one line of JSON: the run's seconds (counters' initialisation
+//! included, as WebGraph's `init()` + `run()`), the seconds taken to write its results to the
+//! graph's cache (which WebGraph's timing has no counterpart of; 0 without `write`), whether its
+//! working memory was in RAM, its iterations, and the graph's size.
 use sparx::centralities::hyper_ball::*;
 use sparx::centralities::hyper_log_log::Precision;
 use sparx::graph::Graph;
@@ -40,6 +42,7 @@ fn hyperball<P: Precision>(
     g: &G,
     threads: usize,
     memory: MemoryPolicy,
+    write: bool,
     out: &str,
 ) -> Result<Run, Box<dyn std::error::Error>> {
     let time = Instant::now();
@@ -53,7 +56,9 @@ fn hyperball<P: Precision>(
     hb.compute_with_proc_mem(swap)?;
     let seconds = time.elapsed().as_secs_f64();
     let time = Instant::now();
-    hb.write_results()?;
+    if write {
+        hb.write_results()?;
+    }
     let write_seconds = time.elapsed().as_secs_f64();
     let iterations = hb.get_iters();
     write_f64s(
@@ -77,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
         eprintln!(
-            "usage: {} <graph> <threads> <log2m> <out prefix> [auto|ram|disk]",
+            "usage: {} <graph> <threads> <log2m> <out prefix> [auto|ram|disk] [write]",
             args[0]
         );
         std::process::exit(2);
@@ -87,6 +92,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("ram") => MemoryPolicy::Ram,
         Some("disk") => MemoryPolicy::Disk,
         Some(other) => return Err(format!("memory must be auto, ram or disk, not {other}").into()),
+    };
+    let write = match args.get(6).map(String::as_str) {
+        None => false,
+        Some("write") => true,
+        Some(other) => {
+            return Err(format!("the sixth argument can only be write, not {other}").into());
+        }
     };
     let (path, out) = (&args[1], &args[4]);
     let threads: usize = args[2].parse()?;
@@ -102,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         macro_rules! by_precision {
             ($($p:literal => $t:ident),*) => {
                 match log2m {
-                    $($p => hyperball::<sparx::centralities::hyper_log_log::$t>(&g, threads, memory, out),)*
+                    $($p => hyperball::<sparx::centralities::hyper_log_log::$t>(&g, threads, memory, write, out),)*
                     _ => Err(format!("log2m must be 4 to 16, not {log2m}").into()),
                 }
             };
