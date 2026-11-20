@@ -423,6 +423,54 @@ fn gpu_triangles_at_every_count_width() {
     }
 }
 
+/// CUDA counts at any width match the CPU's, and overflow like them.
+#[cfg(feature = "nvidia")]
+#[test]
+fn cuda_triangles_at_every_count_width() {
+    use crate::gpu::GpuBackend;
+    let Some(backend) = crate::gpu::test_cuda_backend() else {
+        return;
+    };
+    let mut edges = vec![];
+    for _ in 0..20 {
+        edges.extend([(0, 1), (1, 2), (0, 2)]);
+    }
+    let (path, _fixture) = write_mtx("cuda_parallel20", true, 3, &edges);
+    let g = open::<u32>(&path);
+    let device_graph = backend.upload_graph(&g).unwrap();
+    let error = Triangles::new_gpu(&g, &backend, &device_graph)
+        .expect_err("u8 should overflow")
+        .to_string();
+    assert!(
+        error.contains("more than can be counted (u8)"),
+        "unexpected error: {error}"
+    );
+    let cpu = counts(
+        Triangles::<_, _, _, u32>::new_tx(&g)
+            .unwrap()
+            .all_triangles(),
+    );
+    for result in [
+        counts(
+            Triangles::<_, _, _, u16>::new_gpu_tx(&g, &backend, &device_graph)
+                .unwrap()
+                .all_triangles(),
+        ),
+        counts(
+            Triangles::<_, _, _, u32>::new_gpu_tx(&g, &backend, &device_graph)
+                .unwrap()
+                .all_triangles(),
+        ),
+        counts(
+            Triangles::<_, _, _, u64>::new_gpu_tx(&g, &backend, &device_graph)
+                .unwrap()
+                .all_triangles(),
+        ),
+    ] {
+        assert_eq!(result, cpu);
+    }
+}
+
 /// From precomputed triangles (without the internal "edges in some triangle" flags, so every
 /// edge without support is peeled), both decompositions give the same results.
 #[test]

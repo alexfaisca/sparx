@@ -1,6 +1,6 @@
 //! [`GpuBackend`] on [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12), so on any GPU vendor ---
 //! or on a CPU through a software driver (e.g. Mesa's lavapipe), useful for testing.
-use super::{GpuBackend, HyperBallGpuParams};
+use super::{GpuBackend, GpuCount, HyperBallGpuParams};
 use crate::graph::{self, GraphMemoryMap, IndexType};
 
 use std::sync::mpsc;
@@ -294,6 +294,17 @@ impl WgpuBackend {
         buffer: &wgpu::Buffer,
         out: &mut [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.download_at(buffer, 0, out)
+    }
+
+    /// Reads `buffer`'s `out.len()` bytes from byte `offset` on into `out`, in chunks (`offset`
+    /// and `out.len()` multiples of 4, as copies' are).
+    fn download_at(
+        &self,
+        buffer: &wgpu::Buffer,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),
             size: TRANSFER_CHUNK.min(out.len() as u64).max(4),
@@ -304,7 +315,7 @@ impl WgpuBackend {
             let mut encoder = self.device.create_command_encoder(&Default::default());
             encoder.copy_buffer_to_buffer(
                 buffer,
-                i as u64 * TRANSFER_CHUNK,
+                offset + i as u64 * TRANSFER_CHUNK,
                 &staging,
                 0,
                 chunk.len() as u64,
@@ -426,33 +437,15 @@ struct ArcProductsUniforms {
 /// Bindings of `hyperball.wgsl` before the counter segments'.
 const HYPERBALL_FIXED_BINDINGS: usize = 6;
 
-impl GpuBackend for WgpuBackend {
-    type Graph = WgpuGraph;
-
-    fn upload_graph<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>(
+impl WgpuBackend {
+    /// Copies a CSR (`|V| + 1` offsets and `|E|` neighbours, checked by [`super::csr`]) to device
+    /// memory.
+    pub(crate) fn upload_csr<Ix: IndexType>(
         &self,
-        g: &GraphMemoryMap<N, E, Ix, Dir>,
+        offsets: &[Ix],
+        neighbours: &[Ix],
     ) -> Result<WgpuGraph, Box<dyn std::error::Error>> {
-        let nodes = g.size();
-        let edges = g.width();
-        // offsets index edges, so both must be representable as `u32`
-        if nodes >= u32::MAX as usize || edges > u32::MAX as usize {
-            return Err(format!(
-                "error GPU graphs are indexed by u32: |V| = {nodes} and |E| = {edges} must be \
-                 smaller than {}",
-                u32::MAX
-            )
-            .into());
-        }
-        // SAFETY: the graph's index holds `|V| + 1` offsets and its neighbours `|E|` node ids,
-        // both mapped for as long as `g` lives
-        let (offsets, neighbours) = unsafe {
-            (
-                std::slice::from_raw_parts(g.offsets_ptr(), nodes + 1),
-                std::slice::from_raw_parts(g.neighbours_ptr(), edges),
-            )
-        };
-
+        let (nodes, edges) = (offsets.len() - 1, neighbours.len());
         let copy = wgpu::BufferUsages::COPY_DST;
         let offsets_buffer = self.storage_buffer("offsets", (nodes as u64 + 1) * 4, copy)?;
         let neighbours_buffer = self.storage_buffer("neighbours", edges as u64 * 4, copy)?;
@@ -465,6 +458,18 @@ impl GpuBackend for WgpuBackend {
             offsets: offsets_buffer,
             neighbours: neighbours_buffer,
         })
+    }
+}
+
+impl GpuBackend for WgpuBackend {
+    type Graph = WgpuGraph;
+
+    fn upload_graph<N: graph::N, E: graph::E, Ix: graph::IndexType, Dir: graph::Directedness>(
+        &self,
+        g: &GraphMemoryMap<N, E, Ix, Dir>,
+    ) -> Result<WgpuGraph, Box<dyn std::error::Error>> {
+        let (offsets, neighbours) = super::csr(g)?;
+        self.upload_csr(offsets, neighbours)
     }
 
     fn hyperball(
@@ -630,12 +635,12 @@ impl GpuBackend for WgpuBackend {
         Ok(iteration)
     }
 
-    fn triangles<Ix: graph::IndexType>(
+    fn triangles<Ix: graph::IndexType, C: GpuCount>(
         &self,
         graph: &WgpuGraph,
         edge_over: &[Ix],
         edge_reciprocal: &[Ix],
-        counts: &mut [u32],
+        counts: &mut [C],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (nodes, edges) = (graph.nodes, graph.edges);
         if edge_over.len() != nodes || edge_reciprocal.len() != edges || counts.len() != edges {
@@ -651,15 +656,19 @@ impl GpuBackend for WgpuBackend {
         self.check_storage_buffers(5)?;
         let groups = self.linear_workgroups(edges as u64)?;
 
+        // counts are packed in `C`'s width, little-endian in 32-bit words: the buffer's bytes are
+        // those of `counts`
+        let count_bytes = edges * std::mem::size_of::<C>();
         use wgpu::BufferUsages as U;
         let edge_over_buffer = self.storage_buffer("edge over", nodes as u64 * 4, U::COPY_DST)?;
-        let reciprocal_buffer =
-            self.storage_buffer("reciprocals", edges as u64 * 4, U::COPY_DST)?;
-        let counts_buffer =
-            self.storage_buffer("triangle counts", edges as u64 * 4, U::COPY_SRC)?;
+        let counts_buffer = self.storage_buffer(
+            "triangle counts",
+            count_bytes.next_multiple_of(4) as u64,
+            U::COPY_SRC,
+        )?;
+        let overflow_buffer = self.storage_buffer("triangle count overflow", 4, U::COPY_SRC)?;
         let uniform = self.uniform_buffer::<TrianglesUniforms>("triangles params");
         self.upload_ids(&edge_over_buffer, edge_over)?;
-        self.upload_ids(&reciprocal_buffer, edge_reciprocal)?;
         let uniforms = TrianglesUniforms {
             nodes: nodes as u32,
             edges: edges as u32,
@@ -670,14 +679,15 @@ impl GpuBackend for WgpuBackend {
 
         use wgpu::BufferBindingType as B;
         let storage = |read_only| B::Storage { read_only };
+        let source = include_str!("triangles.wgsl").replace("{{COUNT_BITS}}", &C::BITS.to_string());
         let kernels = self.kernels(
             "triangles",
-            include_str!("triangles.wgsl"),
+            &source,
             &[
                 storage(true),
                 storage(true),
                 storage(true),
-                storage(true),
+                storage(false),
                 storage(false),
                 B::Uniform,
             ],
@@ -689,8 +699,8 @@ impl GpuBackend for WgpuBackend {
                 &graph.offsets,
                 &graph.neighbours,
                 &edge_over_buffer,
-                &reciprocal_buffer,
                 &counts_buffer,
+                &overflow_buffer,
                 &uniform,
             ],
         );
@@ -698,7 +708,30 @@ impl GpuBackend for WgpuBackend {
         Self::dispatch(&mut encoder, &kernels.pipelines[0], &bind_group, groups);
         self.queue.submit([encoder.finish()]);
 
-        self.download(&counts_buffer, bytemuck::cast_slice_mut(counts))
+        let mut overflow = [0u8; 4];
+        self.download(&overflow_buffer, &mut overflow)?;
+        if overflow != [0; 4] {
+            return Err(super::count_overflow::<C>());
+        }
+
+        // whole words straight into `counts`, the last (part of a) word through a copy
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(counts);
+        let whole = count_bytes / 4 * 4;
+        self.download(&counts_buffer, &mut bytes[..whole])?;
+        if whole < count_bytes {
+            let mut last = [0u8; 4];
+            self.download_at(&counts_buffer, whole as u64, &mut last)?;
+            bytes[whole..].copy_from_slice(&last[..count_bytes - whole]);
+        }
+        if cfg!(target_endian = "big") {
+            for count in counts.iter_mut() {
+                *count = count.from_le();
+            }
+        }
+
+        // the device counted upward edges only
+        super::copy_to_downward_edges(edge_reciprocal, counts);
+        Ok(())
     }
 
     fn arc_products(

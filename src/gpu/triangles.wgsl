@@ -2,8 +2,19 @@
 //
 // Neighbour lists are sorted, so every triangle `x < y < z` is found exactly once, by the
 // invocation of its lowest edge `x -> y`, by merging `x`'s and `y`'s neighbours above `y`. It then
-// counts once for each of its 6 (directed) edges --- once per combination of parallel edges, as
-// `Triangles` does on the CPU.
+// counts once for each of its 3 upward edges (`x -> y`, `x -> z` and `y -> z`) --- once per
+// combination of parallel edges, as `Triangles` does on the CPU. Downward edges are left at 0: the
+// host copies their reciprocals' counts (saving uploading the reciprocals, and half the atomics).
+//
+// Counts are `COUNT_BITS` wide (8, 16 or 32, filled in by the host), packed little-endian in `u32`
+// words (atomics being 32-bit only): the words' bytes are then those of the host's array of counts,
+// read back as is. A count already at its largest value when added to sets `overflow` (its carry
+// may then have spoilt its neighbours', which the host then discards).
+
+const COUNT_BITS: u32 = {{COUNT_BITS}}u;
+const PER_WORD: u32 = 32u / COUNT_BITS;
+// the largest count, `2^COUNT_BITS - 1` (shifted down: constant expressions must not overflow)
+const COUNT_MAX: u32 = 0xffffffffu >> (32u - COUNT_BITS);
 
 struct Params {
     nodes: u32,
@@ -16,10 +27,10 @@ struct Params {
 @group(0) @binding(1) var<storage, read> neighbours: array<u32>;
 // per node: offset of its first neighbour above it
 @group(0) @binding(2) var<storage, read> edge_over: array<u32>;
-// per edge `u -> v`: the offset of `v -> u`
-@group(0) @binding(3) var<storage, read> reciprocal: array<u32>;
-// per edge: triangles it is in
-@group(0) @binding(4) var<storage, read_write> counts: array<atomic<u32>>;
+// per upward edge: triangles it is in (`PER_WORD` edges per word)
+@group(0) @binding(3) var<storage, read_write> counts: array<atomic<u32>>;
+// set when a count overflows
+@group(0) @binding(4) var<storage, read_write> overflow: atomic<u32>;
 @group(0) @binding(5) var<uniform> params: Params;
 
 const WORKGROUP_SIZE: u32 = 64u;
@@ -40,8 +51,11 @@ fn source(e: u32) -> u32 {
 }
 
 fn count(e: u32) {
-    atomicAdd(&counts[e], 1u);
-    atomicAdd(&counts[reciprocal[e]], 1u);
+    let shift = (e % PER_WORD) * COUNT_BITS;
+    let old = atomicAdd(&counts[e / PER_WORD], 1u << shift);
+    if (((old >> shift) & COUNT_MAX) == COUNT_MAX) {
+        atomicStore(&overflow, 1u);
+    }
 }
 
 // one invocation per edge (in rows of `num_workgroups.x * WORKGROUP_SIZE` edges)

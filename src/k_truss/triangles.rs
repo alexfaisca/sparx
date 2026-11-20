@@ -281,7 +281,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "nvidia"))]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Triangles<'a, N, E, Ix> {
     /// Computes each edge's triangles on a GPU, as `u8`s (see [`new_gpu_tx`](Self::new_gpu_tx)
     /// for other widths).
@@ -294,7 +294,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType> Triangles<'a, N, E, Ix>
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "nvidia"))]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
     Triangles<'a, N, E, Ix, Tx>
 {
@@ -315,33 +315,52 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, Tx: TriangleCount>
         backend: &B,
         graph: &B::Graph,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let triangles = Self::new_no_compute_impl(g, g.thread_num())?;
+        use portable_atomic::{AtomicU8, AtomicU16, AtomicU32};
+
+        let mut triangles = Self::new_no_compute_impl(g, g.thread_num())?;
         let edge_over = g.edge_over()?;
         let edge_reciprocal = g.edge_reciprocal()?;
+        let (edge_over, edge_reciprocal) = (edge_over.as_slice(), edge_reciprocal.as_slice());
 
-        // read back into a scratch file rather than the heap: one count per arc
-        let c_fn = g.build_cache_filename(CacheFile::Triangles, Some(0))?;
-        let mut counts = ScratchMem::<u32>::new(c_fn, g.width())?;
-        backend.triangles(
-            graph,
-            edge_over.as_slice(),
-            edge_reciprocal.as_slice(),
-            &mut counts,
-        )?;
-        for (t, &c) in triangles.triangles.as_slice().iter().zip(counts.iter()) {
-            if c as usize > Tx::MAX {
-                return Err(format!(
-                    "error an edge is in {c} triangles, more than can be counted ({})",
-                    std::any::type_name::<Tx>()
-                )
-                .into());
+        // counted in `Tx`'s own width when the device can (moving the least data), straight
+        // into the counts
+        let counts = triangles.triangles.as_mut_slice();
+        if let Some(counts) = plain_counts::<Tx::Atomic, AtomicU8, u8>(counts) {
+            backend.triangles(graph, edge_over, edge_reciprocal, counts)?;
+        } else if let Some(counts) = plain_counts::<Tx::Atomic, AtomicU16, u16>(counts) {
+            backend.triangles(graph, edge_over, edge_reciprocal, counts)?;
+        } else if let Some(counts) = plain_counts::<Tx::Atomic, AtomicU32, u32>(counts) {
+            backend.triangles(graph, edge_over, edge_reciprocal, counts)?;
+        } else {
+            // wider: counted in 32 bits (no edge is in more triangles), read back into a
+            // scratch file rather than the heap, and widened
+            let c_fn = g.build_cache_filename(CacheFile::Triangles, Some(0))?;
+            let mut wide = ScratchMem::<u32>::new(c_fn, g.width())?;
+            backend.triangles(graph, edge_over, edge_reciprocal, &mut *wide)?;
+            for (t, &c) in triangles.triangles.as_slice().iter().zip(wide.iter()) {
+                t.set_count(c as usize);
             }
-            t.set_count(c as usize);
         }
 
         triangles.triangles.persist()?;
         Ok(triangles)
     }
+}
+
+/// `counts` as plain `P`s if its atomics are `A`s (`P`'s atomic counterpart), for the device to
+/// write directly.
+#[cfg(any(feature = "gpu", feature = "nvidia"))]
+fn plain_counts<C: 'static, A: 'static, P>(counts: &mut [C]) -> Option<&mut [P]> {
+    if std::any::TypeId::of::<C>() != std::any::TypeId::of::<A>() {
+        return None;
+    }
+    assert!(
+        std::mem::size_of::<A>() == std::mem::size_of::<P>()
+            && std::mem::align_of::<A>() == std::mem::align_of::<P>()
+    );
+    // SAFETY: `C` is `A`, which `portable_atomic` lays out as `P`, its integer (same size and
+    // alignment, checked above); `counts` is borrowed mutably, so nothing else accesses it
+    Some(unsafe { std::slice::from_raw_parts_mut(counts.as_mut_ptr().cast::<P>(), counts.len()) })
 }
 
 #[cfg(test)]
@@ -538,6 +557,21 @@ pub(crate) mod test {
     fn triangles_gpu_match_brute_force() {
         use crate::gpu::GpuBackend;
         let Some(backend) = crate::gpu::test_backend() else {
+            return;
+        };
+        for (name, g) in fixtures() {
+            let device_graph = backend.upload_graph(&g).unwrap();
+            let mut t = Triangles::new_gpu(&g, &backend, &device_graph).unwrap();
+            assert_eq!(counts(&t), brute_force_triangles(&g), "{name}");
+            t.drop_cache().unwrap();
+        }
+    }
+
+    #[cfg(feature = "nvidia")]
+    #[test]
+    fn triangles_cuda_match_brute_force() {
+        use crate::gpu::GpuBackend;
+        let Some(backend) = crate::gpu::test_cuda_backend() else {
             return;
         };
         for (name, g) in fixtures() {

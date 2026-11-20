@@ -24,7 +24,7 @@ pub mod assortativity;
 pub mod centralities;
 pub mod communities;
 pub mod components;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "nvidia"))]
 pub mod gpu;
 pub mod graph;
 pub mod k_core;

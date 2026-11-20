@@ -86,6 +86,8 @@ jobs:
         run: |
           cargo build --release --all-targets --features bench,rayon,petgraph,rustworkx,iter_with_offset
           cargo build --release --all-targets --features gpu,bench,rayon,petgraph,rustworkx,iter_with_offset
+          # CUDA is loaded at runtime: building needs no toolkit
+          cargo build --release --all-targets --features gpu,nvidia,bench
       - name: Each input format alone
         run: |
           cargo build --release --lib --no-default-features --features mtx
@@ -93,7 +95,7 @@ jobs:
           cargo build --release --lib --no-default-features --features nodes_edges
       - name: Each optional feature alone
         run: |
-          for f in rayon petgraph rustworkx iter_with_offset; do
+          for f in rayon petgraph rustworkx iter_with_offset nvidia; do
             cargo check --all-targets --features $f
           done
 

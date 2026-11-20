@@ -669,7 +669,7 @@ impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "nvidia"))]
 impl<'a, N: graph::N, E: graph::E, Ix: graph::IndexType, P: Precision, W: Weight, Dir: Directedness>
     HyperBallInner<'a, N, E, Ix, P, W, Dir>
 {
@@ -1763,7 +1763,7 @@ mod test {
     }
 
     /// Writes `edges` (0-based, directed) as a general MatrixMarket file over `n` nodes.
-    #[cfg(feature = "gpu")]
+    #[cfg(any(feature = "gpu", feature = "nvidia"))]
     fn write_directed_mtx(path: &std::path::Path, n: usize, edges: &[(usize, usize)]) {
         let mut f = std::fs::File::create(path).expect("error creating mtx fixture");
         writeln!(f, "%%MatrixMarket matrix coordinate pattern general").unwrap();
@@ -1775,7 +1775,7 @@ mod test {
     }
 
     /// `n` nodes with `out_degree` pseudo-random (fixed seed) out-neighbours each.
-    #[cfg(feature = "gpu")]
+    #[cfg(any(feature = "gpu", feature = "nvidia"))]
     fn random_directed_edges(n: usize, out_degree: usize) -> Vec<(usize, usize)> {
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut edges = std::collections::BTreeSet::new();
@@ -1804,14 +1804,13 @@ mod test {
     /// Runs `HyperBall` on the CPU and on the GPU (separate graph ids, so separate cache files),
     /// asserting identical counters (unions are exact) and iteration counts, and accumulators
     /// equal up to `f32` rounding.
-    #[cfg(feature = "gpu")]
-    fn assert_gpu_matches_cpu<P: Precision>(
-        backend: &crate::gpu::WgpuBackend,
+    #[cfg(any(feature = "gpu", feature = "nvidia"))]
+    fn assert_gpu_matches_cpu<P: Precision, B: crate::gpu::GpuBackend>(
+        backend: &B,
         path: &std::path::Path,
         id: &str,
         max_depth: Option<usize>,
     ) {
-        use crate::gpu::GpuBackend;
         let open = |suffix: &str| {
             // any graph, directed or not: HyperBall follows arcs out of nodes
             crate::graph::DiGraph::<VoidLabel, VoidLabel, usize>::from_file(
@@ -1871,17 +1870,10 @@ mod test {
         gpu.drop_cache().expect("drop cache should succeed");
     }
 
-    #[cfg(feature = "gpu")]
-    #[test]
-    fn hyperball_gpu_matches_cpu() {
-        let Some(backend) = gpu_backend() else {
-            return;
-        };
-        let dir = unique_test_dir("hyperball_gpu_test");
-        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
-        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
-        let run_tag = unique_run_tag();
-
+    /// The GPU tests' graphs, written to `dir`: a de Bruijn graph, a grid, a directed graph and a
+    /// mostly isolated one, by name.
+    #[cfg(any(feature = "gpu", feature = "nvidia"))]
+    fn write_gpu_fixtures(dir: &std::path::Path) -> [(&'static str, std::path::PathBuf); 4] {
         let (n, edges) = de_bruijn_edges(5);
         let debruijn = dir.join("debruijn.mtx");
         write_symmetric_mtx(&debruijn, n, &edges);
@@ -1893,19 +1885,30 @@ mod test {
         // mostly isolated nodes
         let sparse = dir.join("sparse.mtx");
         write_symmetric_mtx(&sparse, 50, &[(0, 1), (1, 2), (10, 11)]);
+        [
+            ("debruijn", debruijn),
+            ("grid", grid),
+            ("directed", directed),
+            ("sparse", sparse),
+        ]
+    }
 
-        for (name, path) in [
-            ("debruijn", &debruijn),
-            ("grid", &grid),
-            ("directed", &directed),
-            ("sparse", &sparse),
-        ] {
+    /// `backend`'s *HyperBall* matches the CPU's on `fixtures` (see [`write_gpu_fixtures`]), at
+    /// every precision, and capped below the grid's diameter.
+    #[cfg(any(feature = "gpu", feature = "nvidia"))]
+    fn assert_fixtures_match_cpu<B: crate::gpu::GpuBackend>(
+        backend: &B,
+        fixtures: &[(&'static str, std::path::PathBuf)],
+        prefix: &str,
+        run_tag: &str,
+    ) {
+        for (name, path) in fixtures {
             macro_rules! check {
                 ($($p:ident),*) => {$(
-                    assert_gpu_matches_cpu::<$p>(
-                        &backend,
+                    assert_gpu_matches_cpu::<$p, B>(
+                        backend,
                         path,
-                        &format!("hb_gpu_{name}_{}_{run_tag}", stringify!($p)),
+                        &format!("{prefix}_{name}_{}_{run_tag}", stringify!($p)),
                         None,
                     );
                 )*};
@@ -1920,14 +1923,44 @@ mod test {
             );
         }
         // capped below the grid's diameter (46), on both iteration parities
+        let (_, grid) = &fixtures[1];
         for max_depth in [7, 8] {
-            assert_gpu_matches_cpu::<Precision6>(
-                &backend,
-                &grid,
-                &format!("hb_gpu_grid_depth{max_depth}_{run_tag}"),
+            assert_gpu_matches_cpu::<Precision6, B>(
+                backend,
+                grid,
+                &format!("{prefix}_grid_depth{max_depth}_{run_tag}"),
                 Some(max_depth),
             );
         }
+    }
+
+    #[cfg(feature = "nvidia")]
+    #[test]
+    fn hyperball_cuda_matches_cpu() {
+        let Some(backend) = crate::gpu::test_cuda_backend() else {
+            return;
+        };
+        let dir = unique_test_dir("hyperball_cuda_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let fixtures = write_gpu_fixtures(&dir);
+        assert_fixtures_match_cpu(&backend, &fixtures, "hb_cuda", &run_tag);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn hyperball_gpu_matches_cpu() {
+        let Some(backend) = gpu_backend() else {
+            return;
+        };
+        let dir = unique_test_dir("hyperball_gpu_test");
+        let _fixture = crate::graph::test_utils::CacheGuard::dir(dir.clone());
+        std::fs::create_dir_all(&dir).expect("error creating tmp dir");
+        let run_tag = unique_run_tag();
+        let fixtures = write_gpu_fixtures(&dir);
+        assert_fixtures_match_cpu(&backend, &fixtures, "hb_gpu", &run_tag);
+        let [_, (_, grid), (_, directed), (_, sparse)] = &fixtures;
 
         // buffers of at most 16 KiB split the counters in several (unevenly sized) segments ---
         // e.g. the grid's 576 counters in 3 at precision 6 and 9 at precision 8 --- while the
@@ -1938,7 +1971,7 @@ mod test {
             .with_max_storage_buffers(48);
         macro_rules! check_segmented {
             ($name:literal, $path:expr, $($p:ident),*) => {$(
-                assert_gpu_matches_cpu::<$p>(
+                assert_gpu_matches_cpu::<$p, _>(
                     &segmented,
                     $path,
                     &format!("hb_gpu_segmented_{}_{}_{run_tag}", $name, stringify!($p)),
@@ -1974,7 +2007,7 @@ mod test {
             error.contains("GPU buffers are needed"),
             "unexpected error: {error}"
         );
-        assert_gpu_matches_cpu::<Precision6>(
+        assert_gpu_matches_cpu::<Precision6, _>(
             &segmented,
             &grid,
             &format!("hb_gpu_segmented_grid_depth7_{run_tag}"),

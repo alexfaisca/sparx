@@ -6,6 +6,14 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 ### Added
 
+* The `nvidia` feature: `gpu::CudaBackend`, a `GpuBackend` on CUDA (NVIDIA GPUs, through
+  `cudarc`), with CUDA kernels for *HyperBall* (`HyperBallInner::new_gpu`) and per-edge triangle
+  counts (`Triangles::new_gpu`), compiled at runtime by NVRTC for the device found: building needs
+  no CUDA toolkit, running needs the NVIDIA driver and NVRTC (CUDA 13). Degree assortativity, which
+  has no CUDA kernels, is handed to wgpu with the `gpu` feature (and fails without it).
+  `gpu::Backend` is the backend to use: `CudaBackend` with `nvidia` (whether or not `gpu` is
+  enabled), `WgpuBackend` otherwise.
+
 * `shared_slice::MemoryPolicy` (`Auto`, `Ram`, `Disk`): where algorithms keep their working
   memory, process wide: `set_memory_policy` and `memory_policy`, initially the `SPARX_MEMORY`
   environment variable's (`auto` by default). `Auto` keeps it in RAM while it fits half the
@@ -17,6 +25,12 @@ All notable changes to `sparx-graph` (the Rust crate) and its Python bindings.
 
 ### Changed
 
+* **Breaking:** `GpuBackend::triangles` takes its counts as `&mut [C]`, `C` a `gpu::GpuCount`
+  (`u8`, `u16` or `u32`), rather than `&mut [u32]`: devices count in the result's own width
+  (packed in 32-bit words), so that `Triangles::new_gpu` reads 4 times less back for `u8` counts,
+  straight into its results. Devices no longer receive the edges' reciprocals either, counting
+  upward edges only (the host copying their counts to downward ones): 2.7 times faster triangle
+  counts on wgpu on a 4M node graph (400 to 146 ms).
 * Every algorithm's scratch arrays, and its results while it computes them, follow the memory
   policy: in RAM while they fit (`MemoryPolicy::Auto`, the default), the results written to the
   cache once computed. They were all memory mapped from the graph's cache, written back to the
