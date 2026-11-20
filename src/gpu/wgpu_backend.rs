@@ -393,7 +393,13 @@ fn hyperball_shader(segments: usize) -> String {
         read_next += &format!("        case {k}u: {{ return next_{k}[i]; }}\n");
         write_next += &format!("        case {k}u: {{ next_{k}[i] = value; }}\n");
     }
-    include_str!("hyperball.wgsl")
+    // (line endings normalized on Windows: a checkout there may have converted the shader's
+    // to CRLF, which the templates' `\n`s below wouldn't match)
+    #[cfg(windows)]
+    let shader = include_str!("hyperball.wgsl").replace("\r\n", "\n");
+    #[cfg(not(windows))]
+    let shader = include_str!("hyperball.wgsl");
+    shader
         .replace("{{SEGMENT_BINDINGS}}", &bindings)
         .replace("{{READ_CURRENT_CASES}}\n", &read_current)
         .replace("{{READ_NEXT_CASES}}\n", &read_next)

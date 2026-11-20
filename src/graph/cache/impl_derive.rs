@@ -518,6 +518,17 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
             register_derived(&self.cache_id()?, &hashed_id)?;
             for f in files {
                 let to = f.to_string_lossy().replace(&build_hashed_id, &hashed_id);
+                // Windows can't rename over a read-only file, which a concurrent builder's
+                // (renamed in place first, and the same, as builds are deterministic) is: keep
+                // theirs
+                #[cfg(windows)]
+                if let Err(e) = std::fs::rename(&f, &to) {
+                    if !Path::new(&to).exists() {
+                        return Err(e.into());
+                    }
+                    std::fs::remove_file(&f)?;
+                }
+                #[cfg(not(windows))]
                 std::fs::rename(&f, to)?;
             }
             Ok(())

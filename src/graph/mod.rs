@@ -472,16 +472,18 @@ impl<N: crate::graph::N, E: crate::graph::E, Ix: crate::graph::IndexType, Dir: D
         thread_count: Option<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if graph_cache.readonly {
-            let graph = Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.neighbors_file)? });
-            let index = Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.offsets_file)? });
+            let graph = Arc::new(unsafe { memmap2::Mmap::map(&*graph_cache.neighbors_file)? });
+            let index = Arc::new(unsafe { memmap2::Mmap::map(&*graph_cache.offsets_file)? });
             let metalabels = Arc::new(fst::Map::new(unsafe {
                 memmap2::MmapOptions::new().map(&File::open(&graph_cache.metalabel_filename)?)?
             })?);
             // always mmapped, regardless of `N`/`E::is_labeled()`: the backing files are
             // guaranteed non-empty (at least 1 byte) even for zero-sized label types, see
             // `AbstractedProceduralMemoryMut::from_file`'s `.max(1)` sizing.
-            let node_labels = Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.nodelabel_file)? });
-            let edge_labels = Arc::new(unsafe { memmap2::Mmap::map(&graph_cache.edgelabel_file)? });
+            let node_labels =
+                Arc::new(unsafe { memmap2::Mmap::map(&*graph_cache.nodelabel_file)? });
+            let edge_labels =
+                Arc::new(unsafe { memmap2::Mmap::map(&*graph_cache.edgelabel_file)? });
             let edge_size = std::mem::size_of::<Ix>();
             let thread_count = thread_count.unwrap_or(1).max(1);
             let exports = 0u8;

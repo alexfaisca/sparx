@@ -1,0 +1,2 @@
+# shaders are templated by line (see src/gpu/wgpu_backend.rs): keep their line endings LF
+*.wgsl text eol=lf

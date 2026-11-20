@@ -454,8 +454,9 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                         if offset == file_length as usize {
                             file_length = (if mmap.is_empty() { 1 } else { mmap.len() } as u64)
                                 .saturating_mul(2);
-                            helper_file.set_len(file_length)?;
+                            // unmapped before resizing: Windows can't resize mapped files
                             drop(mmap);
+                            helper_file.set_len(file_length)?;
                             mmap = unsafe {
                                 MmapOptions::new()
                                     .len(file_length as usize)
@@ -475,8 +476,9 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                     }
                     // resize to input length
                     file_length = offset as u64;
-                    helper_file.set_len(file_length)?;
+                    // unmapped before resizing: Windows can't resize mapped files
                     drop(mmap);
+                    helper_file.set_len(file_length)?;
                     mmap = unsafe {
                         MmapOptions::new()
                             .len(file_length as usize)
@@ -784,7 +786,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
                 let builder = MapBuilder::new(empty_fst.clone())?;
                 builder.finish()?;
                 // make it readonly :)
-                Self::set_file_readonly(&empty_fst)?;
+                Self::set_file_readonly(&empty_fst, &metalabel_filename)?;
                 empty_fst.flush()?;
                 empty_fst
             }
@@ -1522,10 +1524,27 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         ))
     }
 
-    fn set_file_readonly(file: &File) -> Result<(), Box<dyn std::error::Error>> {
+    /// Makes `file` (opened from `path`) read-only.
+    #[cfg(not(windows))]
+    fn set_file_readonly(
+        file: &File,
+        _path: impl AsRef<Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut permissions = file.metadata()?.permissions();
         permissions.set_readonly(true);
         Ok(file.set_permissions(permissions)?)
+    }
+
+    /// Makes `file` (opened from `path`) read-only: by its path, as changing a file's
+    /// attributes through a handle needs write access, which handles opened to read lack.
+    #[cfg(windows)]
+    fn set_file_readonly(
+        _file: &File,
+        path: impl AsRef<Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut permissions = std::fs::metadata(path.as_ref())?.permissions();
+        permissions.set_readonly(true);
+        Ok(std::fs::set_permissions(path, permissions)?)
     }
 
     /// Checks whether the (complete, sorted) graph is symmetric: whether every arc has a reverse.
@@ -1549,14 +1568,14 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
 
     fn finish<P: AsRef<Path>>(&mut self, dataset: P) -> Result<(), Box<dyn std::error::Error>> {
         // make all files read-only and cleanup
-        for file in [
-            &mut self.offsets_file,
-            &mut self.neighbors_file,
-            &mut self.edgelabel_file,
-            &mut self.nodelabel_file,
-            &mut self.metalabel_file,
+        for (file, path) in [
+            (&mut self.offsets_file, &self.offsets_filename),
+            (&mut self.neighbors_file, &self.neighbors_filename),
+            (&mut self.edgelabel_file, &self.edgelabel_filename),
+            (&mut self.nodelabel_file, &self.nodelabel_filename),
+            (&mut self.metalabel_file, &self.metalabel_filename),
         ] {
-            Self::set_file_readonly(file)?;
+            Self::set_file_readonly(file, path)?;
             // flush needed because in multithreaded accesses wihtout it memory is in undefined state
             file.flush()?;
         }
@@ -1583,7 +1602,7 @@ impl<N: super::N, E: super::E, Ix: IndexType> GraphCache<N, E, Ix> {
         let mut mf = OpenOptions::new()
             .read(true)
             .open(self.metadata_filename())?;
-        Self::set_file_readonly(&mf)?;
+        Self::set_file_readonly(&mf, self.metadata_filename())?;
         mf.flush()?;
         // remove any tmp files that may have been used to (re)build `GraphCache` instance
         self.cleanup_cache_by_target(FileType::MetaLabel(H::H))?;

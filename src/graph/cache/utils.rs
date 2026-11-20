@@ -1,9 +1,10 @@
 use glob::glob;
 use regex::Regex;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fmt::Write,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -674,6 +675,15 @@ mod test {
         File::create(p).expect("failed to create file");
     }
 
+    /// The absolute path of `components` from the root, with the platform's separator
+    /// (e.g. `/some/dir/file` on Unix, `\some\dir\file` on Windows).
+    #[allow(dead_code)]
+    fn rooted(components: &[&str]) -> String {
+        let mut path = PathBuf::from(std::path::MAIN_SEPARATOR_STR);
+        path.extend(components);
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn test_apply_permutations() {
         apply_permutation_in_place::<usize, f64>(&mut [], &mut [], &mut []);
@@ -742,15 +752,24 @@ mod test {
 
     #[test]
     fn test_graph_id_from_cache_filename() {
-        let p = "/data/cache/edges_foo123.bin".to_string();
+        let p = rooted(&["data", "cache", "edges_foo123.bin"]);
         let id = graph_id_from_cache_file_name(p).unwrap();
         assert_eq!(id, "foo123");
-        let p = "/some/dir/neighbors_my_graph_42.mtx".to_string();
+        let p = rooted(&["some", "dir", "neighbors_my_graph_42.mtx"]);
         let id = graph_id_from_cache_file_name(p).unwrap();
         assert_eq!(id, "42");
-        // Windows? Not allowed! muahahahha :3
-        let p = r"C:\cache\OFFSETS_theID123.DAT".to_string();
-        assert!(graph_id_from_cache_file_name(p).is_err());
+        // (off Windows, where `\` separates nothing)
+        #[cfg(not(windows))]
+        {
+            let p = r"C:\cache\OFFSETS_theID123.DAT".to_string();
+            assert!(graph_id_from_cache_file_name(p).is_err());
+        }
+        // (on Windows, where `\` separates the directories from the file name)
+        #[cfg(windows)]
+        {
+            let p = r"C:\cache\OFFSETS_theID123.DAT".to_string();
+            assert_eq!(graph_id_from_cache_file_name(p).unwrap(), "theID123");
+        }
         // lacks the required "<prefix>_<id>.<ext>" pattern
         let p = "file.txt".to_string();
         assert!(graph_id_from_cache_file_name(p).is_err());
@@ -763,7 +782,7 @@ mod test {
 
     #[test]
     fn test_graph_id_and_dir_from_cache_filename() {
-        let p = "/data/cache/edges_aaabbb123.bin";
+        let p = &rooted(&["data", "cache", "edges_aaabbb123.bin"]);
         let (id, dir) = graph_id_and_dir_from_cache_file_name(p, &FileType::Edges(H::H)).unwrap();
 
         assert_eq!(id, "aaabbb123");
@@ -779,8 +798,11 @@ mod test {
         assert_eq!(id, "TheID123");
         assert_eq!(dir, PathBuf::from("")); // function uses Path::new("")
 
-        let p =
-            "/any/dir/NEIGHBORS_123aef543ba2352612acdefddfe3253315435aaa9090982035808abbeeecc.bin";
+        let p = &rooted(&[
+            "any",
+            "dir",
+            "NEIGHBORS_123aef543ba2352612acdefddfe3253315435aaa9090982035808abbeeecc.bin",
+        ]);
         let (id, dir) =
             graph_id_and_dir_from_cache_file_name(p, &FileType::NodeLabel(H::H)).unwrap();
 
@@ -794,8 +816,11 @@ mod test {
             .to_path_buf();
         assert_eq!(dir, expected_dir);
 
-        let p =
-            "/any/dir/NEIGHBORS_1ebac462355920468dededed35820358105814305820851058bcadefedecc.bin";
+        let p = &rooted(&[
+            "any",
+            "dir",
+            "NEIGHBORS_1ebac462355920468dededed35820358105814305820851058bcadefedecc.bin",
+        ]);
         let (id, dir) = graph_id_and_dir_from_cache_file_name(p, &FileType::Test(H::H)).unwrap();
         assert_eq!(
             id,
@@ -809,36 +834,36 @@ mod test {
     #[test]
     fn test_pers_name_edges_no_seq() {
         // original filename matches "<prefix>_<id>.<ext>"
-        let orig = "/some/dir/EDGES_myId.mmap";
+        let orig = &rooted(&["some", "dir", "EDGES_myId.mmap"]);
         let got = pers_cache_file_name(orig, &FileType::Edges(H::H), None).unwrap();
         // pers_* always ends with ".mmap"
-        assert_eq!(got, "/some/dir/edges_myId.mmap");
+        assert_eq!(got, rooted(&["some", "dir", "edges_myId.mmap"]));
     }
 
     #[test]
     fn test_pers_name_index_with_seq() {
-        let orig = "/d/OFFSETS_idX.mmap";
+        let orig = &rooted(&["d", "OFFSETS_idX.mmap"]);
         let got = pers_cache_file_name(orig, &FileType::Index(H::H), Some(7)).unwrap();
         // pers_* with seq => "<suffix>_<seq>_<id>.mmap"
-        assert_eq!(got, "/d/index_7_idX.mmap");
+        assert_eq!(got, rooted(&["d", "index_7_idX.mmap"]));
     }
 
     // ---- cache_file_name -----------------------------------------------------
 
     #[test]
     fn test_cache_name_index_no_seq_mmap() {
-        let orig = "/d/OFFSETS_idX.whatever";
+        let orig = &rooted(&["d", "OFFSETS_idX.whatever"]);
         let got = cache_file_name(orig, &FileType::Index(H::H), None).unwrap();
         // no seq => ".mmap"
-        assert_eq!(got, "/d/index_idX.mmap");
+        assert_eq!(got, rooted(&["d", "index_idX.mmap"]));
     }
 
     #[test]
     fn test_cache_name_index_with_seq_tmp() {
-        let orig = "/d/OFFSETS_idX.whatever";
+        let orig = &rooted(&["d", "OFFSETS_idX.whatever"]);
         let got = cache_file_name(orig, &FileType::Index(H::H), Some(3)).unwrap();
         // seq => ".tmp"
-        assert_eq!(got, "/d/index_3_idX.tmp");
+        assert_eq!(got, rooted(&["d", "index_3_idX.tmp"]));
     }
 
     // ---- id_for_subgraph_export ---------------------------------------------
